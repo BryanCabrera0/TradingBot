@@ -12,8 +12,7 @@ Ranking criteria:
 """
 
 import logging
-import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -163,7 +162,7 @@ class MarketScanner:
         if (
             self._last_scan_results
             and self._last_scan_time
-            and (datetime.now() - self._last_scan_time).seconds < self.config.cache_seconds
+            and (datetime.now() - self._last_scan_time).total_seconds() < self.config.cache_seconds
         ):
             logger.info(
                 "Using cached scan results (%d tickers, scanned %s ago)",
@@ -183,7 +182,7 @@ class MarketScanner:
         universe = get_full_universe()
 
         # Try to add today's market movers from Schwab
-        if self.schwab is not None:
+        if self.config.include_movers and self.schwab is not None:
             try:
                 movers = self._fetch_movers()
                 for ticker in movers:

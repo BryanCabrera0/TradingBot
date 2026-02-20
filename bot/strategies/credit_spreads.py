@@ -9,7 +9,6 @@ from bot.analysis import (
     find_option_by_delta,
     find_spread_wing,
 )
-from bot.schwab_client import SchwabClient
 from bot.strategies.base import BaseStrategy, TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -212,8 +211,9 @@ class CreditSpreadStrategy(BaseStrategy):
                 ))
 
             # DTE exit: close if approaching expiration
-            dte = pos.get("dte_remaining", 999)
-            if dte <= 5:
+            # Use elif to avoid duplicate close signals for the same position.
+            elif pos.get("dte_remaining", 999) <= 5:
+                dte = pos.get("dte_remaining", 999)
                 self.logger.info(
                     "DTE EXIT on %s: %d days to expiration", pos.get("symbol"), dte
                 )

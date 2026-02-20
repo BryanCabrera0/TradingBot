@@ -89,6 +89,20 @@ class ScheduleConfig:
 
 
 @dataclass
+class LLMConfig:
+    enabled: bool = False
+    # "ollama" for local models, "openai" for cloud models
+    provider: str = "ollama"
+    model: str = "llama3.1:8b"
+    base_url: str = "http://127.0.0.1:11434"
+    mode: str = "advisory"  # "advisory" or "blocking"
+    risk_style: str = "moderate"  # "conservative" | "moderate" | "aggressive"
+    timeout_seconds: int = 20
+    temperature: float = 0.1
+    min_confidence: float = 0.55
+
+
+@dataclass
 class BotConfig:
     trading_mode: str = "paper"
     schwab: SchwabConfig = field(default_factory=SchwabConfig)
@@ -101,6 +115,7 @@ class BotConfig:
     )
     risk: RiskConfig = field(default_factory=RiskConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     log_level: str = "INFO"
     log_file: str = "logs/tradingbot.log"
 
@@ -133,6 +148,13 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     env_mode = os.getenv("TRADING_MODE")
     if env_mode:
         cfg.trading_mode = env_mode
+
+    cfg.llm.enabled = _env_bool("LLM_ENABLED", cfg.llm.enabled)
+    cfg.llm.provider = os.getenv("LLM_PROVIDER", cfg.llm.provider)
+    cfg.llm.model = os.getenv("LLM_MODEL", cfg.llm.model)
+    cfg.llm.base_url = os.getenv("LLM_BASE_URL", cfg.llm.base_url)
+    cfg.llm.mode = os.getenv("LLM_MODE", cfg.llm.mode)
+    cfg.llm.risk_style = os.getenv("LLM_RISK_STYLE", cfg.llm.risk_style)
 
     return cfg
 
@@ -180,7 +202,21 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
             if hasattr(cfg.schedule, key):
                 setattr(cfg.schedule, key, val)
 
+    llm = raw.get("llm", {})
+    if llm:
+        for key, val in llm.items():
+            if hasattr(cfg.llm, key):
+                setattr(cfg.llm, key, val)
+
     log_cfg = raw.get("logging", {})
     if log_cfg:
         cfg.log_level = log_cfg.get("level", cfg.log_level)
         cfg.log_file = log_cfg.get("file", cfg.log_file)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}

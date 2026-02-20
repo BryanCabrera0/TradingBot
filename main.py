@@ -28,7 +28,6 @@ Usage:
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -47,6 +46,7 @@ def setup_logging(level: str = "INFO", log_file: str = "logs/tradingbot.log") ->
     # Root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
+    root_logger.handlers.clear()
 
     # Console handler
     console = logging.StreamHandler(sys.stdout)
@@ -120,6 +120,10 @@ def main() -> None:
         help="Show paper trading performance report and exit",
     )
     parser.add_argument(
+        "--preflight-only", action="store_true",
+        help="Run startup checks and exit without starting the bot",
+    )
+    parser.add_argument(
         "--log-level", default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level from config",
@@ -170,9 +174,30 @@ def main() -> None:
     # Create and run the bot
     bot = TradingBot(config)
 
+    if config.trading_mode == "live":
+        logger.info("Running live preflight checks...")
+        try:
+            bot.validate_live_readiness()
+        except Exception as e:
+            logger.error("Live preflight failed: %s", e)
+            sys.exit(1)
+    elif args.preflight_only:
+        logger.info("Running paper-mode connectivity preflight...")
+        try:
+            bot.connect()
+            bot.validate_llm_readiness()
+        except Exception as e:
+            logger.error("Paper preflight failed: %s", e)
+            sys.exit(1)
+
+    if args.preflight_only:
+        print("Preflight checks passed.")
+        return
+
     if args.once:
         logger.info("Running single scan cycle...")
         bot.connect()
+        bot.validate_llm_readiness()
         bot.scan_and_trade()
         if config.trading_mode == "paper":
             show_report()

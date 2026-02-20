@@ -12,13 +12,14 @@ This is the brain of the bot. It:
 import logging
 import time
 import traceback
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 
 import schedule
 
 from bot.config import BotConfig, load_config
 from bot.schwab_client import SchwabClient
+from bot.llm_advisor import LLMAdvisor
 from bot.paper_trader import PaperTrader
 from bot.risk_manager import RiskManager
 from bot.market_scanner import MarketScanner
@@ -28,6 +29,8 @@ from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
+
+LIVE_SUPPORTED_ENTRY_STRATEGIES = {"credit_spreads", "covered_calls"}
 
 
 class TradingBot:
@@ -41,11 +44,12 @@ class TradingBot:
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
         self.paper_trader = PaperTrader() if self.is_paper else None
+        self.llm_advisor: Optional[LLMAdvisor] = None
+        if self.config.llm.enabled:
+            self.llm_advisor = LLMAdvisor(self.config.llm)
 
-        # Initialize Schwab client (needed for both modes — scanner needs market data)
-        self.schwab: Optional[SchwabClient] = None
-        if not self.is_paper or self.config.scanner.enabled:
-            self.schwab = SchwabClient(self.config.schwab)
+        # Market data is required in both paper and live modes.
+        self.schwab = SchwabClient(self.config.schwab)
 
         # Initialize market scanner
         self.scanner: Optional[MarketScanner] = None
@@ -74,23 +78,111 @@ class TradingBot:
             len(self.strategies),
             scanner_status,
         )
+        if self.llm_advisor:
+            logger.info(
+                "LLM advisor enabled | Provider: %s | Model: %s | Mode: %s | Risk style: %s",
+                self.config.llm.provider,
+                self.config.llm.model,
+                self.config.llm.mode,
+                self.config.llm.risk_style,
+            )
 
     # ── Connection ───────────────────────────────────────────────────
 
     def connect(self) -> None:
-        """Connect to the Schwab API (live mode) or initialize paper trader."""
+        """Connect to Schwab API for market data and/or live trading."""
+        self.schwab.connect()
+
         if self.is_paper:
             logger.info(
-                "Paper trading mode — no API connection needed. "
-                "Balance: $%s", f"{self.paper_trader.get_account_balance():,.2f}"
+                "Paper trading mode — Schwab market data connected. "
+                "Paper balance: $%s",
+                f"{self.paper_trader.get_account_balance():,.2f}",
             )
             return
 
-        if self.schwab is None:
-            raise RuntimeError("Schwab client not initialized")
-        self.schwab.connect()
+        account_hash = self.schwab.resolve_account_hash(require_unique=True)
         balance = self.schwab.get_account_balance()
-        logger.info("Connected to Schwab API. Account balance: $%s", f"{balance:,.2f}")
+        logger.info(
+            "Connected to Schwab API | Account: ...%s | Balance: $%s",
+            account_hash[-4:],
+            f"{balance:,.2f}",
+        )
+
+    def validate_live_readiness(self) -> None:
+        """Run live-mode startup checks and fail fast on unsafe setup."""
+        if self.is_paper:
+            return
+
+        enabled = self._enabled_strategy_names()
+        unsupported = sorted(enabled - LIVE_SUPPORTED_ENTRY_STRATEGIES)
+        if unsupported:
+            raise RuntimeError(
+                "Live execution currently supports only "
+                "credit_spreads and covered_calls. "
+                f"Disable unsupported strategies: {', '.join(unsupported)}"
+            )
+        if not enabled:
+            raise RuntimeError("No enabled strategies in config.")
+
+        self.connect()
+        self._validate_llm_readiness()
+
+        probe_symbol = self.config.watchlist[0] if self.config.watchlist else "SPY"
+        quote = self.schwab.get_quote(probe_symbol)
+        quote_ref = quote.get("quote", quote)
+        probe_price = float(quote_ref.get("lastPrice", quote_ref.get("mark", 0.0)))
+        if probe_price <= 0:
+            raise RuntimeError(
+                f"Could not retrieve a valid live quote for {probe_symbol}."
+            )
+        logger.info("Live preflight quote check passed: %s @ $%.2f", probe_symbol, probe_price)
+
+        chain_data, underlying_price = self._get_chain_data(probe_symbol)
+        if not chain_data or underlying_price <= 0:
+            raise RuntimeError(
+                f"Could not retrieve valid option-chain data for {probe_symbol}."
+            )
+        logger.info(
+            "Live preflight option-chain check passed: %s @ $%.2f",
+            probe_symbol,
+            underlying_price,
+        )
+
+        logger.warning(
+            "Live exit automation currently requires tracked strategy metadata. "
+            "Monitor open live positions closely."
+        )
+
+    def _validate_llm_readiness(self) -> None:
+        """Validate optional LLM advisor connectivity/configuration."""
+        if not self.llm_advisor:
+            return
+
+        ok, message = self.llm_advisor.health_check()
+        if ok:
+            logger.info("LLM advisor check passed: %s", message)
+            return
+
+        if self.config.llm.mode == "blocking":
+            raise RuntimeError(f"LLM advisor check failed in blocking mode: {message}")
+
+        logger.warning("LLM advisor check failed (advisory mode): %s", message)
+
+    def validate_llm_readiness(self) -> None:
+        """Public wrapper for LLM readiness checks."""
+        self._validate_llm_readiness()
+
+    def _enabled_strategy_names(self) -> set[str]:
+        """Return enabled strategy identifiers from config."""
+        enabled: set[str] = set()
+        if self.config.credit_spreads.enabled:
+            enabled.add("credit_spreads")
+        if self.config.iron_condors.enabled:
+            enabled.add("iron_condors")
+        if self.config.covered_calls.enabled:
+            enabled.add("covered_calls")
+        return enabled
 
     # ── Market Hours Check ───────────────────────────────────────────
 
@@ -217,6 +309,7 @@ class TradingBot:
     def _check_exits(self) -> None:
         """Check all open positions for exit conditions."""
         if self.is_paper:
+            self._refresh_paper_position_values()
             positions = self.paper_trader.get_positions()
         else:
             positions = self._get_tracked_positions()
@@ -233,6 +326,117 @@ class TradingBot:
 
         for signal in all_exit_signals:
             self._execute_exit(signal)
+
+    def _refresh_paper_position_values(self) -> None:
+        """Refresh paper position marks using the latest option-chain mids."""
+        if not self.paper_trader:
+            return
+
+        positions = self.paper_trader.get_positions()
+        if not positions:
+            return
+
+        chain_cache: dict[str, dict] = {}
+        position_marks: dict[str, float] = {}
+
+        for position in positions:
+            position_id = position.get("position_id")
+            symbol = position.get("symbol")
+            if not position_id or not symbol:
+                continue
+
+            if symbol not in chain_cache:
+                chain_data, _ = self._get_chain_data(symbol)
+                chain_cache[symbol] = chain_data
+
+            chain_data = chain_cache.get(symbol, {})
+            if not chain_data:
+                continue
+
+            mark = self._estimate_paper_position_value(position, chain_data)
+            if mark is not None:
+                position_marks[position_id] = mark
+
+        if position_marks:
+            self.paper_trader.update_position_values(position_marks)
+
+    def _estimate_paper_position_value(
+        self, position: dict, chain_data: dict
+    ) -> Optional[float]:
+        """Estimate current debit-to-close for a paper position."""
+        details = position.get("details", {})
+        strategy = position.get("strategy", "")
+
+        expiration = self._extract_expiration_key(
+            details.get("expiration", position.get("expiration", ""))
+        )
+        if not expiration:
+            return None
+
+        calls = chain_data.get("calls", {}).get(expiration, [])
+        puts = chain_data.get("puts", {}).get(expiration, [])
+
+        if strategy == "bull_put_spread":
+            short_mid = self._find_option_mid(puts, details.get("short_strike"))
+            long_mid = self._find_option_mid(puts, details.get("long_strike"))
+            if short_mid is None or long_mid is None:
+                return None
+            return round(max(short_mid - long_mid, 0.0), 2)
+
+        if strategy == "bear_call_spread":
+            short_mid = self._find_option_mid(calls, details.get("short_strike"))
+            long_mid = self._find_option_mid(calls, details.get("long_strike"))
+            if short_mid is None or long_mid is None:
+                return None
+            return round(max(short_mid - long_mid, 0.0), 2)
+
+        if strategy == "iron_condor":
+            put_short = self._find_option_mid(puts, details.get("put_short_strike"))
+            put_long = self._find_option_mid(puts, details.get("put_long_strike"))
+            call_short = self._find_option_mid(calls, details.get("call_short_strike"))
+            call_long = self._find_option_mid(calls, details.get("call_long_strike"))
+            if None in (put_short, put_long, call_short, call_long):
+                return None
+            return round(max((put_short - put_long) + (call_short - call_long), 0.0), 2)
+
+        if strategy == "covered_call":
+            short_mid = self._find_option_mid(calls, details.get("short_strike"))
+            if short_mid is None:
+                return None
+            return round(max(short_mid, 0.0), 2)
+
+        return None
+
+    @staticmethod
+    def _extract_expiration_key(raw_expiration: object) -> str:
+        """Normalize expiration formats to YYYY-MM-DD."""
+        if raw_expiration is None:
+            return ""
+
+        exp = str(raw_expiration).strip()
+        if not exp:
+            return ""
+
+        if "T" in exp:
+            exp = exp.split("T", 1)[0]
+        if ":" in exp:
+            exp = exp.split(":", 1)[0]
+        return exp
+
+    @staticmethod
+    def _find_option_mid(options: list[dict], strike: Optional[float]) -> Optional[float]:
+        """Locate an option by strike and return its mid price."""
+        if strike is None:
+            return None
+
+        for option in options:
+            try:
+                if abs(float(option.get("strike", 0.0)) - float(strike)) < 0.01:
+                    return float(option.get("mid", 0.0))
+            except (TypeError, ValueError):
+                continue
+
+        return None
 
     # ── Trade Execution ──────────────────────────────────────────────
 
@@ -251,11 +455,14 @@ class TradingBot:
             )
             return False
 
+        if not self._review_entry_with_llm(signal):
+            return False
+
         analysis = signal.analysis
         logger.info(
             "EXECUTING TRADE: %s on %s | %d contracts | "
             "Credit: $%.2f | Max loss: $%.2f | POP: %.1f%% | Score: %.1f",
-            signal.strategy, signal.symbol, quantity,
+            signal.strategy, signal.symbol, signal.quantity,
             analysis.credit, analysis.max_loss,
             analysis.probability_of_profit * 100, analysis.score,
         )
@@ -278,13 +485,85 @@ class TradingBot:
                 symbol=signal.symbol,
                 credit=analysis.credit,
                 max_loss=analysis.max_loss,
-                quantity=quantity,
+                quantity=signal.quantity,
                 details=details,
             )
             logger.info("Paper trade opened: %s", result)
             return True
         else:
             return self._execute_live_entry(signal)
+
+    def _review_entry_with_llm(self, signal: TradeSignal) -> bool:
+        """Optionally review an entry with the configured LLM advisor."""
+        if not self.llm_advisor or signal.action != "open":
+            return True
+
+        context = {
+            "trading_mode": self.config.trading_mode,
+            "account_balance": self.risk_manager.portfolio.account_balance,
+            "open_positions": len(self.risk_manager.portfolio.open_positions),
+            "daily_pnl": self.risk_manager.portfolio.daily_pnl,
+            "deployed_risk": self.risk_manager.portfolio.total_risk_deployed,
+        }
+
+        try:
+            decision = self.llm_advisor.review_trade(signal, context)
+        except Exception as e:
+            if self.config.llm.mode == "blocking":
+                logger.error("LLM review failed in blocking mode: %s", e)
+                return False
+
+            logger.warning("LLM review failed in advisory mode: %s", e)
+            return True
+
+        if signal.quantity > 1 and decision.risk_adjustment < 1.0:
+            adjusted_quantity = max(1, int(signal.quantity * decision.risk_adjustment))
+            if adjusted_quantity < signal.quantity:
+                logger.info(
+                    "LLM reduced quantity for %s on %s: %d -> %d (confidence %.2f)",
+                    signal.strategy,
+                    signal.symbol,
+                    signal.quantity,
+                    adjusted_quantity,
+                    decision.confidence,
+                )
+                signal.quantity = adjusted_quantity
+
+        if (
+            self.config.llm.mode == "blocking"
+            and decision.confidence < self.config.llm.min_confidence
+        ):
+            logger.info(
+                "Trade REJECTED by LLM confidence gate: %.2f < %.2f | %s",
+                decision.confidence,
+                self.config.llm.min_confidence,
+                decision.reason,
+            )
+            return False
+
+        if not decision.approve:
+            if self.config.llm.mode == "blocking":
+                logger.info(
+                    "Trade REJECTED by LLM: %s %s on %s | %s",
+                    signal.strategy,
+                    signal.action,
+                    signal.symbol,
+                    decision.reason,
+                )
+                return False
+
+            logger.warning(
+                "LLM flagged trade but advisory mode allows execution: %s",
+                decision.reason,
+            )
+        else:
+            logger.info(
+                "LLM approved trade: %s (confidence %.2f)",
+                decision.reason,
+                decision.confidence,
+            )
+
+        return True
 
     def _execute_live_entry(self, signal: TradeSignal) -> bool:
         """Execute a real trade via Schwab API."""
@@ -311,13 +590,31 @@ class TradingBot:
                     price=analysis.credit,
                 )
             elif signal.strategy == "iron_condor":
-                order = self.schwab.build_iron_condor(
+                logger.warning(
+                    "Live iron condor execution is not implemented in this "
+                    "schwab-py integration."
+                )
+                return False
+            elif signal.strategy == "covered_call":
+                if signal.analysis is None:
+                    logger.warning("Missing analysis for live covered call on %s.", signal.symbol)
+                    return False
+
+                available_shares = self._get_live_equity_shares(signal.symbol)
+                required_shares = quantity * 100
+                if available_shares < required_shares:
+                    logger.warning(
+                        "Insufficient shares for covered call on %s: need %d, have %d",
+                        signal.symbol,
+                        required_shares,
+                        available_shares,
+                    )
+                    return False
+
+                order = self.schwab.build_covered_call_open(
                     symbol=signal.symbol,
                     expiration=analysis.expiration,
-                    put_long_strike=analysis.put_long_strike,
-                    put_short_strike=analysis.put_short_strike,
-                    call_short_strike=analysis.call_short_strike,
-                    call_long_strike=analysis.call_long_strike,
+                    short_strike=analysis.short_strike,
                     quantity=quantity,
                     price=analysis.credit,
                 )
@@ -359,18 +656,14 @@ class TradingBot:
 
     def _get_chain_data(self, symbol: str) -> tuple[dict, float]:
         """Fetch and parse options chain data for a symbol."""
-        if self.is_paper:
-            # In paper mode, we still need real market data for realistic simulation
-            if self.schwab is None:
-                logger.warning(
-                    "Paper mode with no API connection — "
-                    "cannot fetch live chain data for %s.", symbol,
-                )
-                return {}, 0.0
-
-        raw_chain = self.schwab.get_option_chain(symbol)
-        parsed = SchwabClient.parse_option_chain(raw_chain)
-        return parsed, parsed.get("underlying_price", 0.0)
+        try:
+            raw_chain = self.schwab.get_option_chain(symbol)
+            parsed = SchwabClient.parse_option_chain(raw_chain)
+            return parsed, parsed.get("underlying_price", 0.0)
+        except Exception as e:
+            logger.error("Failed to fetch option chain for %s: %s", symbol, e)
+            logger.debug(traceback.format_exc())
+            return {}, 0.0
 
     def _get_tracked_positions(self) -> list:
         """Get positions from Schwab and match with our tracked trades."""
@@ -381,6 +674,22 @@ class TradingBot:
         except Exception as e:
             logger.error("Failed to fetch positions: %s", e)
             return []
+
+    def _get_live_equity_shares(self, symbol: str) -> int:
+        """Return net long shares for a symbol from live account positions."""
+        total = 0.0
+        for pos in self._get_tracked_positions():
+            instrument = pos.get("instrument", {})
+            if instrument.get("assetType") != "EQUITY":
+                continue
+            if instrument.get("symbol") != symbol:
+                continue
+
+            long_qty = float(pos.get("longQuantity", 0.0))
+            short_qty = float(pos.get("shortQuantity", 0.0))
+            total += long_qty - short_qty
+
+        return max(0, int(total))
 
     # ── Scheduling & Main Loop ───────────────────────────────────────
 
@@ -458,6 +767,7 @@ class TradingBot:
         logger.info("=" * 60)
 
         self.connect()
+        self._validate_llm_readiness()
         self.setup_schedule()
 
         # Run an initial scan immediately

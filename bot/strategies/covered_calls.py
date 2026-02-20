@@ -127,9 +127,10 @@ class CoveredCallStrategy(BaseStrategy):
                     reason=f"Profit target reached ({pnl_pct:.1%})",
                 ))
 
-            # Close if approaching expiration to avoid assignment
-            dte = pos.get("dte_remaining", 999)
-            if dte <= 3:
+            # Close if approaching expiration to avoid assignment.
+            # Use elif to avoid duplicate close signals for the same position.
+            elif pos.get("dte_remaining", 999) <= 3:
+                dte = pos.get("dte_remaining", 999)
                 self.logger.info(
                     "DTE EXIT on %s covered call: %d DTE",
                     pos.get("symbol"), dte,

@@ -107,6 +107,19 @@ schedule:
     - thursday
     - friday
 
+# Optional LLM advisor
+# Use provider "ollama" for local models on your Mac, or "openai" for cloud.
+llm:
+  enabled: false
+  provider: ollama
+  model: llama3.1:8b
+  base_url: http://127.0.0.1:11434
+  mode: advisory   # advisory | blocking
+  risk_style: moderate   # conservative | moderate | aggressive
+  timeout_seconds: 20
+  temperature: 0.1
+  min_confidence: 0.55
+
 # Logging
 logging:
   level: INFO

@@ -3,7 +3,6 @@
 import math
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Optional
 
 from scipy.stats import norm
@@ -138,6 +137,8 @@ def compute_probability_of_profit_condor(
 
     if dte <= 0 or iv <= 0 or underlying_price <= 0:
         return 0.0
+    if put_breakeven <= 0 or call_breakeven <= 0 or put_breakeven >= call_breakeven:
+        return 0.0
 
     sigma = iv / 100.0 if iv > 1 else iv
     t = dte / 365.0
@@ -146,11 +147,9 @@ def compute_probability_of_profit_condor(
     d2_lower = (math.log(underlying_price / put_breakeven) - 0.5 * sigma**2 * t) / vol
     d2_upper = (math.log(underlying_price / call_breakeven) - 0.5 * sigma**2 * t) / vol
 
-    prob_above_lower = norm.cdf(d2_lower)
-    prob_below_upper = norm.cdf(-d2_upper)
-
-    # Probability of being between the two breakevens
-    pop = 1.0 - (1.0 - prob_above_lower) - prob_below_upper
+    # Probability of being between the two breakevens:
+    # P(S < upper) - P(S <= lower)
+    pop = norm.cdf(-d2_upper) - norm.cdf(-d2_lower)
     return max(0.0, min(1.0, pop))
 
 
@@ -207,9 +206,10 @@ def analyze_credit_spread(
         credit_pct_of_width=credit_pct,
         probability_of_profit=round(pop, 4),
         expected_value=ev,
-        net_delta=round(short_option["delta"] + long_option["delta"], 4),
-        net_theta=round(short_option["theta"] + long_option["theta"], 4),
-        net_vega=round(short_option["vega"] + long_option["vega"], 4),
+        # Position greeks for a credit spread are long-leg minus short-leg.
+        net_delta=round(long_option["delta"] - short_option["delta"], 4),
+        net_theta=round(long_option["theta"] - short_option["theta"], 4),
+        net_vega=round(long_option["vega"] - short_option["vega"], 4),
         score=score,
     )
 
@@ -229,7 +229,7 @@ def analyze_iron_condor(
     put_width = abs(put_short["strike"] - put_long["strike"])
     call_width = abs(call_long["strike"] - call_short["strike"])
     max_width = max(put_width, call_width)
-    max_loss = round(max_width - total_credit, 2) if total_credit > 0 else max_width
+    max_loss = round(max(max_width - total_credit, 0.0), 2) if total_credit > 0 else max_width
 
     if max_loss > 0:
         risk_reward = round(total_credit / max_loss, 3)
@@ -254,16 +254,13 @@ def analyze_iron_condor(
     ev = round(pop * total_credit * 100 - (1 - pop) * max_loss * 100, 2)
 
     net_delta = round(
-        put_short["delta"] + put_long["delta"]
-        + call_short["delta"] + call_long["delta"], 4
+        -put_short["delta"] + put_long["delta"] - call_short["delta"] + call_long["delta"], 4
     )
     net_theta = round(
-        put_short["theta"] + put_long["theta"]
-        + call_short["theta"] + call_long["theta"], 4
+        -put_short["theta"] + put_long["theta"] - call_short["theta"] + call_long["theta"], 4
     )
     net_vega = round(
-        put_short["vega"] + put_long["vega"]
-        + call_short["vega"] + call_long["vega"], 4
+        -put_short["vega"] + put_long["vega"] - call_short["vega"] + call_long["vega"], 4
     )
 
     score = _score_condor(pop, credit_pct, risk_reward, net_theta, dte)

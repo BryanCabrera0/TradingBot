@@ -20,6 +20,7 @@ A fully automated options trading bot that connects to your ThinkorSwim (Charles
 - **Probability-based** — only enters trades above a minimum probability of profit threshold
 - **Multi-factor scoring** — ranks opportunities by probability, premium quality, liquidity, Greeks
 - **Automatic exits** — profit targets, stop losses, and DTE-based exits
+- **Optional LLM advisor** — local (Ollama) or cloud (OpenAI) model can review trades in advisory or blocking mode
 
 ## Quick Start
 
@@ -70,6 +71,7 @@ Options:
   --live           Enable live trading (real money)
   --once           Run a single scan and exit
   --report         Show paper trading performance report
+  --preflight-only Run startup checks and exit
   --log-level LVL  Override log level (DEBUG/INFO/WARNING/ERROR)
 ```
 
@@ -91,6 +93,29 @@ All parameters are in `config.yaml`. Key settings:
 - **watchlist** — fallback tickers (only used if scanner is disabled)
 - **risk** — max portfolio risk, max position size, max positions, daily loss limit
 - **schedule** — scan times, position check interval
+- **llm** — optional model-based trade review (`ollama` local or `openai` cloud)
+
+### LLM Advisor (Optional)
+
+The bot can use an LLM to review each entry signal before execution.
+
+- `advisory` mode: LLM gives guidance and optional size reduction, but bot can still trade.
+- `blocking` mode: LLM can veto a trade or block low-confidence decisions.
+- `risk_style`: `conservative`, `moderate`, or `aggressive` policy thresholds for model decisions.
+
+Local model example (recommended for on-device use):
+
+1. Run Ollama on your machine (`http://127.0.0.1:11434`).
+2. Set in `config.yaml`:
+   - `llm.enabled: true`
+   - `llm.provider: ollama`
+   - `llm.model: llama3.1:8b`
+   - `llm.risk_style: moderate` (or `conservative` / `aggressive`)
+
+Cloud model example:
+
+1. Set `llm.provider: openai` and `llm.model` in `config.yaml`.
+2. Set `OPENAI_API_KEY` in `.env`.
 
 ## Architecture
 
@@ -100,6 +125,7 @@ bot/
   orchestrator.py        Main automated trading loop
   market_scanner.py      Dynamic market scanner (finds best stocks)
   schwab_client.py       Schwab API wrapper (auth, data, orders)
+  llm_advisor.py         Optional LLM trade-review layer
   analysis.py            Options analysis (Greeks, probability, scoring)
   risk_manager.py        Risk management and position sizing
   paper_trader.py        Paper trading simulator

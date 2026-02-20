@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
 
 from bot.config import RiskConfig
@@ -39,14 +39,13 @@ class RiskManager:
         """Update the portfolio state with latest data."""
         self.portfolio.account_balance = account_balance
         self.portfolio.open_positions = open_positions
-        self.portfolio.daily_pnl = daily_pnl
 
         today = date.today()
         if self.portfolio.daily_pnl_date != today:
-            self.portfolio.daily_pnl = 0.0
             self.portfolio.daily_pnl_date = today
             self._trades_today = 0
             self._today = today
+        self.portfolio.daily_pnl = daily_pnl
 
         # Calculate total risk deployed
         total_risk = 0.0

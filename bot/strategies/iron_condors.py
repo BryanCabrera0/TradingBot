@@ -147,8 +147,9 @@ class IronCondorStrategy(BaseStrategy):
                     reason=f"Stop loss triggered (loss {abs(pnl):.2f})",
                 ))
 
-            dte = pos.get("dte_remaining", 999)
-            if dte <= 5:
+            # Use elif to avoid duplicate close signals for the same position.
+            elif pos.get("dte_remaining", 999) <= 5:
+                dte = pos.get("dte_remaining", 999)
                 self.logger.info(
                     "DTE EXIT on %s condor: %d days to expiration",
                     pos.get("symbol"), dte,
