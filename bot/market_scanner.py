@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from bot.config import ScannerConfig
+from bot.number_utils import safe_float, safe_int
 
 logger = logging.getLogger(__name__)
 
@@ -237,8 +238,8 @@ class MarketScanner:
         try:
             quote = self.schwab.get_quote(symbol)
             q = quote.get("quote", quote)
-            ts.underlying_price = _to_float(q.get("lastPrice", q.get("mark", 0)))
-            ts.underlying_volume = _to_int(q.get("totalVolume", 0))
+            ts.underlying_price = safe_float(q.get("lastPrice", q.get("mark", 0)))
+            ts.underlying_volume = safe_int(q.get("totalVolume", 0))
         except Exception:
             return None
 
@@ -285,11 +286,11 @@ class MarketScanner:
                     for c in contracts or []:
                         if not isinstance(c, dict):
                             continue
-                        vol = _to_int(c.get("totalVolume", 0))
-                        oi = _to_int(c.get("openInterest", 0))
-                        bid = _to_float(c.get("bid", 0))
-                        ask = _to_float(c.get("ask", 0))
-                        iv = _to_float(c.get("volatility", 0))
+                        vol = safe_int(c.get("totalVolume", 0))
+                        oi = safe_int(c.get("openInterest", 0))
+                        bid = safe_float(c.get("bid", 0))
+                        ask = safe_float(c.get("ask", 0))
+                        iv = safe_float(c.get("volatility", 0))
 
                         total_volume += vol
                         total_oi += oi
@@ -396,19 +397,3 @@ class MarketScanner:
 
         lines.append("=" * 70)
         return "\n".join(lines)
-
-
-def _to_float(value: object, default: float = 0.0) -> float:
-    """Safely parse floats from API payloads that may contain nulls/strings."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _to_int(value: object, default: int = 0) -> int:
-    """Safely parse integers from API payloads that may contain nulls/strings."""
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default

@@ -19,6 +19,7 @@ from schwab.orders.options import (
 from schwab.orders.common import Duration, Session
 
 from bot.config import SchwabConfig
+from bot.number_utils import safe_float, safe_int
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class SchwabClient:
             .get("currentBalances", {})
             .get("liquidationValue", 0.0)
         )
-        return _to_float(balance)
+        return safe_float(balance)
 
     def get_positions(self) -> list:
         """Get all current positions."""
@@ -145,7 +146,7 @@ class SchwabClient:
         """Get the last price for a symbol."""
         quote = self.get_quote(symbol)
         ref = quote.get("quote", quote)
-        return _to_float(ref.get("lastPrice", ref.get("mark", 0.0)))
+        return safe_float(ref.get("lastPrice", ref.get("mark", 0.0)))
 
     def get_option_chain(
         self,
@@ -197,7 +198,7 @@ class SchwabClient:
             calls: {expiration_date: [option_dicts]}
             puts: {expiration_date: [option_dicts]}
         """
-        underlying_price = _to_float(
+        underlying_price = safe_float(
             chain_data.get("underlyingPrice", chain_data.get("underlying", {}).get("mark", 0))
         )
 
@@ -213,7 +214,7 @@ class SchwabClient:
             exp_date = exp_key.split(":")[0]
             options = []
             for strike_str, contracts in strikes.items():
-                strike = _to_float(strike_str)
+                strike = safe_float(strike_str)
                 for c in contracts or []:
                     if isinstance(c, dict):
                         options.append(_normalize_contract(c, strike, exp_date))
@@ -225,7 +226,7 @@ class SchwabClient:
             exp_date = exp_key.split(":")[0]
             options = []
             for strike_str, contracts in strikes.items():
-                strike = _to_float(strike_str)
+                strike = safe_float(strike_str)
                 for c in contracts or []:
                     if isinstance(c, dict):
                         options.append(_normalize_contract(c, strike, exp_date))
@@ -414,8 +415,8 @@ class SchwabClient:
 
 def _normalize_contract(contract: dict, strike: float, expiration_date: str) -> dict:
     """Normalize a raw options contract from the API."""
-    bid = _to_float(contract.get("bid"))
-    ask = _to_float(contract.get("ask"))
+    bid = safe_float(contract.get("bid"))
+    ask = safe_float(contract.get("ask"))
     return {
         "symbol": contract.get("symbol", ""),
         "description": contract.get("description", ""),
@@ -423,18 +424,18 @@ def _normalize_contract(contract: dict, strike: float, expiration_date: str) -> 
         "expiration": _extract_expiration_date(
             contract.get("expirationDate"), expiration_date
         ),
-        "dte": _to_int(contract.get("daysToExpiration", 0)),
+        "dte": safe_int(contract.get("daysToExpiration", 0)),
         "bid": bid,
         "ask": ask,
         "mid": round((bid + ask) / 2, 2),
-        "last": _to_float(contract.get("last", 0)),
-        "volume": _to_int(contract.get("totalVolume", 0)),
-        "open_interest": _to_int(contract.get("openInterest", 0)),
-        "delta": _to_float(contract.get("delta", 0)),
-        "gamma": _to_float(contract.get("gamma", 0)),
-        "theta": _to_float(contract.get("theta", 0)),
-        "vega": _to_float(contract.get("vega", 0)),
-        "iv": _to_float(contract.get("volatility", 0)),
+        "last": safe_float(contract.get("last", 0)),
+        "volume": safe_int(contract.get("totalVolume", 0)),
+        "open_interest": safe_int(contract.get("openInterest", 0)),
+        "delta": safe_float(contract.get("delta", 0)),
+        "gamma": safe_float(contract.get("gamma", 0)),
+        "theta": safe_float(contract.get("theta", 0)),
+        "vega": safe_float(contract.get("vega", 0)),
+        "iv": safe_float(contract.get("volatility", 0)),
         "in_the_money": contract.get("inTheMoney", False),
         "contract_type": contract.get("putCall", ""),
     }
@@ -486,19 +487,3 @@ def _mask_hash(account_hash: str) -> str:
     if len(account_hash) <= 8:
         return "***"
     return f"{account_hash[:4]}...{account_hash[-4:]}"
-
-
-def _to_float(value: object, default: float = 0.0) -> float:
-    """Safely parse floats from API payloads that may contain nulls/strings."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _to_int(value: object, default: int = 0) -> int:
-    """Safely parse integers from API payloads that may contain nulls/strings."""
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
