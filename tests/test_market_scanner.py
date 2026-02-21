@@ -30,6 +30,38 @@ class MarketScannerTests(unittest.TestCase):
         self.assertEqual(results, ["NEW"])
         scanner.scan.assert_called_once()
 
+    def test_score_ticker_tolerates_null_numeric_contract_fields(self) -> None:
+        fake_schwab = mock.Mock()
+        fake_schwab.get_quote.return_value = {
+            "quote": {"lastPrice": 100.0, "totalVolume": 2_000_000}
+        }
+        fake_schwab.get_option_chain.return_value = {
+            "callExpDateMap": {
+                "2026-03-20:30": {
+                    "100.0": [
+                        {
+                            "totalVolume": None,
+                            "openInterest": None,
+                            "bid": None,
+                            "ask": "1.50",
+                            "volatility": None,
+                        }
+                    ]
+                }
+            },
+            "putExpDateMap": {},
+        }
+
+        scanner = MarketScanner(
+            schwab_client=fake_schwab,
+            config=ScannerConfig(min_underlying_volume=1_000),
+        )
+
+        score = scanner._score_ticker("SPY")
+
+        self.assertIsNotNone(score)
+        self.assertGreaterEqual(score.score, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

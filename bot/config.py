@@ -1,11 +1,15 @@
 """Configuration management for the trading bot."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -155,6 +159,17 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.llm.base_url = os.getenv("LLM_BASE_URL", cfg.llm.base_url)
     cfg.llm.mode = os.getenv("LLM_MODE", cfg.llm.mode)
     cfg.llm.risk_style = os.getenv("LLM_RISK_STYLE", cfg.llm.risk_style)
+    cfg.llm.timeout_seconds = _env_int(
+        "LLM_TIMEOUT_SECONDS", cfg.llm.timeout_seconds, minimum=1
+    )
+    cfg.llm.temperature = _env_float(
+        "LLM_TEMPERATURE", cfg.llm.temperature, minimum=0.0, maximum=2.0
+    )
+    cfg.llm.min_confidence = _env_float(
+        "LLM_MIN_CONFIDENCE", cfg.llm.min_confidence, minimum=0.0, maximum=1.0
+    )
+
+    _normalize_config(cfg)
 
     return cfg
 
@@ -220,3 +235,152 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(
+    name: str,
+    default: int,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    """Parse an integer environment variable with optional bounds."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r. Using default %r.", name, value, default)
+        return default
+
+    if minimum is not None and parsed < minimum:
+        return minimum
+    if maximum is not None and parsed > maximum:
+        return maximum
+    return parsed
+
+
+def _env_float(
+    name: str,
+    default: float,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    """Parse a float environment variable with optional bounds."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        logger.warning("Invalid float for %s=%r. Using default %r.", name, value, default)
+        return default
+
+    if minimum is not None and parsed < minimum:
+        return minimum
+    if maximum is not None and parsed > maximum:
+        return maximum
+    return parsed
+
+
+def _normalize_config(cfg: BotConfig) -> None:
+    """Normalize string enum-like fields and sanitize basic list inputs."""
+    cfg.trading_mode = _normalize_choice(
+        cfg.trading_mode,
+        allowed={"paper", "live"},
+        default="paper",
+        field_name="trading_mode",
+    )
+
+    cfg.llm.provider = _normalize_choice(
+        cfg.llm.provider,
+        allowed={"ollama", "openai"},
+        default="ollama",
+        field_name="llm.provider",
+    )
+    cfg.llm.mode = _normalize_choice(
+        cfg.llm.mode,
+        allowed={"advisory", "blocking"},
+        default="advisory",
+        field_name="llm.mode",
+    )
+    cfg.llm.risk_style = _normalize_choice(
+        cfg.llm.risk_style,
+        allowed={"conservative", "moderate", "aggressive"},
+        default="moderate",
+        field_name="llm.risk_style",
+    )
+
+    cfg.log_level = _normalize_choice(
+        cfg.log_level,
+        allowed={"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
+        default="INFO",
+        field_name="logging.level",
+        transform=str.upper,
+    )
+
+    cfg.watchlist = _normalize_symbol_list(cfg.watchlist, default=["SPY"])
+    cfg.covered_calls.tickers = _normalize_symbol_list(
+        cfg.covered_calls.tickers, default=[]
+    )
+
+    cfg.schedule.trading_days = _normalize_trading_days(cfg.schedule.trading_days)
+    cfg.llm.timeout_seconds = max(1, int(cfg.llm.timeout_seconds))
+    cfg.llm.temperature = max(0.0, min(2.0, float(cfg.llm.temperature)))
+    cfg.llm.min_confidence = max(0.0, min(1.0, float(cfg.llm.min_confidence)))
+
+
+def _normalize_choice(
+    value: object,
+    allowed: set[str],
+    default: str,
+    field_name: str,
+    transform=lambda s: s.lower(),
+) -> str:
+    """Normalize an enum-like string field and validate allowed values."""
+    normalized = transform(str(value).strip()) if value is not None else ""
+    if normalized in allowed:
+        return normalized
+
+    logger.warning(
+        "Invalid %s=%r. Falling back to %r.",
+        field_name,
+        value,
+        default,
+    )
+    return default
+
+
+def _normalize_symbol_list(value: object, default: list[str]) -> list[str]:
+    """Normalize a list of ticker strings."""
+    if not isinstance(value, list):
+        return default
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        symbol = str(raw).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append(symbol)
+    return normalized or default
+
+
+def _normalize_trading_days(value: object) -> list[str]:
+    """Normalize configured trading days to lowercase weekday names."""
+    valid = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+    if not isinstance(value, list):
+        return ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        day = str(raw).strip().lower()
+        if day in valid and day not in seen:
+            seen.add(day)
+            normalized.append(day)
+
+    return normalized or ["monday", "tuesday", "wednesday", "thursday", "friday"]

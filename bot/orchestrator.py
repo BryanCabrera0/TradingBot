@@ -14,6 +14,7 @@ import time
 import traceback
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import schedule
 
@@ -31,6 +32,7 @@ from bot.strategies.base import TradeSignal
 logger = logging.getLogger(__name__)
 
 LIVE_SUPPORTED_ENTRY_STRATEGIES = {"credit_spreads", "covered_calls"}
+EASTERN_TZ = ZoneInfo("America/New_York")
 
 
 class TradingBot:
@@ -186,17 +188,29 @@ class TradingBot:
 
     # ── Market Hours Check ───────────────────────────────────────────
 
-    @staticmethod
-    def is_market_open() -> bool:
+    @classmethod
+    def _now_eastern(cls) -> datetime:
+        """Return current time in US/Eastern."""
+        return datetime.now(EASTERN_TZ)
+
+    @classmethod
+    def is_market_open(cls, now: Optional[datetime] = None) -> bool:
         """Check if US stock market is currently open (rough check)."""
-        now = datetime.now()
+        if now is None:
+            now_et = cls._now_eastern()
+        elif now.tzinfo is None:
+            # Treat naive datetimes as already in Eastern to avoid accidental local-time drift.
+            now_et = now.replace(tzinfo=EASTERN_TZ)
+        else:
+            now_et = now.astimezone(EASTERN_TZ)
+
         # Weekday check (Mon=0 ... Fri=4)
-        if now.weekday() > 4:
+        if now_et.weekday() > 4:
             return False
         # Market hours: 9:30 AM - 4:00 PM ET (approximate, doesn't handle holidays)
-        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        return market_open <= now <= market_close
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        return market_open <= now_et <= market_close
 
     # ── Core Trading Loop ────────────────────────────────────────────
 
@@ -699,8 +713,10 @@ class TradingBot:
 
         # Schedule market scans
         for scan_time in sched_config.scan_times:
-            schedule.every().day.at(scan_time).do(self._scheduled_scan)
-            logger.info("Scheduled scan at %s", scan_time)
+            schedule.every().day.at(scan_time, tz="America/New_York").do(
+                self._scheduled_scan
+            )
+            logger.info("Scheduled scan at %s ET", scan_time)
 
         # Schedule position monitoring
         interval = sched_config.position_check_interval
@@ -708,12 +724,12 @@ class TradingBot:
         logger.info("Scheduled position checks every %d minutes", interval)
 
         # Daily performance report
-        schedule.every().day.at("16:05").do(self._daily_report)
-        logger.info("Scheduled daily report at 16:05")
+        schedule.every().day.at("16:05", tz="America/New_York").do(self._daily_report)
+        logger.info("Scheduled daily report at 16:05 ET")
 
     def _scheduled_scan(self) -> None:
         """Scan wrapper that checks market hours."""
-        today = datetime.now().strftime("%A").lower()
+        today = self._now_eastern().strftime("%A").lower()
         if today not in self.config.schedule.trading_days:
             logger.info("Not a trading day (%s). Skipping scan.", today)
             return

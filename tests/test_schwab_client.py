@@ -47,6 +47,40 @@ class SchwabClientParserTests(unittest.TestCase):
 
         self.assertEqual(symbol, "SPY_032026C500")
 
+    def test_parse_option_chain_handles_null_numeric_fields(self) -> None:
+        chain_data = {
+            "underlyingPrice": None,
+            "callExpDateMap": {
+                "2026-03-20:30": {
+                    "100.0": [
+                        {
+                            "symbol": "SPY  260320C00100000",
+                            "expirationDate": "2026-03-20T21:00:00+00:00",
+                            "daysToExpiration": None,
+                            "bid": None,
+                            "ask": "1.25",
+                            "delta": None,
+                            "volatility": None,
+                            "totalVolume": None,
+                            "openInterest": None,
+                        }
+                    ]
+                }
+            },
+        }
+
+        parsed = SchwabClient.parse_option_chain(chain_data)
+        contract = parsed["calls"]["2026-03-20"][0]
+
+        self.assertEqual(parsed["underlying_price"], 0.0)
+        self.assertEqual(contract["dte"], 0)
+        self.assertEqual(contract["bid"], 0.0)
+        self.assertEqual(contract["ask"], 1.25)
+        self.assertEqual(contract["mid"], 0.62)
+        self.assertEqual(contract["delta"], 0.0)
+        self.assertEqual(contract["volume"], 0)
+        self.assertEqual(contract["open_interest"], 0)
+
     def test_resolve_account_hash_from_single_linked_account(self) -> None:
         client = SchwabClient(SchwabConfig())
         response = mock.Mock()

@@ -1,5 +1,7 @@
 import unittest
+from datetime import datetime
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from bot.analysis import SpreadAnalysis
 from bot.config import BotConfig
@@ -16,6 +18,15 @@ def make_live_config() -> BotConfig:
 
 
 class LiveReadinessTests(unittest.TestCase):
+    def test_market_hours_convert_to_eastern_time(self) -> None:
+        pacific_time = datetime(2026, 1, 7, 7, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+        self.assertTrue(TradingBot.is_market_open(pacific_time))
+
+        pacific_after_close = datetime(
+            2026, 1, 7, 14, 30, tzinfo=ZoneInfo("America/Los_Angeles")
+        )
+        self.assertFalse(TradingBot.is_market_open(pacific_after_close))
+
     def test_preflight_rejects_unsupported_live_strategies(self) -> None:
         cfg = make_live_config()
         cfg.credit_spreads.enabled = False

@@ -237,8 +237,8 @@ class MarketScanner:
         try:
             quote = self.schwab.get_quote(symbol)
             q = quote.get("quote", quote)
-            ts.underlying_price = float(q.get("lastPrice", q.get("mark", 0)))
-            ts.underlying_volume = int(q.get("totalVolume", 0))
+            ts.underlying_price = _to_float(q.get("lastPrice", q.get("mark", 0)))
+            ts.underlying_volume = _to_int(q.get("totalVolume", 0))
         except Exception:
             return None
 
@@ -274,16 +274,22 @@ class MarketScanner:
 
         for date_map_key in ("callExpDateMap", "putExpDateMap"):
             date_map = chain.get(date_map_key, {})
+            if not isinstance(date_map, dict):
+                continue
             for exp_key, strikes in date_map.items():
+                if not isinstance(strikes, dict):
+                    continue
                 if date_map_key == "callExpDateMap":
                     num_expirations += 1
                 for strike_str, contracts in strikes.items():
-                    for c in contracts:
-                        vol = int(c.get("totalVolume", 0))
-                        oi = int(c.get("openInterest", 0))
-                        bid = float(c.get("bid", 0))
-                        ask = float(c.get("ask", 0))
-                        iv = float(c.get("volatility", 0))
+                    for c in contracts or []:
+                        if not isinstance(c, dict):
+                            continue
+                        vol = _to_int(c.get("totalVolume", 0))
+                        oi = _to_int(c.get("openInterest", 0))
+                        bid = _to_float(c.get("bid", 0))
+                        ask = _to_float(c.get("ask", 0))
+                        iv = _to_float(c.get("volatility", 0))
 
                         total_volume += vol
                         total_oi += oi
@@ -390,3 +396,19 @@ class MarketScanner:
 
         lines.append("=" * 70)
         return "\n".join(lines)
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    """Safely parse floats from API payloads that may contain nulls/strings."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    """Safely parse integers from API payloads that may contain nulls/strings."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
