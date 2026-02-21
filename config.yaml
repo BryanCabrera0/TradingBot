@@ -1,0 +1,113 @@
+# TradingBot Configuration
+# ========================
+
+# Trading mode: "paper" (simulated) or "live" (real money)
+trading_mode: paper
+
+# Strategies to enable
+strategies:
+  credit_spreads:
+    enabled: true
+    # "bull_put", "bear_call", or "both"
+    direction: both
+    # Days to expiration range
+    min_dte: 20
+    max_dte: 45
+    # Target delta for short leg
+    short_delta: 0.30
+    # Width of spread in strikes
+    spread_width: 5
+    # Minimum credit to collect as % of spread width
+    min_credit_pct: 0.30
+    # Close at this % of max profit
+    profit_target_pct: 0.50
+    # Close at this % loss of credit received
+    stop_loss_pct: 2.0
+
+  iron_condors:
+    enabled: true
+    min_dte: 25
+    max_dte: 50
+    # Target delta for short legs
+    short_delta: 0.16
+    spread_width: 5
+    min_credit_pct: 0.30
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+
+  covered_calls:
+    enabled: true
+    min_dte: 20
+    max_dte: 45
+    # Target delta for calls sold
+    short_delta: 0.30
+    # Only sell calls on these tickers (must own shares)
+    tickers: []
+
+# Market Scanner — dynamically finds the best stocks for options trading
+# When enabled, the bot scans 150+ tickers across all sectors and ranks them
+# by options volume, implied volatility, bid-ask tightness, and liquidity.
+# It then trades only the top-ranked tickers each cycle.
+scanner:
+  enabled: true
+  # How many top tickers to trade from scan results
+  max_scan_results: 20
+  # Cache results for 30 minutes (avoid redundant API calls)
+  cache_seconds: 1800
+  # Only consider stocks in this price range
+  min_price: 10
+  max_price: 0  # 0 = no upper limit
+  # Minimum daily volume for the underlying stock
+  min_underlying_volume: 500000
+  # Pull trending movers from Schwab to add to the scan universe
+  include_movers: true
+
+# Fallback watchlist — only used if scanner is disabled
+watchlist:
+  - SPY
+  - QQQ
+  - IWM
+  - AAPL
+  - MSFT
+  - AMZN
+  - GOOGL
+  - META
+  - NVDA
+  - TSLA
+
+# Risk management
+risk:
+  # Max % of account value at risk across all positions
+  max_portfolio_risk_pct: 5.0
+  # Max % of account in a single position
+  max_position_risk_pct: 2.0
+  # Max number of open positions
+  max_open_positions: 10
+  # Max number of positions per underlying
+  max_positions_per_symbol: 2
+  # Min account balance to keep trading
+  min_account_balance: 5000
+  # Max daily loss before stopping (% of account)
+  max_daily_loss_pct: 3.0
+
+# Scheduling
+schedule:
+  # Market scan times (Eastern Time, 24h format)
+  scan_times:
+    - "09:45"
+    - "11:00"
+    - "14:00"
+  # Position check interval in minutes
+  position_check_interval: 15
+  # Only trade on weekdays
+  trading_days:
+    - monday
+    - tuesday
+    - wednesday
+    - thursday
+    - friday
+
+# Logging
+logging:
+  level: INFO
+  file: logs/tradingbot.log
