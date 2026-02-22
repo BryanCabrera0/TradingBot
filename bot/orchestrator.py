@@ -9,10 +9,11 @@ This is the brain of the bot. It:
 6. Runs continuously with no manual intervention
 """
 
+from collections import defaultdict, deque
 import logging
 import time
 import traceback
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,7 @@ from bot.config import BotConfig, load_config
 from bot.schwab_client import SchwabClient
 from bot.llm_advisor import LLMAdvisor
 from bot.news_scanner import NewsScanner
+from bot.number_utils import safe_float
 from bot.paper_trader import PaperTrader
 from bot.risk_manager import RiskManager
 from bot.market_scanner import MarketScanner
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 LIVE_SUPPORTED_ENTRY_STRATEGIES = {"credit_spreads", "covered_calls"}
 EASTERN_TZ = ZoneInfo("America/New_York")
+OPEN_LONG_INSTRUCTIONS = {"BUY_TO_OPEN"}
+OPEN_SHORT_INSTRUCTIONS = {"SELL_TO_OPEN", "SELL_SHORT"}
+CLOSE_LONG_INSTRUCTIONS = {"SELL_TO_CLOSE"}
+CLOSE_SHORT_INSTRUCTIONS = {"BUY_TO_CLOSE", "BUY_TO_COVER"}
 
 
 class TradingBot:
@@ -259,13 +265,308 @@ class TradingBot:
         else:
             balance = self.schwab.get_account_balance()
             positions = self._get_tracked_positions()
-            daily_pnl = 0.0  # TODO: compute from order history
+            daily_pnl = self._compute_live_daily_pnl()
 
         self.risk_manager.update_portfolio(balance, positions, daily_pnl)
         logger.info(
             "Portfolio: Balance=$%s | Open positions: %d | Daily P/L: $%.2f",
             f"{balance:,.2f}", len(positions), daily_pnl,
         )
+
+    def _compute_live_daily_pnl(self) -> float:
+        """Best-effort realized P/L for today's live fills using order history."""
+        try:
+            orders = self.schwab.get_orders(days_back=60)
+        except Exception as exc:
+            logger.warning("Failed to fetch live order history for daily P/L: %s", exc)
+            return 0.0
+
+        if not isinstance(orders, list):
+            return 0.0
+
+        pnl = self._compute_daily_pnl_from_orders(
+            orders=orders,
+            target_date=self._now_eastern().date(),
+        )
+        return round(pnl, 2)
+
+    @classmethod
+    def _compute_daily_pnl_from_orders(
+        cls,
+        orders: list[dict],
+        target_date: date,
+    ) -> float:
+        """Compute realized P/L for ``target_date`` from a list of filled orders."""
+        fills = cls._extract_order_fills(orders)
+        fills.sort(key=lambda fill: fill["time"])
+
+        long_lots: dict[str, deque[dict[str, float]]] = defaultdict(deque)
+        short_lots: dict[str, deque[dict[str, float]]] = defaultdict(deque)
+        daily_pnl = 0.0
+
+        for fill in fills:
+            key = fill["key"]
+            instruction = fill["instruction"]
+            quantity = fill["quantity"]
+            price = fill["price"]
+            multiplier = fill["multiplier"]
+            fill_date = fill["time"].astimezone(EASTERN_TZ).date()
+
+            if quantity <= 0 or price < 0:
+                continue
+
+            if instruction in OPEN_LONG_INSTRUCTIONS:
+                long_lots[key].append({"quantity": quantity, "price": price})
+                continue
+
+            if instruction in OPEN_SHORT_INSTRUCTIONS:
+                short_lots[key].append({"quantity": quantity, "price": price})
+                continue
+
+            if instruction in CLOSE_LONG_INSTRUCTIONS:
+                pnl, remaining = cls._close_lots_fifo(
+                    lots=long_lots[key],
+                    close_quantity=quantity,
+                    close_price=price,
+                    multiplier=multiplier,
+                    closing_long=True,
+                )
+                if remaining > 0:
+                    short_lots[key].append({"quantity": remaining, "price": price})
+                if fill_date == target_date:
+                    daily_pnl += pnl
+                continue
+
+            if instruction in CLOSE_SHORT_INSTRUCTIONS:
+                pnl, remaining = cls._close_lots_fifo(
+                    lots=short_lots[key],
+                    close_quantity=quantity,
+                    close_price=price,
+                    multiplier=multiplier,
+                    closing_long=False,
+                )
+                if remaining > 0:
+                    long_lots[key].append({"quantity": remaining, "price": price})
+                if fill_date == target_date:
+                    daily_pnl += pnl
+                continue
+
+            # Equity fills may use BUY/SELL without explicit position effect.
+            if instruction == "BUY":
+                pnl, remaining = cls._close_lots_fifo(
+                    lots=short_lots[key],
+                    close_quantity=quantity,
+                    close_price=price,
+                    multiplier=multiplier,
+                    closing_long=False,
+                )
+                if fill_date == target_date:
+                    daily_pnl += pnl
+                if remaining > 0:
+                    long_lots[key].append({"quantity": remaining, "price": price})
+                continue
+
+            if instruction == "SELL":
+                pnl, remaining = cls._close_lots_fifo(
+                    lots=long_lots[key],
+                    close_quantity=quantity,
+                    close_price=price,
+                    multiplier=multiplier,
+                    closing_long=True,
+                )
+                if fill_date == target_date:
+                    daily_pnl += pnl
+                if remaining > 0:
+                    short_lots[key].append({"quantity": remaining, "price": price})
+
+        return daily_pnl
+
+    @staticmethod
+    def _close_lots_fifo(
+        lots: deque[dict[str, float]],
+        close_quantity: float,
+        close_price: float,
+        multiplier: float,
+        *,
+        closing_long: bool,
+    ) -> tuple[float, float]:
+        """Close lots FIFO and return (realized_pnl, unmatched_quantity)."""
+        remaining = max(0.0, float(close_quantity))
+        realized = 0.0
+        epsilon = 1e-9
+
+        while remaining > epsilon and lots:
+            lot = lots[0]
+            lot_qty = max(0.0, safe_float(lot.get("quantity"), 0.0))
+            if lot_qty <= epsilon:
+                lots.popleft()
+                continue
+
+            matched = min(remaining, lot_qty)
+            open_price = safe_float(lot.get("price"), 0.0)
+            if closing_long:
+                realized += (close_price - open_price) * matched * multiplier
+            else:
+                realized += (open_price - close_price) * matched * multiplier
+
+            lot["quantity"] = lot_qty - matched
+            remaining -= matched
+            if lot["quantity"] <= epsilon:
+                lots.popleft()
+
+        return realized, max(0.0, remaining)
+
+    @classmethod
+    def _extract_order_fills(cls, orders: list[dict]) -> list[dict]:
+        """Extract normalized fill events from raw Schwab order payloads."""
+        fills: list[dict] = []
+
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+
+            leg_meta: dict[int, dict[str, object]] = {}
+            default_meta: Optional[dict[str, object]] = None
+            for leg in order.get("orderLegCollection", []):
+                if not isinstance(leg, dict):
+                    continue
+                instruction = str(leg.get("instruction", "")).upper()
+                instrument = leg.get("instrument", {})
+                if not isinstance(instrument, dict):
+                    continue
+                symbol = str(instrument.get("symbol", "")).strip()
+                if not symbol:
+                    continue
+                asset_type = str(instrument.get("assetType", "")).upper()
+                multiplier = 100.0 if asset_type == "OPTION" else 1.0
+
+                meta = {
+                    "instruction": instruction,
+                    "symbol": symbol,
+                    "multiplier": multiplier,
+                }
+                if default_meta is None:
+                    default_meta = meta
+
+                raw_leg_id = leg.get("legId")
+                leg_id = cls._parse_leg_id(raw_leg_id)
+                if leg_id is not None:
+                    leg_meta[leg_id] = meta
+
+            if default_meta is None:
+                continue
+
+            found_execution_legs = False
+            activities = order.get("orderActivityCollection", [])
+            if isinstance(activities, list):
+                for activity in activities:
+                    if not isinstance(activity, dict):
+                        continue
+                    execution_legs = activity.get("executionLegs", [])
+                    if not isinstance(execution_legs, list):
+                        continue
+
+                    for execution in execution_legs:
+                        if not isinstance(execution, dict):
+                            continue
+                        found_execution_legs = True
+
+                        leg_id = cls._parse_leg_id(execution.get("legId"))
+                        meta = leg_meta.get(leg_id, default_meta)
+
+                        quantity = safe_float(execution.get("quantity"), 0.0)
+                        price = safe_float(execution.get("price"), 0.0)
+                        if quantity <= 0 or price <= 0:
+                            continue
+
+                        fill_time = cls._parse_order_timestamp(
+                            execution.get("time")
+                            or activity.get("executionTime")
+                            or activity.get("time")
+                            or order.get("closeTime")
+                            or order.get("enteredTime")
+                        )
+                        if fill_time is None:
+                            continue
+
+                        fills.append(
+                            {
+                                "time": fill_time,
+                                "key": str(meta["symbol"]),
+                                "instruction": str(meta["instruction"]).upper(),
+                                "quantity": quantity,
+                                "price": price,
+                                "multiplier": safe_float(meta["multiplier"], 1.0),
+                            }
+                        )
+
+            if found_execution_legs:
+                continue
+
+            # Fallback for payloads that only expose top-level fill data.
+            if str(order.get("status", "")).upper() != "FILLED":
+                continue
+
+            quantity = safe_float(order.get("filledQuantity"), 0.0)
+            if quantity <= 0:
+                quantity = safe_float(order.get("quantity"), 0.0)
+            price = safe_float(order.get("price"), 0.0)
+            if quantity <= 0 or price <= 0:
+                continue
+
+            fill_time = cls._parse_order_timestamp(
+                order.get("closeTime") or order.get("enteredTime")
+            )
+            if fill_time is None:
+                continue
+
+            fills.append(
+                {
+                    "time": fill_time,
+                    "key": str(default_meta["symbol"]),
+                    "instruction": str(default_meta["instruction"]).upper(),
+                    "quantity": quantity,
+                    "price": price,
+                    "multiplier": safe_float(default_meta["multiplier"], 1.0),
+                }
+            )
+
+        return fills
+
+    @staticmethod
+    def _parse_leg_id(raw_leg_id: object) -> Optional[int]:
+        """Parse a Schwab leg ID that may be int-like or string-like."""
+        if isinstance(raw_leg_id, int):
+            return raw_leg_id
+        if isinstance(raw_leg_id, str):
+            try:
+                return int(raw_leg_id)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _parse_order_timestamp(raw_timestamp: object) -> Optional[datetime]:
+        """Parse Schwab timestamps, tolerating 'Z' and compact timezone offsets."""
+        if raw_timestamp is None:
+            return None
+
+        value = str(raw_timestamp).strip()
+        if not value:
+            return None
+        if value.endswith("Z"):
+            value = f"{value[:-1]}+00:00"
+        if len(value) >= 5 and value[-5] in {"+", "-"} and value[-3] != ":":
+            value = f"{value[:-2]}:{value[-2:]}"
+
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=EASTERN_TZ)
+        return parsed
 
     def _get_scan_targets(self) -> list[str]:
         """Get the list of symbols to scan for opportunities.
