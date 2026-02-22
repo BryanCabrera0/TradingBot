@@ -2,17 +2,18 @@
 
 import logging
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from urllib.parse import quote_plus
 
 import requests
+from defusedxml import ElementTree as DET
 
 from bot.config import NewsConfig
 
 logger = logging.getLogger(__name__)
 
 GOOGLE_NEWS_RSS_SEARCH_URL = "https://news.google.com/rss/search"
+MAX_RSS_PAYLOAD_CHARS = 1_000_000
 
 POSITIVE_KEYWORDS = {
     "beats", "beat", "upgrade", "upgraded", "surge", "rally", "bullish",
@@ -136,7 +137,15 @@ class NewsScanner:
                 headers={"User-Agent": "TradingBot-NewsScanner/1.0"},
             )
             response.raise_for_status()
-            return _parse_rss_items(response.text, limit)
+            payload = response.text
+            if len(payload) > MAX_RSS_PAYLOAD_CHARS:
+                logger.warning(
+                    "Skipping oversized RSS response for query %r (%d chars).",
+                    query,
+                    len(payload),
+                )
+                return []
+            return _parse_rss_items(payload, limit)
         except Exception as exc:
             logger.debug("Failed to fetch news for query %r: %s", query, exc)
             return []
@@ -145,8 +154,8 @@ class NewsScanner:
 def _parse_rss_items(xml_text: str, limit: int) -> list[NewsItem]:
     """Parse RSS XML payload into structured news items."""
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
+        root = DET.fromstring(xml_text)
+    except DET.ParseError:
         return []
 
     items: list[NewsItem] = []

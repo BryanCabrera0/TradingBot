@@ -214,8 +214,8 @@ class MarketScanner:
                         sym = item.get("symbol", "")
                         if sym and sym.isalpha() and len(sym) <= 5:
                             movers.append(sym)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    logger.debug("Failed to fetch movers for %s: %s", index, exc)
         except Exception as e:
             logger.debug("Movers fetch failed: %s", e)
         return list(dict.fromkeys(movers))  # Dedupe
