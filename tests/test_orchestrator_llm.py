@@ -78,6 +78,29 @@ class OrchestratorLLMTests(unittest.TestCase):
         _, kwargs = bot.paper_trader.execute_open.call_args
         self.assertEqual(kwargs["quantity"], 2)
 
+    def test_successful_open_updates_intra_cycle_risk_state(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "Approved"))
+        bot.llm_advisor = mock.Mock()
+        bot.llm_advisor.review_trade.return_value = LLMDecision(
+            approve=True,
+            confidence=0.9,
+            risk_adjustment=1.0,
+            reason="ok",
+        )
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED"})
+
+        signal = make_signal()
+        executed = bot._try_execute_entry(signal)
+
+        self.assertTrue(executed)
+        self.assertEqual(len(bot.risk_manager.portfolio.open_positions), 1)
+        self.assertEqual(
+            bot.risk_manager.portfolio.total_risk_deployed,
+            signal.analysis.max_loss * 100,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

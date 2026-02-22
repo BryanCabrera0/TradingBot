@@ -27,8 +27,6 @@ class RiskManager:
     def __init__(self, config: RiskConfig):
         self.config = config
         self.portfolio = PortfolioState()
-        self._trades_today = 0
-        self._today = date.today()
 
     def update_portfolio(
         self,
@@ -43,8 +41,6 @@ class RiskManager:
         today = date.today()
         if self.portfolio.daily_pnl_date != today:
             self.portfolio.daily_pnl_date = today
-            self._trades_today = 0
-            self._today = today
         self.portfolio.daily_pnl = daily_pnl
 
         # Calculate total risk deployed
@@ -54,6 +50,27 @@ class RiskManager:
             quantity = pos.get("quantity", 1)
             total_risk += max_loss * quantity * 100  # per contract
         self.portfolio.total_risk_deployed = total_risk
+
+    def can_open_more_positions(self) -> bool:
+        """Return whether the portfolio has capacity for another position."""
+        return len(self.portfolio.open_positions) < self.config.max_open_positions
+
+    def register_open_position(
+        self,
+        symbol: str,
+        max_loss_per_contract: float,
+        quantity: int,
+    ) -> None:
+        """Track a newly opened position immediately for intra-cycle risk checks."""
+        position = {
+            "symbol": symbol,
+            "max_loss": max(0.0, float(max_loss_per_contract)),
+            "quantity": max(1, int(quantity)),
+        }
+        self.portfolio.open_positions.append(position)
+        self.portfolio.total_risk_deployed += (
+            position["max_loss"] * position["quantity"] * 100
+        )
 
     def approve_trade(self, signal: TradeSignal) -> tuple[bool, str]:
         """Check if a trade is allowed under current risk limits.

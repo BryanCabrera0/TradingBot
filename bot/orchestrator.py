@@ -286,6 +286,13 @@ class TradingBot:
         targets = self._get_scan_targets()
 
         for symbol in targets:
+            if not self.risk_manager.can_open_more_positions():
+                logger.info(
+                    "Max open positions reached (%d). Stopping entry scan.",
+                    self.config.risk.max_open_positions,
+                )
+                break
+
             logger.info("Scanning %s...", symbol)
 
             try:
@@ -315,6 +322,8 @@ class TradingBot:
                 # Try to execute the best signal (risk manager may reject)
                 for signal in all_signals[:3]:  # Try top 3 at most
                     self._try_execute_entry(signal)
+                    if not self.risk_manager.can_open_more_positions():
+                        break
 
             except Exception as e:
                 logger.error("Error scanning %s: %s", symbol, e)
@@ -473,6 +482,10 @@ class TradingBot:
             return False
 
         analysis = signal.analysis
+        if analysis is None:
+            logger.warning("Signal %s on %s missing analysis. Skipping.", signal.strategy, signal.symbol)
+            return False
+
         logger.info(
             "EXECUTING TRADE: %s on %s | %d contracts | "
             "Credit: $%.2f | Max loss: $%.2f | POP: %.1f%% | Score: %.1f",
@@ -503,9 +516,21 @@ class TradingBot:
                 details=details,
             )
             logger.info("Paper trade opened: %s", result)
+            self.risk_manager.register_open_position(
+                symbol=signal.symbol,
+                max_loss_per_contract=analysis.max_loss,
+                quantity=signal.quantity,
+            )
             return True
-        else:
-            return self._execute_live_entry(signal)
+
+        opened = self._execute_live_entry(signal)
+        if opened:
+            self.risk_manager.register_open_position(
+                symbol=signal.symbol,
+                max_loss_per_contract=analysis.max_loss,
+                quantity=signal.quantity,
+            )
+        return opened
 
     def _review_entry_with_llm(self, signal: TradeSignal) -> bool:
         """Optionally review an entry with the configured LLM advisor."""
