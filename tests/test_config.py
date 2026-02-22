@@ -78,6 +78,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm.temperature, 2.0)
         self.assertEqual(cfg.llm.min_confidence, 0.0)
 
+    def test_news_config_normalizes_and_clamps(self) -> None:
+        config_path = self._write_config(
+            """
+            news:
+              provider: " GOOGLE_RSS "
+              cache_seconds: -5
+              request_timeout_seconds: 0
+              max_symbol_headlines: 0
+              max_market_headlines: -3
+              market_queries: ["stock market", " STOCK MARKET ", "", "inflation report"]
+            """
+        )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.news.provider, "google_rss")
+        self.assertEqual(cfg.news.cache_seconds, 0)
+        self.assertEqual(cfg.news.request_timeout_seconds, 1)
+        self.assertEqual(cfg.news.max_symbol_headlines, 1)
+        self.assertEqual(cfg.news.max_market_headlines, 1)
+        self.assertEqual(cfg.news.market_queries, ["stock market", "inflation report"])
+
 
 if __name__ == "__main__":
     unittest.main()

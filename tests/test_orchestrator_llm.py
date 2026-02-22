@@ -33,6 +33,7 @@ def make_config(mode: str) -> BotConfig:
     cfg.trading_mode = "paper"
     cfg.scanner.enabled = False
     cfg.llm.enabled = True
+    cfg.news.enabled = False
     cfg.llm.mode = mode
     cfg.credit_spreads.enabled = True
     cfg.iron_condors.enabled = False

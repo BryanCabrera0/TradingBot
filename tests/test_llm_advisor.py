@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -76,6 +77,58 @@ class LLMAdvisorTests(unittest.TestCase):
         payload = json.loads(prompt)
 
         self.assertEqual(payload["risk_style"], "moderate")
+
+    def test_openai_uses_responses_api(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(enabled=True, provider="openai", model="gpt-5.2-pro")
+        )
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output_text": (
+                '{"approve":true,"confidence":0.9,'
+                '"risk_adjustment":1.0,"reason":"ok"}'
+            )
+        }
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.llm_advisor.requests.post", return_value=response) as post:
+                raw = advisor._query_openai("{}")
+
+        self.assertIn('"approve":true', raw.replace(" ", ""))
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "https://api.openai.com/v1/responses")
+        self.assertEqual(kwargs["json"]["model"], "gpt-5.2-pro")
+        self.assertEqual(kwargs["json"]["text"]["format"]["type"], "json_schema")
+
+    def test_openai_fallback_extracts_text_from_output_blocks(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(enabled=True, provider="openai", model="gpt-5.2-pro")
+        )
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output_text": "",
+            "output": [
+                {
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                '{"approve":false,"confidence":0.3,'
+                                '"risk_adjustment":0.6,"reason":"headline risk"}'
+                            ),
+                        }
+                    ]
+                }
+            ],
+        }
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.llm_advisor.requests.post", return_value=response):
+                raw = advisor._query_openai("{}")
+
+        self.assertIn("headline risk", raw)
 
 
 if __name__ == "__main__":

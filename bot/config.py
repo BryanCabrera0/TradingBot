@@ -96,14 +96,35 @@ class ScheduleConfig:
 class LLMConfig:
     enabled: bool = False
     # "ollama" for local models, "openai" for cloud models
-    provider: str = "ollama"
-    model: str = "llama3.1:8b"
+    provider: str = "openai"
+    model: str = "gpt-5.2-pro"
     base_url: str = "http://127.0.0.1:11434"
     mode: str = "advisory"  # "advisory" or "blocking"
     risk_style: str = "moderate"  # "conservative" | "moderate" | "aggressive"
     timeout_seconds: int = 20
     temperature: float = 0.1
     min_confidence: float = 0.55
+
+
+@dataclass
+class NewsConfig:
+    enabled: bool = True
+    provider: str = "google_rss"
+    cache_seconds: int = 900
+    request_timeout_seconds: int = 10
+    max_symbol_headlines: int = 8
+    max_market_headlines: int = 15
+    include_symbol_news: bool = True
+    include_market_news: bool = True
+    market_queries: list = field(
+        default_factory=lambda: [
+            "stock market",
+            "federal reserve interest rates",
+            "inflation report",
+            "earnings season",
+            "options market volatility",
+        ]
+    )
 
 
 @dataclass
@@ -120,6 +141,7 @@ class BotConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
     log_level: str = "INFO"
     log_file: str = "logs/tradingbot.log"
 
@@ -167,6 +189,25 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     )
     cfg.llm.min_confidence = _env_float(
         "LLM_MIN_CONFIDENCE", cfg.llm.min_confidence, minimum=0.0, maximum=1.0
+    )
+    cfg.news.enabled = _env_bool("NEWS_ENABLED", cfg.news.enabled)
+    cfg.news.cache_seconds = _env_int(
+        "NEWS_CACHE_SECONDS", cfg.news.cache_seconds, minimum=0
+    )
+    cfg.news.request_timeout_seconds = _env_int(
+        "NEWS_REQUEST_TIMEOUT_SECONDS", cfg.news.request_timeout_seconds, minimum=1
+    )
+    cfg.news.max_symbol_headlines = _env_int(
+        "NEWS_MAX_SYMBOL_HEADLINES", cfg.news.max_symbol_headlines, minimum=1
+    )
+    cfg.news.max_market_headlines = _env_int(
+        "NEWS_MAX_MARKET_HEADLINES", cfg.news.max_market_headlines, minimum=1
+    )
+    cfg.news.include_symbol_news = _env_bool(
+        "NEWS_INCLUDE_SYMBOL_NEWS", cfg.news.include_symbol_news
+    )
+    cfg.news.include_market_news = _env_bool(
+        "NEWS_INCLUDE_MARKET_NEWS", cfg.news.include_market_news
     )
 
     _normalize_config(cfg)
@@ -222,6 +263,12 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in llm.items():
             if hasattr(cfg.llm, key):
                 setattr(cfg.llm, key, val)
+
+    news = raw.get("news", {})
+    if news:
+        for key, val in news.items():
+            if hasattr(cfg.news, key):
+                setattr(cfg.news, key, val)
 
     log_cfg = raw.get("logging", {})
     if log_cfg:
@@ -331,6 +378,29 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.llm.temperature = max(0.0, min(2.0, float(cfg.llm.temperature)))
     cfg.llm.min_confidence = max(0.0, min(1.0, float(cfg.llm.min_confidence)))
 
+    cfg.news.provider = _normalize_choice(
+        cfg.news.provider,
+        allowed={"google_rss"},
+        default="google_rss",
+        field_name="news.provider",
+    )
+    cfg.news.cache_seconds = max(0, int(cfg.news.cache_seconds))
+    cfg.news.request_timeout_seconds = max(1, int(cfg.news.request_timeout_seconds))
+    cfg.news.max_symbol_headlines = max(1, int(cfg.news.max_symbol_headlines))
+    cfg.news.max_market_headlines = max(1, int(cfg.news.max_market_headlines))
+    cfg.news.include_symbol_news = bool(cfg.news.include_symbol_news)
+    cfg.news.include_market_news = bool(cfg.news.include_market_news)
+    cfg.news.market_queries = _normalize_string_list(
+        cfg.news.market_queries,
+        default=[
+            "stock market",
+            "federal reserve interest rates",
+            "inflation report",
+            "earnings season",
+            "options market volatility",
+        ],
+    )
+
 
 def _normalize_choice(
     value: object,
@@ -384,3 +454,23 @@ def _normalize_trading_days(value: object) -> list[str]:
             normalized.append(day)
 
     return normalized or ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
+
+def _normalize_string_list(value: object, default: list[str]) -> list[str]:
+    """Normalize a list of non-empty strings with de-duplication."""
+    if not isinstance(value, list):
+        return default
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        text = str(raw).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+
+    return normalized or default

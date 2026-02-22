@@ -110,15 +110,33 @@ schedule:
 # Optional LLM advisor
 # Use provider "ollama" for local models on your Mac, or "openai" for cloud.
 llm:
-  enabled: false
-  provider: ollama
-  model: llama3.1:8b
+  enabled: true
+  provider: openai
+  model: gpt-5.2-pro
   base_url: http://127.0.0.1:11434
   mode: advisory   # advisory | blocking
   risk_style: moderate   # conservative | moderate | aggressive
   timeout_seconds: 20
   temperature: 0.1
   min_confidence: 0.55
+
+# News intelligence layer
+# Pulls stock-specific and market-level headlines and includes them in LLM review context.
+news:
+  enabled: true
+  provider: google_rss
+  cache_seconds: 900
+  request_timeout_seconds: 10
+  max_symbol_headlines: 8
+  max_market_headlines: 15
+  include_symbol_news: true
+  include_market_news: true
+  market_queries:
+    - "stock market"
+    - "federal reserve interest rates"
+    - "inflation report"
+    - "earnings season"
+    - "options market volatility"
 
 # Logging
 logging:

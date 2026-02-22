@@ -128,20 +128,33 @@ class LLMAdvisor:
         payload = {
             "model": self.config.model,
             "temperature": self.config.temperature,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an options risk reviewer. Reply with strict JSON only "
-                        "using fields approve, confidence, risk_adjustment, and reason."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "instructions": (
+                "You are an options risk reviewer. Reply with strict JSON only "
+                "using fields approve, confidence, risk_adjustment, and reason."
+            ),
+            "input": prompt,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "trade_review",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "approve": {"type": "boolean"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            "risk_adjustment": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+                            "reason": {"type": "string", "maxLength": 180},
+                        },
+                        "required": ["approve", "confidence", "risk_adjustment", "reason"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
         }
 
         response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1/responses",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -151,15 +164,37 @@ class LLMAdvisor:
         )
         response.raise_for_status()
         data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise RuntimeError("OpenAI returned no choices")
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
 
-        message = choices[0].get("message", {})
-        content = message.get("content", "")
-        if not isinstance(content, str):
-            raise RuntimeError("OpenAI returned non-text content")
-        return content.strip()
+        extracted = self._extract_response_text(data)
+        if extracted:
+            return extracted
+
+        raise RuntimeError("OpenAI returned no text output")
+
+    @staticmethod
+    def _extract_response_text(data: dict) -> str:
+        """Best-effort extraction of text from Responses API payloads."""
+        output = data.get("output", [])
+        if not isinstance(output, list):
+            return ""
+
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+
+        return ""
 
     def _build_prompt(self, signal: TradeSignal, context: Optional[dict]) -> str:
         analysis = signal.analysis
@@ -193,6 +228,7 @@ class LLMAdvisor:
         prompt_payload = {
             "task": (
                 "Review this options trade and decide if it should be entered right now. "
+                "Use trade metrics, portfolio constraints, and provided news context. "
                 "If risk looks elevated, you may reduce position size via risk_adjustment."
             ),
             "risk_style": risk_style,
@@ -203,6 +239,7 @@ class LLMAdvisor:
                 "decision_rules": [
                     "Set approve=false when trade quality is below policy thresholds.",
                     "Use risk_adjustment below 1.0 when uncertainty, event risk, or weak liquidity is present.",
+                    "Penalize setups with strongly negative symbol news or adverse macro headlines.",
                     "Keep risk_adjustment within 0.1 to 1.0.",
                 ],
             },

@@ -21,6 +21,7 @@ import schedule
 from bot.config import BotConfig, load_config
 from bot.schwab_client import SchwabClient
 from bot.llm_advisor import LLMAdvisor
+from bot.news_scanner import NewsScanner
 from bot.paper_trader import PaperTrader
 from bot.risk_manager import RiskManager
 from bot.market_scanner import MarketScanner
@@ -49,6 +50,9 @@ class TradingBot:
         self.llm_advisor: Optional[LLMAdvisor] = None
         if self.config.llm.enabled:
             self.llm_advisor = LLMAdvisor(self.config.llm)
+        self.news_scanner: Optional[NewsScanner] = None
+        if self.config.news.enabled:
+            self.news_scanner = NewsScanner(self.config.news)
 
         # Market data is required in both paper and live modes.
         self.schwab = SchwabClient(self.config.schwab)
@@ -87,6 +91,13 @@ class TradingBot:
                 self.config.llm.model,
                 self.config.llm.mode,
                 self.config.llm.risk_style,
+            )
+        if self.news_scanner:
+            logger.info(
+                "News scanner enabled | Provider: %s | Symbol headlines: %d | Market headlines: %d",
+                self.config.news.provider,
+                self.config.news.max_symbol_headlines,
+                self.config.news.max_market_headlines,
             )
 
     # ── Connection ───────────────────────────────────────────────────
@@ -544,6 +555,15 @@ class TradingBot:
             "daily_pnl": self.risk_manager.portfolio.daily_pnl,
             "deployed_risk": self.risk_manager.portfolio.total_risk_deployed,
         }
+        if self.news_scanner:
+            try:
+                context["news"] = self.news_scanner.build_context(signal.symbol)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch news context for %s: %s",
+                    signal.symbol,
+                    exc,
+                )
 
         try:
             decision = self.llm_advisor.review_trade(signal, context)

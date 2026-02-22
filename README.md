@@ -1,141 +1,91 @@
-# Options Trading Bot for ThinkorSwim / Charles Schwab
+# TradingBot for Schwab Options
 
-A fully automated options trading bot that connects to your ThinkorSwim (Charles Schwab) account and trades options strategies on your behalf.
+Automated options trading bot for Charles Schwab / ThinkorSwim with:
+- rule-based strategy scanning,
+- portfolio risk controls,
+- LLM trade review using OpenAI GPT (`gpt-5.2-pro`),
+- symbol + macro news intelligence for trade context.
 
 ## Strategies
 
-| Strategy | Description |
-|---|---|
-| **Credit Spreads** | Sells bull put spreads and/or bear call spreads to collect premium |
-| **Iron Condors** | Sells both a put spread and call spread, profiting when price stays in range |
-| **Covered Calls** | Sells calls against stock you already own for income |
-
-## Features
-
-- **Market scanner** — dynamically scans 150+ tickers across all sectors to find the best options-tradeable stocks each cycle, ranked by options volume, IV, bid-ask tightness, and liquidity (no static watchlist needed)
-- **Fully automated** — scans, enters, manages, and exits trades with zero manual intervention
-- **Risk management** — position sizing, portfolio limits, daily loss caps, per-symbol limits
-- **Paper trading** — test strategies with simulated money before going live
-- **Configurable** — tune every parameter via `config.yaml`
-- **Probability-based** — only enters trades above a minimum probability of profit threshold
-- **Multi-factor scoring** — ranks opportunities by probability, premium quality, liquidity, Greeks
-- **Automatic exits** — profit targets, stop losses, and DTE-based exits
-- **Optional LLM advisor** — local (Ollama) or cloud (OpenAI) model can review trades in advisory or blocking mode
+- Credit spreads (bull put / bear call)
+- Iron condors
+- Covered calls
 
 ## Quick Start
 
-### 1. Install dependencies
+1. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure
-
-Copy the example env file and add your Schwab credentials:
+2. Configure env:
 
 ```bash
 cp .env.example .env
-# Edit .env with your Schwab API credentials
 ```
 
-Edit `config.yaml` to adjust strategies, watchlist, risk limits, and schedule.
+3. Add Schwab credentials and OpenAI key in `.env`:
+- `SCHWAB_APP_KEY`
+- `SCHWAB_APP_SECRET`
+- `OPENAI_API_KEY`
 
-### 3. Authenticate (first time only)
+4. Run first-time Schwab OAuth:
 
 ```bash
 python -m bot.auth
 ```
 
-This opens a browser for Schwab OAuth login. After authorizing, a token is saved locally.
-
-### 4. Run in paper mode (recommended first)
+5. Run paper mode:
 
 ```bash
 python main.py
 ```
 
-### 5. Run in live mode
+6. Run live mode (after paper validation):
 
 ```bash
 python main.py --live
 ```
 
-## Usage
+## LLM + News Intelligence
 
+- LLM provider: OpenAI Responses API
+- Default model: `gpt-5.2-pro`
+- Review mode: `advisory` or `blocking`
+- News scanner:
+  - ticker-specific headlines (earnings, analysts, events),
+  - market-level headlines (Fed, inflation, volatility, macro risk),
+  - lightweight sentiment/topic extraction fed into LLM context.
+
+Tune these in `config.yaml`:
+- `llm.*`
+- `news.*`
+
+## Useful Commands
+
+```bash
+python main.py --once
+python main.py --preflight-only
+python main.py --report
+python main.py --log-level DEBUG
 ```
-python main.py [options]
 
-Options:
-  --config FILE    Path to config file (default: config.yaml)
-  --live           Enable live trading (real money)
-  --once           Run a single scan and exit
-  --report         Show paper trading performance report
-  --preflight-only Run startup checks and exit
-  --log-level LVL  Override log level (DEBUG/INFO/WARNING/ERROR)
-```
+## Project Layout
 
-## Getting Schwab API Credentials
-
-1. Go to https://developer.schwab.com/
-2. Create a developer account
-3. Register a new application
-4. Note your **App Key** and **App Secret**
-5. Set callback URL to `https://127.0.0.1:8182/callback`
-6. Add credentials to your `.env` file
-
-## Configuration
-
-All parameters are in `config.yaml`. Key settings:
-
-- **scanner** — enable/disable dynamic market scanning, set price range, volume filters, result count
-- **strategies** — enable/disable each strategy, set delta targets, DTE ranges, spread widths
-- **watchlist** — fallback tickers (only used if scanner is disabled)
-- **risk** — max portfolio risk, max position size, max positions, daily loss limit
-- **schedule** — scan times, position check interval
-- **llm** — optional model-based trade review (`ollama` local or `openai` cloud)
-
-### LLM Advisor (Optional)
-
-The bot can use an LLM to review each entry signal before execution.
-
-- `advisory` mode: LLM gives guidance and optional size reduction, but bot can still trade.
-- `blocking` mode: LLM can veto a trade or block low-confidence decisions.
-- `risk_style`: `conservative`, `moderate`, or `aggressive` policy thresholds for model decisions.
-
-Local model example (recommended for on-device use):
-
-1. Run Ollama on your machine (`http://127.0.0.1:11434`).
-2. Set in `config.yaml`:
-   - `llm.enabled: true`
-   - `llm.provider: ollama`
-   - `llm.model: llama3.1:8b`
-   - `llm.risk_style: moderate` (or `conservative` / `aggressive`)
-
-Cloud model example:
-
-1. Set `llm.provider: openai` and `llm.model` in `config.yaml`.
-2. Set `OPENAI_API_KEY` in `.env`.
-
-## Architecture
-
-```
-main.py                  CLI entry point
+```text
+main.py
 bot/
-  orchestrator.py        Main automated trading loop
-  market_scanner.py      Dynamic market scanner (finds best stocks)
-  schwab_client.py       Schwab API wrapper (auth, data, orders)
-  llm_advisor.py         Optional LLM trade-review layer
-  analysis.py            Options analysis (Greeks, probability, scoring)
-  risk_manager.py        Risk management and position sizing
-  paper_trader.py        Paper trading simulator
-  config.py              Configuration management
-  auth.py                One-time OAuth flow
+  orchestrator.py
+  market_scanner.py
+  news_scanner.py
+  llm_advisor.py
+  risk_manager.py
+  schwab_client.py
+  paper_trader.py
   strategies/
-    base.py              Strategy base class
-    credit_spreads.py    Bull put / bear call spreads
-    iron_condors.py      Iron condor strategy
-    covered_calls.py     Covered call strategy
+tests/
 ```
 
 ## Disclaimer
