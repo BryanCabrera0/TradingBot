@@ -1,4 +1,4 @@
-# TradingBot for Schwab Options
+# Trading Bot
 
 Automated options trading bot for Charles Schwab / ThinkorSwim with:
 - rule-based strategy scanning,

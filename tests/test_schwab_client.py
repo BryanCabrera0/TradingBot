@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from bot.config import SchwabConfig
@@ -106,6 +108,24 @@ class SchwabClientParserTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             client.resolve_account_hash(require_unique=True)
+
+    def test_connect_rejects_symlink_token_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_token = Path(tmp_dir) / "token-real.json"
+            real_token.write_text("{}", encoding="utf-8")
+            symlink_token = Path(tmp_dir) / "token-link.json"
+            symlink_token.symlink_to(real_token)
+
+            client = SchwabClient(
+                SchwabConfig(
+                    token_path=str(symlink_token),
+                    app_key="test-app",
+                    app_secret="test-secret",
+                )
+            )
+
+            with self.assertRaises(RuntimeError):
+                client.connect()
 
 
 if __name__ == "__main__":

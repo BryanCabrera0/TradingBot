@@ -7,6 +7,12 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 
+from bot.file_security import (
+    atomic_write_private,
+    tighten_file_permissions,
+    validate_sensitive_file,
+)
+
 logger = logging.getLogger(__name__)
 
 PAPER_TRADES_FILE = "paper_trades.json"
@@ -33,7 +39,13 @@ class PaperTrader:
         path = Path(PAPER_TRADES_FILE)
         if path.exists():
             try:
-                with open(path) as f:
+                validate_sensitive_file(
+                    path,
+                    label="paper trading state file",
+                    allow_missing=False,
+                )
+                tighten_file_permissions(path, label="paper trading state file")
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 self.balance = data.get("balance", self.initial_balance)
                 self.positions = data.get("positions", [])
@@ -43,7 +55,9 @@ class PaperTrader:
                     "Loaded paper trading state: balance=$%.2f, %d open positions",
                     self.balance, len(self.positions),
                 )
-            except (json.JSONDecodeError, KeyError) as e:
+            except RuntimeError:
+                raise
+            except (json.JSONDecodeError, KeyError, FileNotFoundError, OSError) as e:
                 logger.warning("Failed to load paper state: %s. Starting fresh.", e)
 
     def _save_state(self) -> None:
@@ -55,8 +69,9 @@ class PaperTrader:
             "orders": self.orders,
             "last_updated": datetime.now().isoformat(),
         }
-        with open(PAPER_TRADES_FILE, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        path = Path(PAPER_TRADES_FILE)
+        payload = json.dumps(data, indent=2, default=str)
+        atomic_write_private(path, payload, label="paper trading state file")
 
     # ── Account Info ─────────────────────────────────────────────────
 

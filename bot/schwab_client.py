@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import schwab
@@ -19,6 +20,7 @@ from schwab.orders.options import (
 from schwab.orders.common import Duration, Session
 
 from bot.config import SchwabConfig
+from bot.file_security import tighten_file_permissions, validate_sensitive_file
 from bot.number_utils import safe_float, safe_int
 
 logger = logging.getLogger(__name__)
@@ -37,12 +39,24 @@ class SchwabClient:
         if self._client is not None:
             return
 
+        token_path = Path(self.config.token_path).expanduser()
+        token_path_str = str(token_path)
+
         try:
+            validate_sensitive_file(
+                token_path,
+                label="Schwab token file",
+                allow_missing=True,
+            )
+            if token_path.exists():
+                tighten_file_permissions(token_path, label="Schwab token file")
             self._client = schwab.auth.client_from_token_file(
-                self.config.token_path,
+                token_path_str,
                 self.config.app_key,
                 self.config.app_secret,
             )
+            if token_path.exists():
+                tighten_file_permissions(token_path, label="Schwab token file")
             logger.info("Authenticated via existing token file.")
         except FileNotFoundError:
             logger.info(
