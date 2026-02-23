@@ -161,6 +161,37 @@ class SchwabClientParserTests(unittest.TestCase):
 
         self.assertFalse(_market_open_from_hours_payload(payload, now_dt))
 
+    def test_build_iron_condor_open_and_close_orders(self) -> None:
+        client = SchwabClient(SchwabConfig())
+
+        open_order = client.build_iron_condor(
+            symbol="SPY",
+            expiration="2026-03-20",
+            put_long_strike=90,
+            put_short_strike=95,
+            call_short_strike=110,
+            call_long_strike=115,
+            quantity=1,
+            price=1.2,
+        ).build()
+        close_order = client.build_iron_condor_close(
+            symbol="SPY",
+            expiration="2026-03-20",
+            put_long_strike=90,
+            put_short_strike=95,
+            call_short_strike=110,
+            call_long_strike=115,
+            quantity=1,
+            price=0.6,
+        ).build()
+
+        self.assertEqual(open_order["orderType"], "NET_CREDIT")
+        self.assertEqual(close_order["orderType"], "NET_DEBIT")
+        self.assertEqual(open_order["complexOrderStrategyType"], "IRON_CONDOR")
+        self.assertEqual(close_order["complexOrderStrategyType"], "IRON_CONDOR")
+        self.assertEqual(len(open_order["orderLegCollection"]), 4)
+        self.assertEqual(len(close_order["orderLegCollection"]), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

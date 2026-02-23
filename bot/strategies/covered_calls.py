@@ -108,41 +108,36 @@ class CoveredCallStrategy(BaseStrategy):
 
             entry_credit = pos.get("entry_credit", 0)
             current_value = pos.get("current_value", 0)
+            exit_reason = ""
 
-            if entry_credit <= 0:
-                continue
+            if entry_credit > 0:
+                pnl = entry_credit - current_value
+                pnl_pct = pnl / entry_credit if entry_credit > 0 else 0
 
-            pnl = entry_credit - current_value
-            pnl_pct = pnl / entry_credit if entry_credit > 0 else 0
-
-            # Close at profit target to free up shares for a new call
-            if pnl_pct >= profit_target_pct:
-                self.logger.info(
-                    "PROFIT TARGET hit on %s covered call: P/L %.1f%%",
-                    pos.get("symbol"), pnl_pct * 100,
-                )
-                signals.append(TradeSignal(
-                    action="close",
-                    strategy="covered_call",
-                    symbol=pos.get("symbol", ""),
-                    position_id=pos.get("position_id"),
-                    reason=f"Profit target reached ({pnl_pct:.1%})",
-                ))
+                # Close at profit target to free up shares for a new call
+                if pnl_pct >= profit_target_pct:
+                    self.logger.info(
+                        "PROFIT TARGET hit on %s covered call: P/L %.1f%%",
+                        pos.get("symbol"), pnl_pct * 100,
+                    )
+                    exit_reason = f"Profit target reached ({pnl_pct:.1%})"
 
             # Close if approaching expiration to avoid assignment.
-            # Use elif to avoid duplicate close signals for the same position.
-            elif pos.get("dte_remaining", 999) <= 3:
+            if not exit_reason and pos.get("dte_remaining", 999) <= 3:
                 dte = pos.get("dte_remaining", 999)
                 self.logger.info(
                     "DTE EXIT on %s covered call: %d DTE",
                     pos.get("symbol"), dte,
                 )
+                exit_reason = f"Approaching expiration ({dte} DTE)"
+
+            if exit_reason:
                 signals.append(TradeSignal(
                     action="close",
                     strategy="covered_call",
                     symbol=pos.get("symbol", ""),
                     position_id=pos.get("position_id"),
-                    reason=f"Approaching expiration ({dte} DTE)",
+                    reason=exit_reason,
                 ))
 
         return signals

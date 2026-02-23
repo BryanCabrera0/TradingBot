@@ -116,52 +116,40 @@ class IronCondorStrategy(BaseStrategy):
 
             entry_credit = pos.get("entry_credit", 0)
             current_value = pos.get("current_value", 0)
+            exit_reason = ""
 
-            if entry_credit <= 0:
-                continue
+            if entry_credit > 0:
+                pnl = entry_credit - current_value
+                pnl_pct = pnl / entry_credit if entry_credit > 0 else 0
 
-            pnl = entry_credit - current_value
-            pnl_pct = pnl / entry_credit if entry_credit > 0 else 0
+                if pnl_pct >= profit_target_pct:
+                    self.logger.info(
+                        "PROFIT TARGET hit on %s condor: P/L %.1f%%",
+                        pos.get("symbol"), pnl_pct * 100,
+                    )
+                    exit_reason = f"Profit target reached ({pnl_pct:.1%})"
+                elif pnl < 0 and abs(pnl) >= entry_credit * stop_loss_pct:
+                    self.logger.warning(
+                        "STOP LOSS hit on %s condor: Loss $%.2f",
+                        pos.get("symbol"), abs(pnl),
+                    )
+                    exit_reason = f"Stop loss triggered (loss {abs(pnl):.2f})"
 
-            if pnl_pct >= profit_target_pct:
-                self.logger.info(
-                    "PROFIT TARGET hit on %s condor: P/L %.1f%%",
-                    pos.get("symbol"), pnl_pct * 100,
-                )
-                signals.append(TradeSignal(
-                    action="close",
-                    strategy="iron_condor",
-                    symbol=pos.get("symbol", ""),
-                    position_id=pos.get("position_id"),
-                    reason=f"Profit target reached ({pnl_pct:.1%})",
-                ))
-
-            elif pnl < 0 and abs(pnl) >= entry_credit * stop_loss_pct:
-                self.logger.warning(
-                    "STOP LOSS hit on %s condor: Loss $%.2f",
-                    pos.get("symbol"), abs(pnl),
-                )
-                signals.append(TradeSignal(
-                    action="close",
-                    strategy="iron_condor",
-                    symbol=pos.get("symbol", ""),
-                    position_id=pos.get("position_id"),
-                    reason=f"Stop loss triggered (loss {abs(pnl):.2f})",
-                ))
-
-            # Use elif to avoid duplicate close signals for the same position.
-            elif pos.get("dte_remaining", 999) <= 5:
+            if not exit_reason and pos.get("dte_remaining", 999) <= 5:
                 dte = pos.get("dte_remaining", 999)
                 self.logger.info(
                     "DTE EXIT on %s condor: %d days to expiration",
                     pos.get("symbol"), dte,
                 )
+                exit_reason = f"Approaching expiration ({dte} DTE)"
+
+            if exit_reason:
                 signals.append(TradeSignal(
                     action="close",
                     strategy="iron_condor",
                     symbol=pos.get("symbol", ""),
                     position_id=pos.get("position_id"),
-                    reason=f"Approaching expiration ({dte} DTE)",
+                    reason=exit_reason,
                 ))
 
         return signals

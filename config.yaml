@@ -25,7 +25,7 @@ strategies:
     stop_loss_pct: 2.0
 
   iron_condors:
-    enabled: true
+    enabled: false
     min_dte: 25
     max_dte: 50
     # Target delta for short legs
@@ -89,6 +89,8 @@ risk:
   min_account_balance: 5000
   # Max daily loss before stopping (% of account)
   max_daily_loss_pct: 3.0
+  # Proxy downside risk used for covered-call risk budgeting
+  covered_call_notional_risk_pct: 20.0
 
 # Scheduling
 schedule:
@@ -106,6 +108,14 @@ schedule:
     - wednesday
     - thursday
     - friday
+
+# Live execution controls
+execution:
+  # Cancel stale working/queued live orders after this many minutes
+  cancel_stale_orders: true
+  stale_order_minutes: 20
+  # Capture partial-fill quantities/prices into live ledger state
+  include_partials_in_ledger: true
 
 # Optional LLM advisor
 # Use provider "ollama" for local models on your Mac, or "openai" for cloud.
@@ -137,6 +147,13 @@ news:
     - "inflation report"
     - "earnings season"
     - "options market volatility"
+
+# Optional alerting webhook (Slack/Teams/Discord-compatible JSON webhook)
+alerts:
+  enabled: false
+  webhook_url: ""
+  min_level: ERROR
+  timeout_seconds: 5
 
 # Logging
 logging:

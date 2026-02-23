@@ -7,6 +7,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import schwab
+from schwab.orders.generic import OrderBuilder
 from schwab.orders.options import (
     OptionSymbol,
     bear_call_vertical_close,
@@ -18,7 +19,14 @@ from schwab.orders.options import (
     option_sell_to_open_limit,
     option_sell_to_open_market,
 )
-from schwab.orders.common import Duration, Session
+from schwab.orders.common import (
+    ComplexOrderStrategyType,
+    Duration,
+    OptionInstruction,
+    OrderStrategyType,
+    OrderType,
+    Session,
+)
 
 from bot.config import SchwabConfig
 from bot.file_security import tighten_file_permissions, validate_sensitive_file
@@ -433,14 +441,66 @@ class SchwabClient:
         quantity: int = 1,
         price: Optional[float] = None,
     ):
-        """Build an iron condor order.
+        """Build an iron-condor entry order (net credit)."""
+        if price is None or price <= 0:
+            raise ValueError("Iron condor open requires a positive net credit.")
 
-        Note: schwab-py does not currently expose a first-class helper for
-        four-leg iron condors in this codebase's dependency range.
-        """
-        raise NotImplementedError(
-            "Iron condor live order builder is not supported by installed schwab-py."
+        put_long_sym = _make_option_symbol(symbol, expiration, "P", put_long_strike)
+        put_short_sym = _make_option_symbol(symbol, expiration, "P", put_short_strike)
+        call_short_sym = _make_option_symbol(symbol, expiration, "C", call_short_strike)
+        call_long_sym = _make_option_symbol(symbol, expiration, "C", call_long_strike)
+
+        order = (
+            OrderBuilder()
+            .set_order_type(OrderType.NET_CREDIT)
+            .set_complex_order_strategy_type(ComplexOrderStrategyType.IRON_CONDOR)
+            .set_order_strategy_type(OrderStrategyType.SINGLE)
+            .set_quantity(quantity)
+            .set_price(price)
+            .add_option_leg(OptionInstruction.BUY_TO_OPEN, put_long_sym, quantity)
+            .add_option_leg(OptionInstruction.SELL_TO_OPEN, put_short_sym, quantity)
+            .add_option_leg(OptionInstruction.SELL_TO_OPEN, call_short_sym, quantity)
+            .add_option_leg(OptionInstruction.BUY_TO_OPEN, call_long_sym, quantity)
         )
+        order.set_duration(Duration.DAY)
+        order.set_session(Session.NORMAL)
+        return order
+
+    def build_iron_condor_close(
+        self,
+        symbol: str,
+        expiration: str,
+        put_long_strike: float,
+        put_short_strike: float,
+        call_short_strike: float,
+        call_long_strike: float,
+        quantity: int = 1,
+        price: Optional[float] = None,
+    ):
+        """Build an iron-condor exit order (net debit)."""
+        if price is None or price <= 0:
+            raise ValueError("Iron condor close requires a positive net debit.")
+
+        put_long_sym = _make_option_symbol(symbol, expiration, "P", put_long_strike)
+        put_short_sym = _make_option_symbol(symbol, expiration, "P", put_short_strike)
+        call_short_sym = _make_option_symbol(symbol, expiration, "C", call_short_strike)
+        call_long_sym = _make_option_symbol(symbol, expiration, "C", call_long_strike)
+
+        order = (
+            OrderBuilder()
+            .set_order_type(OrderType.NET_DEBIT)
+            .set_complex_order_strategy_type(ComplexOrderStrategyType.IRON_CONDOR)
+            .set_order_strategy_type(OrderStrategyType.SINGLE)
+            .set_quantity(quantity)
+            .set_price(price)
+            .add_option_leg(OptionInstruction.SELL_TO_CLOSE, put_long_sym, quantity)
+            .add_option_leg(OptionInstruction.BUY_TO_CLOSE, put_short_sym, quantity)
+            .add_option_leg(OptionInstruction.BUY_TO_CLOSE, call_short_sym, quantity)
+            .add_option_leg(OptionInstruction.SELL_TO_CLOSE, call_long_sym, quantity)
+        )
+        order.set_duration(Duration.DAY)
+        order.set_session(Session.NORMAL)
+        return order
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

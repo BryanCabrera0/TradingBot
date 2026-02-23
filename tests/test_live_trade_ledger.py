@@ -56,6 +56,29 @@ class LiveTradeLedgerTests(unittest.TestCase):
             self.assertEqual(closed["status"], "closed")
             self.assertEqual(closed["realized_pnl"], 70.0)
 
+    def test_partial_fill_helpers_update_pending_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger = LiveTradeLedger(state_file=str(Path(tmp_dir) / "live_ledger.json"))
+            position_id = ledger.register_entry_order(
+                strategy="bull_put_spread",
+                symbol="SPY",
+                quantity=2,
+                max_loss=4.0,
+                entry_credit=1.4,
+                details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95},
+                entry_order_id="entry-partial",
+            )
+
+            changed = ledger.apply_partial_entry_fill(
+                "entry-partial",
+                filled_quantity=1.0,
+                entry_credit=1.25,
+            )
+            self.assertTrue(changed)
+            position = ledger.get_position(position_id)
+            self.assertEqual(position["entry_filled_quantity"], 1.0)
+            self.assertEqual(position["entry_credit"], 1.25)
+
     def test_close_missing_from_broker_marks_external_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             ledger_path = Path(tmp_dir) / "live_ledger.json"
@@ -76,10 +99,16 @@ class LiveTradeLedgerTests(unittest.TestCase):
             changed = ledger.close_missing_from_broker(
                 open_strategy_symbols=set(),
                 position_symbol_resolver=lambda _position: {"AAPL_032026C220"},
+                close_metadata_resolver=lambda _position, _symbols: {
+                    "close_value": 0.0,
+                    "realized_pnl": 100.0,
+                    "exit_reason": "exercise_or_assignment",
+                },
             )
             self.assertEqual(changed, 1)
             closed = ledger.get_position(position_id)
             self.assertEqual(closed["status"], "closed_external")
+            self.assertEqual(closed["realized_pnl"], 100.0)
 
 
 if __name__ == "__main__":

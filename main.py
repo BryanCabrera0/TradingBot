@@ -180,6 +180,11 @@ def main() -> None:
             bot.validate_live_readiness()
         except Exception as e:
             logger.error("Live preflight failed: %s", e)
+            bot._alert(
+                level="ERROR",
+                title="Live preflight failed",
+                message=str(e),
+            )
             sys.exit(1)
     elif args.preflight_only:
         logger.info("Running paper-mode connectivity preflight...")
@@ -188,6 +193,11 @@ def main() -> None:
             bot.validate_llm_readiness()
         except Exception as e:
             logger.error("Paper preflight failed: %s", e)
+            bot._alert(
+                level="ERROR",
+                title="Paper preflight failed",
+                message=str(e),
+            )
             sys.exit(1)
 
     if args.preflight_only:

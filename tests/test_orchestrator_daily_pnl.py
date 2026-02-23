@@ -160,6 +160,12 @@ class OrchestratorDailyPnlTests(unittest.TestCase):
         self.assertEqual(parsed_z.isoformat(), "2026-02-22T12:34:56+00:00")
         self.assertEqual(parsed_compact.isoformat(), "2026-02-22T12:34:56+00:00")
 
+    def test_option_symbol_key_normalizes_occ_and_underscore_formats(self) -> None:
+        occ = TradingBot._option_symbol_key("SPY  260320C00100000")
+        underscore = TradingBot._option_symbol_key("SPY_032026C100")
+
+        self.assertEqual(occ, underscore)
+
 
 if __name__ == "__main__":
     unittest.main()

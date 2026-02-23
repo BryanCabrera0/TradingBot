@@ -1,8 +1,10 @@
 import unittest
 from datetime import date, timedelta
 
+from bot.analysis import SpreadAnalysis
 from bot.config import RiskConfig
 from bot.risk_manager import RiskManager
+from bot.strategies.base import TradeSignal
 
 
 class RiskManagerTests(unittest.TestCase):
@@ -45,6 +47,31 @@ class RiskManagerTests(unittest.TestCase):
         )
 
         self.assertFalse(manager.can_open_more_positions())
+
+    def test_covered_call_uses_notional_risk_proxy_when_max_loss_missing(self) -> None:
+        manager = RiskManager(RiskConfig(covered_call_notional_risk_pct=20.0))
+        signal = TradeSignal(
+            action="open",
+            strategy="covered_call",
+            symbol="AAPL",
+            quantity=1,
+            analysis=SpreadAnalysis(
+                symbol="AAPL",
+                strategy="covered_call",
+                expiration="2026-03-20",
+                dte=30,
+                short_strike=200,
+                long_strike=0,
+                credit=1.0,
+                max_loss=0.0,
+                probability_of_profit=0.7,
+                score=55,
+            ),
+        )
+
+        loss = manager.effective_max_loss_per_contract(signal)
+
+        self.assertEqual(loss, 39.0)
 
 
 if __name__ == "__main__":

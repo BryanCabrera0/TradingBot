@@ -12,6 +12,12 @@ Automated options trading bot for Charles Schwab / ThinkorSwim with:
 - Iron condors
 - Covered calls
 
+Live execution supports all three strategies with:
+- persistent live trade ledger (`live_trades.json`),
+- order reconciliation (including stale-order cancellation policy),
+- automated exit order placement,
+- broker market-hours checks.
+
 ## Quick Start
 
 1. Install dependencies:
@@ -62,6 +68,8 @@ python main.py --live
 Tune these in `config.yaml`:
 - `llm.*`
 - `news.*`
+- `execution.*`
+- `alerts.*`
 
 ## Useful Commands
 
@@ -71,6 +79,13 @@ python main.py --preflight-only
 python main.py --report
 python main.py --log-level DEBUG
 ```
+
+## Operational Alerts
+
+You can enable webhook alerts for runtime failures/incidents:
+- `ALERTS_ENABLED=true`
+- `ALERTS_WEBHOOK_URL=...`
+- `ALERTS_MIN_LEVEL=ERROR`
 
 ## Project Layout
 

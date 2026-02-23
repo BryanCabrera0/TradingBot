@@ -36,7 +36,7 @@ class CreditSpreadConfig:
 
 @dataclass
 class IronCondorConfig:
-    enabled: bool = True
+    enabled: bool = False
     min_dte: int = 25
     max_dte: int = 50
     short_delta: float = 0.16
@@ -79,6 +79,7 @@ class RiskConfig:
     max_positions_per_symbol: int = 2
     min_account_balance: float = 5000.0
     max_daily_loss_pct: float = 3.0
+    covered_call_notional_risk_pct: float = 20.0
 
 
 @dataclass
@@ -90,6 +91,13 @@ class ScheduleConfig:
             "monday", "tuesday", "wednesday", "thursday", "friday"
         ]
     )
+
+
+@dataclass
+class ExecutionConfig:
+    cancel_stale_orders: bool = True
+    stale_order_minutes: int = 20
+    include_partials_in_ledger: bool = True
 
 
 @dataclass
@@ -128,6 +136,14 @@ class NewsConfig:
 
 
 @dataclass
+class AlertsConfig:
+    enabled: bool = False
+    webhook_url: str = ""
+    min_level: str = "ERROR"
+    timeout_seconds: int = 5
+
+
+@dataclass
 class BotConfig:
     trading_mode: str = "paper"
     schwab: SchwabConfig = field(default_factory=SchwabConfig)
@@ -140,8 +156,10 @@ class BotConfig:
     )
     risk: RiskConfig = field(default_factory=RiskConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
     log_level: str = "INFO"
     log_file: str = "logs/tradingbot.log"
 
@@ -209,6 +227,22 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.news.include_market_news = _env_bool(
         "NEWS_INCLUDE_MARKET_NEWS", cfg.news.include_market_news
     )
+    cfg.execution.cancel_stale_orders = _env_bool(
+        "EXECUTION_CANCEL_STALE_ORDERS", cfg.execution.cancel_stale_orders
+    )
+    cfg.execution.stale_order_minutes = _env_int(
+        "EXECUTION_STALE_ORDER_MINUTES", cfg.execution.stale_order_minutes, minimum=1
+    )
+    cfg.execution.include_partials_in_ledger = _env_bool(
+        "EXECUTION_INCLUDE_PARTIALS_IN_LEDGER",
+        cfg.execution.include_partials_in_ledger,
+    )
+    cfg.alerts.enabled = _env_bool("ALERTS_ENABLED", cfg.alerts.enabled)
+    cfg.alerts.webhook_url = os.getenv("ALERTS_WEBHOOK_URL", cfg.alerts.webhook_url)
+    cfg.alerts.min_level = os.getenv("ALERTS_MIN_LEVEL", cfg.alerts.min_level)
+    cfg.alerts.timeout_seconds = _env_int(
+        "ALERTS_TIMEOUT_SECONDS", cfg.alerts.timeout_seconds, minimum=1
+    )
 
     _normalize_config(cfg)
 
@@ -258,6 +292,12 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
             if hasattr(cfg.schedule, key):
                 setattr(cfg.schedule, key, val)
 
+    execution = raw.get("execution", {})
+    if execution:
+        for key, val in execution.items():
+            if hasattr(cfg.execution, key):
+                setattr(cfg.execution, key, val)
+
     llm = raw.get("llm", {})
     if llm:
         for key, val in llm.items():
@@ -269,6 +309,12 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in news.items():
             if hasattr(cfg.news, key):
                 setattr(cfg.news, key, val)
+
+    alerts = raw.get("alerts", {})
+    if alerts:
+        for key, val in alerts.items():
+            if hasattr(cfg.alerts, key):
+                setattr(cfg.alerts, key, val)
 
     log_cfg = raw.get("logging", {})
     if log_cfg:
@@ -372,8 +418,14 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.covered_calls.tickers = _normalize_symbol_list(
         cfg.covered_calls.tickers, default=[]
     )
+    cfg.risk.covered_call_notional_risk_pct = max(
+        0.0, min(100.0, float(cfg.risk.covered_call_notional_risk_pct))
+    )
 
     cfg.schedule.trading_days = _normalize_trading_days(cfg.schedule.trading_days)
+    cfg.execution.stale_order_minutes = max(1, int(cfg.execution.stale_order_minutes))
+    cfg.execution.cancel_stale_orders = bool(cfg.execution.cancel_stale_orders)
+    cfg.execution.include_partials_in_ledger = bool(cfg.execution.include_partials_in_ledger)
     cfg.llm.timeout_seconds = max(1, int(cfg.llm.timeout_seconds))
     cfg.llm.temperature = max(0.0, min(2.0, float(cfg.llm.temperature)))
     cfg.llm.min_confidence = max(0.0, min(1.0, float(cfg.llm.min_confidence)))
@@ -400,6 +452,14 @@ def _normalize_config(cfg: BotConfig) -> None:
             "options market volatility",
         ],
     )
+    cfg.alerts.min_level = _normalize_choice(
+        cfg.alerts.min_level,
+        allowed={"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
+        default="ERROR",
+        field_name="alerts.min_level",
+        transform=str.upper,
+    )
+    cfg.alerts.timeout_seconds = max(1, int(cfg.alerts.timeout_seconds))
 
 
 def _normalize_choice(

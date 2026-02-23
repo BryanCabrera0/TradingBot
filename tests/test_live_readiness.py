@@ -27,11 +27,11 @@ class LiveReadinessTests(unittest.TestCase):
         )
         self.assertFalse(TradingBot.is_market_open(pacific_after_close))
 
-    def test_preflight_rejects_unsupported_live_strategies(self) -> None:
+    def test_preflight_rejects_when_no_enabled_strategies(self) -> None:
         cfg = make_live_config()
         cfg.credit_spreads.enabled = False
         cfg.covered_calls.enabled = False
-        cfg.iron_condors.enabled = True
+        cfg.iron_condors.enabled = False
 
         bot = TradingBot(cfg)
 

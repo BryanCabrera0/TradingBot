@@ -60,17 +60,36 @@ class RiskManager:
         symbol: str,
         max_loss_per_contract: float,
         quantity: int,
+        strategy: str = "",
     ) -> None:
         """Track a newly opened position immediately for intra-cycle risk checks."""
         position = {
             "symbol": symbol,
             "max_loss": max(0.0, float(max_loss_per_contract)),
             "quantity": max(1, int(quantity)),
+            "strategy": strategy,
         }
         self.portfolio.open_positions.append(position)
         self.portfolio.total_risk_deployed += (
             position["max_loss"] * position["quantity"] * 100
         )
+
+    def effective_max_loss_per_contract(self, signal: TradeSignal) -> float:
+        """Return risk-model max loss per contract for a signal."""
+        analysis = signal.analysis
+        if analysis is None:
+            return 0.0
+
+        raw_max_loss = max(0.0, float(analysis.max_loss))
+        if signal.strategy != "covered_call" or raw_max_loss > 0:
+            return raw_max_loss
+
+        # Covered calls add option premium but still carry underlying downside.
+        short_strike = max(0.0, float(analysis.short_strike))
+        notional_proxy = short_strike
+        downside_pct = self.config.covered_call_notional_risk_pct / 100.0
+        risk_proxy = (notional_proxy * downside_pct) - max(0.0, float(analysis.credit))
+        return round(max(risk_proxy, max(0.25, float(analysis.credit))), 2)
 
     def approve_trade(self, signal: TradeSignal) -> tuple[bool, str]:
         """Check if a trade is allowed under current risk limits.
@@ -113,7 +132,8 @@ class RiskManager:
             )
 
         # ── Check 4: Single position risk ─────────────────────────
-        position_max_loss = analysis.max_loss * signal.quantity * 100
+        loss_per_contract = self.effective_max_loss_per_contract(signal)
+        position_max_loss = loss_per_contract * signal.quantity * 100
         max_position_risk = balance * (self.config.max_position_risk_pct / 100)
         if position_max_loss > max_position_risk:
             return False, (

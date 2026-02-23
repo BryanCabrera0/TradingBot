@@ -101,6 +101,35 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.news.max_market_headlines, 1)
         self.assertEqual(cfg.news.market_queries, ["stock market", "inflation report"])
 
+    def test_execution_and_alert_env_overrides(self) -> None:
+        config_path = self._write_config(
+            """
+            execution:
+              stale_order_minutes: 5
+            alerts:
+              min_level: warning
+            """
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "EXECUTION_STALE_ORDER_MINUTES": "0",
+                "EXECUTION_CANCEL_STALE_ORDERS": "false",
+                "ALERTS_ENABLED": "true",
+                "ALERTS_MIN_LEVEL": "critical",
+                "ALERTS_TIMEOUT_SECONDS": "0",
+            },
+            clear=True,
+        ):
+            cfg = load_config(config_path)
+
+        self.assertFalse(cfg.execution.cancel_stale_orders)
+        self.assertEqual(cfg.execution.stale_order_minutes, 1)
+        self.assertTrue(cfg.alerts.enabled)
+        self.assertEqual(cfg.alerts.min_level, "CRITICAL")
+        self.assertEqual(cfg.alerts.timeout_seconds, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

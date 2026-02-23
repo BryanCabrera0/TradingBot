@@ -11,6 +11,7 @@ This is the brain of the bot. It:
 
 from collections import defaultdict, deque
 import logging
+import re
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -19,12 +20,13 @@ from zoneinfo import ZoneInfo
 
 import schedule
 
+from bot.alerts import AlertManager
 from bot.config import BotConfig, load_config
 from bot.live_trade_ledger import LiveTradeLedger
-from bot.schwab_client import SchwabClient, _make_option_symbol
+from bot.schwab_client import SchwabClient
 from bot.llm_advisor import LLMAdvisor
 from bot.news_scanner import NewsScanner
-from bot.number_utils import safe_float
+from bot.number_utils import safe_float, safe_int
 from bot.paper_trader import PaperTrader
 from bot.risk_manager import RiskManager
 from bot.market_scanner import MarketScanner
@@ -35,7 +37,7 @@ from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
 
-LIVE_SUPPORTED_ENTRY_STRATEGIES = {"credit_spreads", "covered_calls"}
+LIVE_SUPPORTED_ENTRY_STRATEGIES = {"credit_spreads", "covered_calls", "iron_condors"}
 EASTERN_TZ = ZoneInfo("America/New_York")
 OPEN_LONG_INSTRUCTIONS = {"BUY_TO_OPEN"}
 OPEN_SHORT_INSTRUCTIONS = {"SELL_TO_OPEN", "SELL_SHORT"}
@@ -43,6 +45,23 @@ CLOSE_LONG_INSTRUCTIONS = {"SELL_TO_CLOSE"}
 CLOSE_SHORT_INSTRUCTIONS = {"BUY_TO_CLOSE", "BUY_TO_COVER"}
 ENTRY_ORDER_TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
 EXIT_ORDER_TERMINAL = ENTRY_ORDER_TERMINAL
+PENDING_ORDER_STATUSES = {
+    "AWAITING_PARENT_ORDER",
+    "AWAITING_CONDITION",
+    "AWAITING_MANUAL_REVIEW",
+    "ACCEPTED",
+    "AWAITING_UR_OUT",
+    "PENDING_ACTIVATION",
+    "QUEUED",
+    "WORKING",
+    "PENDING_CANCEL",
+    "PENDING_REPLACE",
+}
+PARTIAL_ORDER_STATUSES = {"PARTIALLY_FILLED", "WORKING", "QUEUED", "ACCEPTED"}
+OCC_COMPACT_PATTERN = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+UNDERSCORE_OPTION_PATTERN = re.compile(
+    r"^([A-Z]{1,6})_(\d{2})(\d{2})(\d{2})([CP])(\d+(?:\.\d+)?)$"
+)
 
 
 class TradingBot:
@@ -53,11 +72,13 @@ class TradingBot:
         self.is_paper = self.config.trading_mode == "paper"
         self._running = False
         self._market_open_cache: Optional[tuple[datetime, bool]] = None
+        self._live_bootstrap_done = False
 
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
         self.paper_trader = PaperTrader() if self.is_paper else None
         self.live_ledger = None if self.is_paper else LiveTradeLedger()
+        self.alerts = AlertManager(self.config.alerts)
         self.llm_advisor: Optional[LLMAdvisor] = None
         if self.config.llm.enabled:
             self.llm_advisor = LLMAdvisor(self.config.llm)
@@ -111,6 +132,22 @@ class TradingBot:
                 self.config.news.max_market_headlines,
             )
 
+    def _alert(
+        self,
+        *,
+        level: str,
+        title: str,
+        message: str,
+        context: Optional[dict] = None,
+    ) -> None:
+        """Send an operational alert if alerting is configured."""
+        self.alerts.send(
+            level=level,
+            title=title,
+            message=message,
+            context=context or {},
+        )
+
     # ── Connection ───────────────────────────────────────────────────
 
     def connect(self) -> None:
@@ -132,6 +169,20 @@ class TradingBot:
             account_hash[-4:],
             f"{balance:,.2f}",
         )
+        if not self._live_bootstrap_done:
+            try:
+                imported = self._bootstrap_live_ledger_from_broker()
+                self._live_bootstrap_done = True
+                if imported:
+                    logger.info("Imported %d existing live positions into ledger.", imported)
+            except Exception as exc:
+                logger.error("Failed to bootstrap live ledger: %s", exc)
+                logger.debug(traceback.format_exc())
+                self._alert(
+                    level="ERROR",
+                    title="Live ledger bootstrap failed",
+                    message=str(exc),
+                )
 
     def validate_live_readiness(self) -> None:
         """Run live-mode startup checks and fail fast on unsafe setup."""
@@ -174,8 +225,8 @@ class TradingBot:
         )
 
         logger.info(
-            "Live ledger + exit automation enabled. Existing unmanaged live positions "
-            "may still require manual reconciliation."
+            "Live ledger + exit automation enabled. Existing broker positions "
+            "will be bootstrapped into ledger on connect."
         )
 
     def _validate_llm_readiness(self) -> None:
@@ -284,6 +335,11 @@ class TradingBot:
         except Exception as e:
             logger.error("Error during scan cycle: %s", e)
             logger.debug(traceback.format_exc())
+            self._alert(
+                level="ERROR",
+                title="Scan cycle failed",
+                message=str(e),
+            )
 
     def _update_portfolio_state(self) -> None:
         """Refresh account balance and positions for risk management."""
@@ -308,6 +364,10 @@ class TradingBot:
         if self.is_paper or not self.live_ledger:
             return
 
+        cancel_stale = bool(self.config.execution.cancel_stale_orders)
+        stale_minutes = int(self.config.execution.stale_order_minutes)
+        include_partials = bool(self.config.execution.include_partials_in_ledger)
+
         for order_id in self.live_ledger.pending_entry_order_ids():
             try:
                 order = self.schwab.get_order(order_id)
@@ -316,18 +376,32 @@ class TradingBot:
                 continue
 
             status = str(order.get("status", "")).upper()
+            fill_summary = self._summarize_order_fill(order)
+            filled_qty = self._extract_filled_contracts(order, fill_summary)
+
+            if include_partials and status in PARTIAL_ORDER_STATUSES and filled_qty > 0:
+                self.live_ledger.apply_partial_entry_fill(
+                    order_id,
+                    filled_quantity=filled_qty,
+                    entry_credit=(
+                        fill_summary.get("per_contract")
+                        if fill_summary and fill_summary.get("net_cash", 0.0) > 0
+                        else None
+                    ),
+                )
+
             if status not in ENTRY_ORDER_TERMINAL:
+                if (
+                    cancel_stale
+                    and status in PENDING_ORDER_STATUSES
+                    and self._is_order_stale(order, order_id=order_id, side="entry", stale_minutes=stale_minutes)
+                ):
+                    self._cancel_stale_live_order(order_id, side="entry")
                 continue
 
-            fill_summary = self._summarize_order_fill(order)
             entry_credit = None
             if fill_summary and fill_summary.get("net_cash", 0.0) > 0:
                 entry_credit = fill_summary.get("per_contract")
-            filled_qty = (
-                int(fill_summary["contracts"])
-                if fill_summary and fill_summary.get("contracts", 0) > 0
-                else None
-            )
             filled_at = (
                 self._extract_order_terminal_time(order).isoformat()
                 if status == "FILLED"
@@ -338,7 +412,7 @@ class TradingBot:
                 status=status,
                 filled_at=filled_at,
                 entry_credit=entry_credit,
-                filled_quantity=filled_qty,
+                filled_quantity=int(filled_qty) if filled_qty > 0 else None,
             )
 
         for order_id in self.live_ledger.pending_exit_order_ids():
@@ -349,10 +423,25 @@ class TradingBot:
                 continue
 
             status = str(order.get("status", "")).upper()
+            fill_summary = self._summarize_order_fill(order)
+            filled_qty = self._extract_filled_contracts(order, fill_summary)
+
+            if include_partials and status in PARTIAL_ORDER_STATUSES and filled_qty > 0:
+                self.live_ledger.apply_partial_exit_fill(
+                    order_id,
+                    filled_quantity=filled_qty,
+                    close_value=fill_summary.get("per_contract") if fill_summary else None,
+                )
+
             if status not in EXIT_ORDER_TERMINAL:
+                if (
+                    cancel_stale
+                    and status in PENDING_ORDER_STATUSES
+                    and self._is_order_stale(order, order_id=order_id, side="exit", stale_minutes=stale_minutes)
+                ):
+                    self._cancel_stale_live_order(order_id, side="exit")
                 continue
 
-            fill_summary = self._summarize_order_fill(order)
             close_value = fill_summary.get("per_contract") if fill_summary else None
             filled_at = (
                 self._extract_order_terminal_time(order).isoformat()
@@ -585,7 +674,10 @@ class TradingBot:
                         fills.append(
                             {
                                 "time": fill_time,
-                                "key": str(meta["symbol"]),
+                                "key": cls._normalize_fill_key(
+                                    str(meta["symbol"]),
+                                    safe_float(meta["multiplier"], 1.0),
+                                ),
                                 "instruction": str(meta["instruction"]).upper(),
                                 "quantity": quantity,
                                 "price": price,
@@ -616,7 +708,10 @@ class TradingBot:
             fills.append(
                 {
                     "time": fill_time,
-                    "key": str(default_meta["symbol"]),
+                    "key": cls._normalize_fill_key(
+                        str(default_meta["symbol"]),
+                        safe_float(default_meta["multiplier"], 1.0),
+                    ),
                     "instruction": str(default_meta["instruction"]).upper(),
                     "quantity": quantity,
                     "price": price,
@@ -662,6 +757,16 @@ class TradingBot:
         return parsed
 
     @classmethod
+    def _normalize_fill_key(cls, symbol: str, multiplier: float) -> str:
+        """Normalize fill symbol keys across Schwab symbol formats."""
+        normalized = str(symbol).strip().upper()
+        if multiplier >= 100:
+            option_key = cls._option_symbol_key(normalized)
+            if option_key:
+                return option_key
+        return normalized
+
+    @classmethod
     def _extract_order_terminal_time(cls, order: dict) -> datetime:
         """Best-effort terminal timestamp extraction from an order payload."""
         candidates = [
@@ -682,6 +787,71 @@ class TradingBot:
                 return parsed
 
         return cls._now_eastern()
+
+    def _is_order_stale(
+        self,
+        order: dict,
+        *,
+        order_id: str,
+        side: str,
+        stale_minutes: int,
+    ) -> bool:
+        """Return true when an entry/exit order has exceeded stale threshold."""
+        if not self.live_ledger:
+            return False
+
+        pending = self.live_ledger.get_position_by_order_id(order_id, side=side)
+        ledger_time_raw = None
+        if pending:
+            ledger_time_raw = (
+                pending.get("entry_order_time")
+                if side == "entry"
+                else pending.get("last_reconciled")
+            )
+        submitted_at = self._parse_order_timestamp(ledger_time_raw)
+        if submitted_at is None:
+            submitted_at = self._parse_order_timestamp(order.get("enteredTime"))
+        if submitted_at is None:
+            submitted_at = self._extract_order_terminal_time(order)
+
+        now_et = self._now_eastern()
+        elapsed = now_et - submitted_at.astimezone(EASTERN_TZ)
+        return elapsed >= timedelta(minutes=max(1, stale_minutes))
+
+    def _cancel_stale_live_order(self, order_id: str, *, side: str) -> None:
+        """Cancel a stale live order and reconcile ledger state immediately."""
+        if self.is_paper or not self.live_ledger:
+            return
+
+        try:
+            self.schwab.cancel_order(order_id)
+            logger.warning("Canceled stale live %s order %s.", side, order_id)
+            if side == "entry":
+                self.live_ledger.reconcile_entry_order(order_id, status="CANCELED")
+            else:
+                self.live_ledger.reconcile_exit_order(order_id, status="CANCELED")
+            self._alert(
+                level="WARNING",
+                title="Stale live order canceled",
+                message=f"{side} order {order_id} canceled after stale timeout",
+            )
+        except Exception as exc:
+            logger.warning("Failed to cancel stale %s order %s: %s", side, order_id, exc)
+            self._alert(
+                level="ERROR",
+                title="Failed stale-order cancel",
+                message=f"{side} order {order_id}: {exc}",
+            )
+
+    @classmethod
+    def _extract_filled_contracts(cls, order: dict, fill_summary: Optional[dict]) -> float:
+        """Extract total filled contracts from order payload."""
+        raw_filled = safe_float(order.get("filledQuantity"), 0.0)
+        if raw_filled > 0:
+            return raw_filled
+        if fill_summary and fill_summary.get("contracts", 0) > 0:
+            return safe_float(fill_summary.get("contracts"), 0.0)
+        return 0.0
 
     @classmethod
     def _summarize_order_fill(cls, order: dict) -> Optional[dict]:
@@ -940,12 +1110,13 @@ class TradingBot:
         if analysis is None:
             logger.warning("Signal %s on %s missing analysis. Skipping.", signal.strategy, signal.symbol)
             return False
+        effective_max_loss = self.risk_manager.effective_max_loss_per_contract(signal)
 
         logger.info(
             "EXECUTING TRADE: %s on %s | %d contracts | "
-            "Credit: $%.2f | Max loss: $%.2f | POP: %.1f%% | Score: %.1f",
+            "Credit: $%.2f | Max loss(proxy): $%.2f | POP: %.1f%% | Score: %.1f",
             signal.strategy, signal.symbol, signal.quantity,
-            analysis.credit, analysis.max_loss,
+            analysis.credit, effective_max_loss,
             analysis.probability_of_profit * 100, analysis.score,
         )
 
@@ -956,24 +1127,30 @@ class TradingBot:
                 strategy=signal.strategy,
                 symbol=signal.symbol,
                 credit=analysis.credit,
-                max_loss=analysis.max_loss,
+                max_loss=effective_max_loss,
                 quantity=signal.quantity,
                 details=details,
             )
             logger.info("Paper trade opened: %s", result)
             self.risk_manager.register_open_position(
                 symbol=signal.symbol,
-                max_loss_per_contract=analysis.max_loss,
+                max_loss_per_contract=effective_max_loss,
                 quantity=signal.quantity,
+                strategy=signal.strategy,
             )
             return True
 
-        opened = self._execute_live_entry(signal, details=details)
+        opened = self._execute_live_entry(
+            signal,
+            details=details,
+            max_loss_per_contract=effective_max_loss,
+        )
         if opened:
             self.risk_manager.register_open_position(
                 symbol=signal.symbol,
-                max_loss_per_contract=analysis.max_loss,
+                max_loss_per_contract=effective_max_loss,
                 quantity=signal.quantity,
+                strategy=signal.strategy,
             )
         return opened
 
@@ -1074,7 +1251,12 @@ class TradingBot:
 
         return True
 
-    def _execute_live_entry(self, signal: TradeSignal, details: Optional[dict] = None) -> bool:
+    def _execute_live_entry(
+        self,
+        signal: TradeSignal,
+        details: Optional[dict] = None,
+        max_loss_per_contract: Optional[float] = None,
+    ) -> bool:
         """Execute a real trade via Schwab API."""
         analysis = signal.analysis
         quantity = signal.quantity
@@ -1099,11 +1281,16 @@ class TradingBot:
                     price=analysis.credit,
                 )
             elif signal.strategy == "iron_condor":
-                logger.warning(
-                    "Live iron condor execution is not implemented in this "
-                    "schwab-py integration."
+                order = self.schwab.build_iron_condor(
+                    symbol=signal.symbol,
+                    expiration=analysis.expiration,
+                    put_long_strike=analysis.put_long_strike,
+                    put_short_strike=analysis.put_short_strike,
+                    call_short_strike=analysis.call_short_strike,
+                    call_long_strike=analysis.call_long_strike,
+                    quantity=quantity,
+                    price=analysis.credit,
                 )
-                return False
             elif signal.strategy == "covered_call":
                 if signal.analysis is None:
                     logger.warning("Missing analysis for live covered call on %s.", signal.symbol)
@@ -1140,7 +1327,7 @@ class TradingBot:
                         strategy=signal.strategy,
                         symbol=signal.symbol,
                         quantity=quantity,
-                        max_loss=analysis.max_loss,
+                        max_loss=max_loss_per_contract if max_loss_per_contract is not None else analysis.max_loss,
                         entry_credit=analysis.credit,
                         details=details or self._build_position_details(analysis),
                         entry_order_id=order_id,
@@ -1154,7 +1341,7 @@ class TradingBot:
                         strategy=signal.strategy,
                         symbol=signal.symbol,
                         quantity=quantity,
-                        max_loss=analysis.max_loss,
+                        max_loss=max_loss_per_contract if max_loss_per_contract is not None else analysis.max_loss,
                         entry_credit=analysis.credit,
                         details=details or self._build_position_details(analysis),
                         entry_order_id="",
@@ -1166,6 +1353,12 @@ class TradingBot:
         except Exception as e:
             logger.error("Failed to place live order: %s", e)
             logger.debug(traceback.format_exc())
+            self._alert(
+                level="ERROR",
+                title="Live entry order failed",
+                message=str(e),
+                context={"strategy": signal.strategy, "symbol": signal.symbol},
+            )
             return False
 
     def _execute_exit(self, signal: TradeSignal) -> None:
@@ -1247,6 +1440,17 @@ class TradingBot:
                     quantity=quantity,
                     price=debit_limit,
                 )
+            elif strategy == "iron_condor":
+                order = self.schwab.build_iron_condor_close(
+                    symbol=symbol,
+                    expiration=expiration,
+                    put_long_strike=float(details.get("put_long_strike", 0.0)),
+                    put_short_strike=float(details.get("put_short_strike", 0.0)),
+                    call_short_strike=float(details.get("call_short_strike", 0.0)),
+                    call_long_strike=float(details.get("call_long_strike", 0.0)),
+                    quantity=quantity,
+                    price=debit_limit,
+                )
             else:
                 logger.warning("Live exit not implemented for strategy: %s", strategy)
                 return False
@@ -1271,6 +1475,12 @@ class TradingBot:
         except Exception as exc:
             logger.error("Failed to place live close order: %s", exc)
             logger.debug(traceback.format_exc())
+            self._alert(
+                level="ERROR",
+                title="Live close order failed",
+                message=str(exc),
+                context={"strategy": strategy, "symbol": symbol, "position_id": signal.position_id},
+            )
             return False
 
     @staticmethod
@@ -1313,6 +1523,7 @@ class TradingBot:
             self.live_ledger.close_missing_from_broker(
                 open_strategy_symbols=open_option_symbols,
                 position_symbol_resolver=self._resolve_live_option_symbols,
+                close_metadata_resolver=self._resolve_external_close_metadata,
             )
 
         tracked = self.live_ledger.list_positions(
@@ -1320,6 +1531,214 @@ class TradingBot:
         )
         self._refresh_live_position_values(tracked)
         return tracked
+
+    def _bootstrap_live_ledger_from_broker(self) -> int:
+        """Import existing broker option positions into live ledger once."""
+        if self.is_paper or not self.live_ledger:
+            return 0
+
+        broker_positions = self._get_broker_positions()
+        if not broker_positions:
+            return 0
+
+        option_legs: list[dict] = []
+        for pos in broker_positions:
+            if not isinstance(pos, dict):
+                continue
+            instrument = pos.get("instrument", {})
+            if not isinstance(instrument, dict):
+                continue
+            if str(instrument.get("assetType", "")).upper() != "OPTION":
+                continue
+
+            raw_symbol = str(instrument.get("symbol", "")).strip()
+            parsed = self._parse_option_symbol(raw_symbol)
+            if not parsed:
+                continue
+
+            long_qty = safe_float(pos.get("longQuantity"), 0.0)
+            short_qty = safe_float(pos.get("shortQuantity"), 0.0)
+            net_qty = long_qty - short_qty
+            if abs(net_qty) < 1e-9:
+                continue
+
+            option_legs.append(
+                {
+                    "raw_symbol": raw_symbol,
+                    "underlying": parsed["underlying"],
+                    "expiration": parsed["expiration"],
+                    "contract_type": parsed["contract_type"],
+                    "strike": parsed["strike"],
+                    "net_qty": net_qty,
+                }
+            )
+
+        if not option_legs:
+            return 0
+
+        tracked_sets = [
+            self._resolve_live_option_symbols(pos)
+            for pos in self.live_ledger.list_positions(statuses={"opening", "open", "closing"})
+        ]
+
+        grouped: dict[tuple[str, str, int], list[dict]] = defaultdict(list)
+        for leg in option_legs:
+            qty_contracts = max(1, int(round(abs(leg["net_qty"]))))
+            key = (leg["underlying"], leg["expiration"], qty_contracts)
+            grouped[key].append(leg)
+
+        imported = 0
+        for (underlying, expiration, qty), legs in grouped.items():
+            inferred = self._infer_bootstrap_position(
+                underlying=underlying,
+                expiration=expiration,
+                quantity=qty,
+                legs=legs,
+            )
+            if not inferred:
+                continue
+
+            symbols = inferred["symbols"]
+            if not symbols:
+                continue
+            if any(symbols.issubset(existing) for existing in tracked_sets if existing):
+                continue
+
+            self.live_ledger.register_entry_order(
+                strategy=inferred["strategy"],
+                symbol=underlying,
+                quantity=qty,
+                max_loss=inferred["max_loss"],
+                entry_credit=inferred["entry_credit"],
+                details=inferred["details"],
+                entry_order_id="",
+                entry_order_status="FILLED",
+                opened_at=self._now_eastern().isoformat(),
+            )
+            tracked_sets.append(symbols)
+            imported += 1
+
+        return imported
+
+    def _infer_bootstrap_position(
+        self,
+        *,
+        underlying: str,
+        expiration: str,
+        quantity: int,
+        legs: list[dict],
+    ) -> Optional[dict]:
+        """Infer strategy metadata for pre-existing broker option positions."""
+        short_puts = sorted(
+            [l for l in legs if l["contract_type"] == "P" and l["net_qty"] < 0],
+            key=lambda x: x["strike"],
+        )
+        long_puts = sorted(
+            [l for l in legs if l["contract_type"] == "P" and l["net_qty"] > 0],
+            key=lambda x: x["strike"],
+        )
+        short_calls = sorted(
+            [l for l in legs if l["contract_type"] == "C" and l["net_qty"] < 0],
+            key=lambda x: x["strike"],
+        )
+        long_calls = sorted(
+            [l for l in legs if l["contract_type"] == "C" and l["net_qty"] > 0],
+            key=lambda x: x["strike"],
+        )
+
+        def _symbols(details: dict, strategy: str) -> set[str]:
+            sample = {
+                "strategy": strategy,
+                "symbol": underlying,
+                "details": details,
+                "expiration": expiration,
+            }
+            return self._resolve_live_option_symbols(sample)
+
+        if short_puts and long_puts and short_calls and long_calls:
+            put_short = short_puts[-1]["strike"]
+            put_long_candidates = [l["strike"] for l in long_puts if l["strike"] < put_short]
+            call_short = short_calls[0]["strike"]
+            call_long_candidates = [l["strike"] for l in long_calls if l["strike"] > call_short]
+            if put_long_candidates and call_long_candidates:
+                put_long = max(put_long_candidates)
+                call_long = min(call_long_candidates)
+                width = max(put_short - put_long, call_long - call_short)
+                details = {
+                    "expiration": expiration,
+                    "put_short_strike": put_short,
+                    "put_long_strike": put_long,
+                    "call_short_strike": call_short,
+                    "call_long_strike": call_long,
+                    "bootstrap_import": True,
+                }
+                return {
+                    "strategy": "iron_condor",
+                    "max_loss": round(max(width, 0.0), 2),
+                    "entry_credit": 0.0,
+                    "details": details,
+                    "symbols": _symbols(details, "iron_condor"),
+                }
+
+        if short_puts and long_puts:
+            put_short = short_puts[-1]["strike"]
+            put_long_candidates = [l["strike"] for l in long_puts if l["strike"] < put_short]
+            if put_long_candidates:
+                put_long = max(put_long_candidates)
+                width = put_short - put_long
+                details = {
+                    "expiration": expiration,
+                    "short_strike": put_short,
+                    "long_strike": put_long,
+                    "bootstrap_import": True,
+                }
+                return {
+                    "strategy": "bull_put_spread",
+                    "max_loss": round(max(width, 0.0), 2),
+                    "entry_credit": 0.0,
+                    "details": details,
+                    "symbols": _symbols(details, "bull_put_spread"),
+                }
+
+        if short_calls and long_calls:
+            call_short = short_calls[0]["strike"]
+            call_long_candidates = [l["strike"] for l in long_calls if l["strike"] > call_short]
+            if call_long_candidates:
+                call_long = min(call_long_candidates)
+                width = call_long - call_short
+                details = {
+                    "expiration": expiration,
+                    "short_strike": call_short,
+                    "long_strike": call_long,
+                    "bootstrap_import": True,
+                }
+                return {
+                    "strategy": "bear_call_spread",
+                    "max_loss": round(max(width, 0.0), 2),
+                    "entry_credit": 0.0,
+                    "details": details,
+                    "symbols": _symbols(details, "bear_call_spread"),
+                }
+
+        if short_calls and not long_calls and not short_puts and not long_puts:
+            call_short = short_calls[0]["strike"]
+            notional_proxy = max(0.0, call_short) * (
+                self.config.risk.covered_call_notional_risk_pct / 100.0
+            )
+            details = {
+                "expiration": expiration,
+                "short_strike": call_short,
+                "bootstrap_import": True,
+            }
+            return {
+                "strategy": "covered_call",
+                "max_loss": round(max(notional_proxy, 0.25), 2),
+                "entry_credit": 0.0,
+                "details": details,
+                "symbols": _symbols(details, "covered_call"),
+            }
+
+        return None
 
     def _get_broker_positions(self) -> Optional[list]:
         """Fetch raw live broker positions."""
@@ -1334,7 +1753,7 @@ class TradingBot:
 
     @staticmethod
     def _collect_broker_option_symbols(positions: list) -> set[str]:
-        """Collect option symbols with non-zero net quantity from broker payload."""
+        """Collect canonical option keys with non-zero net quantity from broker payload."""
         symbols: set[str] = set()
         for pos in positions:
             if not isinstance(pos, dict):
@@ -1348,17 +1767,20 @@ class TradingBot:
             symbol = str(instrument.get("symbol", "")).strip()
             if not symbol:
                 continue
+            key = TradingBot._option_symbol_key(symbol)
+            if not key:
+                continue
 
             long_qty = safe_float(pos.get("longQuantity"), 0.0)
             short_qty = safe_float(pos.get("shortQuantity"), 0.0)
             if abs(long_qty - short_qty) <= 1e-9:
                 continue
-            symbols.add(symbol)
+            symbols.add(key)
 
         return symbols
 
     def _resolve_live_option_symbols(self, position: dict) -> set[str]:
-        """Build expected broker option symbols for a tracked strategy position."""
+        """Build canonical option keys for a tracked strategy position."""
         strategy = str(position.get("strategy", ""))
         symbol = str(position.get("symbol", "")).strip()
         details = position.get("details", {})
@@ -1373,7 +1795,12 @@ class TradingBot:
             if strike in (None, ""):
                 return None
             try:
-                return _make_option_symbol(symbol, expiration, contract_type, float(strike))
+                return self._build_option_key(
+                    underlying=symbol,
+                    expiration=expiration,
+                    contract_type=contract_type,
+                    strike=float(strike),
+                )
             except Exception:
                 return None
 
@@ -1411,6 +1838,70 @@ class TradingBot:
             }
 
         return set()
+
+    @staticmethod
+    def _build_option_key(
+        *, underlying: str, expiration: str, contract_type: str, strike: float
+    ) -> str:
+        """Build a canonical option key for cross-format matching."""
+        normalized_exp = TradingBot._extract_expiration_key(expiration)
+        normalized_cp = "C" if str(contract_type).upper().startswith("C") else "P"
+        return f"{str(underlying).upper()}|{normalized_exp}|{normalized_cp}|{float(strike):.3f}"
+
+    @staticmethod
+    def _parse_option_symbol(raw_symbol: str) -> Optional[dict]:
+        """Parse OCC compact or underscore option symbols into components."""
+        if not raw_symbol:
+            return None
+        compact = str(raw_symbol).strip().upper().replace(" ", "")
+        if not compact:
+            return None
+
+        match = OCC_COMPACT_PATTERN.match(compact)
+        if match:
+            underlying, yy, mm, dd, cp, strike_int = match.groups()
+            try:
+                expiration = datetime.strptime(f"20{yy}-{mm}-{dd}", "%Y-%m-%d").date()
+            except ValueError:
+                return None
+            strike = int(strike_int) / 1000.0
+            return {
+                "underlying": underlying,
+                "expiration": expiration.isoformat(),
+                "contract_type": cp,
+                "strike": strike,
+            }
+
+        match = UNDERSCORE_OPTION_PATTERN.match(compact)
+        if match:
+            underlying, mm, dd, yy, cp, strike_raw = match.groups()
+            try:
+                expiration = datetime.strptime(f"20{yy}-{mm}-{dd}", "%Y-%m-%d").date()
+            except ValueError:
+                return None
+            return {
+                "underlying": underlying,
+                "expiration": expiration.isoformat(),
+                "contract_type": cp,
+                "strike": float(strike_raw),
+            }
+
+        return None
+
+    @classmethod
+    def _option_symbol_key(cls, raw_symbol: str) -> str:
+        """Normalize any supported option symbol into a canonical key."""
+        if "|" in str(raw_symbol):
+            return str(raw_symbol).strip().upper()
+        parsed = cls._parse_option_symbol(raw_symbol)
+        if not parsed:
+            return ""
+        return cls._build_option_key(
+            underlying=parsed["underlying"],
+            expiration=parsed["expiration"],
+            contract_type=parsed["contract_type"],
+            strike=parsed["strike"],
+        )
 
     def _refresh_live_position_values(self, positions: list[dict]) -> None:
         """Update tracked live positions with current mark and DTE values."""
@@ -1457,6 +1948,98 @@ class TradingBot:
                 current_value=mark,
                 dte_remaining=dte_remaining if isinstance(dte_remaining, int) else None,
             )
+
+    def _resolve_external_close_metadata(self, position: dict, symbols: set[str]) -> dict:
+        """Estimate close metadata for positions closed outside bot-managed orders."""
+        metadata: dict = {"exit_order_status": "EXTERNAL", "exit_reason": "external_close"}
+        if not symbols:
+            return metadata
+
+        try:
+            orders = self.schwab.get_orders(days_back=60)
+        except Exception:
+            return metadata
+        if not isinstance(orders, list):
+            return metadata
+
+        open_date = self._parse_order_timestamp(position.get("open_date"))
+        relevant_orders: list[dict] = []
+        exit_reason = "external_close"
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+
+            order_symbols: set[str] = set()
+            for leg in order.get("orderLegCollection", []):
+                if not isinstance(leg, dict):
+                    continue
+                instrument = leg.get("instrument", {})
+                if not isinstance(instrument, dict):
+                    continue
+                symbol = str(instrument.get("symbol", "")).strip()
+                if not symbol:
+                    continue
+                key = self._option_symbol_key(symbol)
+                order_symbols.add(key or symbol.upper())
+
+            if not order_symbols.intersection(symbols):
+                continue
+
+            order_type = str(order.get("orderType", "")).upper()
+            if order_type == "EXERCISE":
+                exit_reason = "exercise_or_assignment"
+            relevant_orders.append(order)
+
+        if not relevant_orders:
+            return metadata
+
+        close_cash = 0.0
+        close_contracts = 0.0
+        latest_time: Optional[datetime] = None
+
+        for fill in self._extract_order_fills(relevant_orders):
+            fill_symbol = str(fill.get("key", "")).strip()
+            if fill_symbol not in symbols:
+                continue
+
+            fill_time = fill.get("time")
+            if isinstance(fill_time, datetime):
+                if open_date and fill_time < open_date:
+                    continue
+                if latest_time is None or fill_time > latest_time:
+                    latest_time = fill_time
+
+            instruction = str(fill.get("instruction", "")).upper()
+            if instruction in OPEN_LONG_INSTRUCTIONS or instruction in OPEN_SHORT_INSTRUCTIONS:
+                continue
+
+            direction = 1.0 if instruction.startswith("SELL") else -1.0
+            quantity = safe_float(fill.get("quantity"), 0.0)
+            price = safe_float(fill.get("price"), 0.0)
+            multiplier = safe_float(fill.get("multiplier"), 1.0)
+            close_cash += direction * quantity * price * multiplier
+            close_contracts = max(close_contracts, quantity)
+
+        quantity = max(1, safe_int(position.get("quantity", 1), 1))
+        entry_credit = max(0.0, safe_float(position.get("entry_credit"), 0.0))
+        realized = (entry_credit * quantity * 100.0) + close_cash
+        close_value = (
+            abs(close_cash) / (max(1.0, close_contracts) * 100.0)
+            if close_contracts > 0
+            else max(0.0, safe_float(position.get("current_value"), 0.0))
+        )
+
+        metadata.update(
+            {
+                "exit_reason": exit_reason,
+                "close_value": round(close_value, 2),
+                "realized_pnl": round(realized, 2),
+            }
+        )
+        if latest_time is not None:
+            metadata["close_date"] = latest_time.isoformat()
+
+        return metadata
 
     def _get_live_equity_shares(self, symbol: str) -> int:
         """Return net long shares for a symbol from live account positions."""
@@ -1520,6 +2103,11 @@ class TradingBot:
             self._check_exits()
         except Exception as e:
             logger.error("Error during position check: %s", e)
+            self._alert(
+                level="ERROR",
+                title="Position check failed",
+                message=str(e),
+            )
 
     def _daily_report(self) -> None:
         """Log end-of-day performance summary."""

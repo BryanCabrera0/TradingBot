@@ -103,10 +103,12 @@ class LiveTradeLedger:
             "entry_order_id": entry_order_id,
             "entry_order_status": str(entry_order_status or "PLACED").upper(),
             "entry_order_time": now_iso,
+            "entry_filled_quantity": 0.0,
             "open_date": opened_at or "",
             "exit_order_id": "",
             "exit_order_status": "",
             "exit_reason": "",
+            "exit_filled_quantity": 0.0,
             "close_date": "",
             "close_value": 0.0,
             "realized_pnl": 0.0,
@@ -141,6 +143,16 @@ class LiveTradeLedger:
         """Return a tracked position by ID."""
         for position in self.positions:
             if position.get("position_id") == position_id:
+                return position
+        return None
+
+    def get_position_by_order_id(
+        self, order_id: str, *, side: str = "entry"
+    ) -> Optional[dict]:
+        """Find a position by associated entry/exit order ID."""
+        key = "entry_order_id" if side == "entry" else "exit_order_id"
+        for position in self.positions:
+            if str(position.get(key, "")) == str(order_id):
                 return position
         return None
 
@@ -227,6 +239,7 @@ class LiveTradeLedger:
                     position["entry_credit"] = round(max(0.0, safe_float(entry_credit, 0.0)), 2)
                 if filled_quantity is not None:
                     position["quantity"] = max(1, safe_int(filled_quantity, 1))
+                    position["entry_filled_quantity"] = safe_float(filled_quantity, 0.0)
             elif normalized in {"CANCELED", "REJECTED", "EXPIRED"}:
                 position["status"] = normalized.lower()
                 position["close_date"] = datetime.now().isoformat()
@@ -266,6 +279,7 @@ class LiveTradeLedger:
                 position["realized_pnl"] = round((entry_credit - debit) * quantity * 100, 2)
                 position["status"] = "closed"
                 position["close_date"] = filled_at or datetime.now().isoformat()
+                position["exit_filled_quantity"] = float(quantity)
             elif normalized in {"CANCELED", "REJECTED", "EXPIRED"}:
                 position["status"] = "open"
                 position["exit_order_id"] = ""
@@ -278,11 +292,73 @@ class LiveTradeLedger:
             self._save_state()
         return changed
 
+    def apply_partial_entry_fill(
+        self,
+        order_id: str,
+        *,
+        filled_quantity: Optional[float],
+        entry_credit: Optional[float],
+    ) -> bool:
+        """Update partial entry fill metadata while order remains pending."""
+        if filled_quantity is None and entry_credit is None:
+            return False
+
+        changed = False
+        for position in self.positions:
+            if str(position.get("entry_order_id", "")) != order_id:
+                continue
+            if position.get("status") != "opening":
+                continue
+
+            if filled_quantity is not None:
+                qty = max(0.0, safe_float(filled_quantity, 0.0))
+                position["entry_filled_quantity"] = qty
+                if qty > 0:
+                    position["quantity"] = max(position.get("quantity", 1), safe_int(qty, 1))
+            if entry_credit is not None:
+                position["entry_credit"] = round(max(0.0, safe_float(entry_credit, 0.0)), 2)
+            position["last_reconciled"] = datetime.now().isoformat()
+            changed = True
+
+        if changed:
+            self._save_state()
+        return changed
+
+    def apply_partial_exit_fill(
+        self,
+        order_id: str,
+        *,
+        filled_quantity: Optional[float],
+        close_value: Optional[float],
+    ) -> bool:
+        """Update partial exit fill metadata while order remains pending."""
+        if filled_quantity is None and close_value is None:
+            return False
+
+        changed = False
+        for position in self.positions:
+            if str(position.get("exit_order_id", "")) != order_id:
+                continue
+            if position.get("status") != "closing":
+                continue
+
+            if filled_quantity is not None:
+                position["exit_filled_quantity"] = max(0.0, safe_float(filled_quantity, 0.0))
+            if close_value is not None:
+                position["close_value"] = round(max(0.0, safe_float(close_value, 0.0)), 2)
+            position["last_reconciled"] = datetime.now().isoformat()
+            changed = True
+
+        if changed:
+            self._save_state()
+        return changed
+
     def close_missing_from_broker(
         self,
         *,
         open_strategy_symbols: set[str],
         position_symbol_resolver,
+        close_metadata_resolver=None,
     ) -> int:
         """Mark tracked positions closed if none of their option legs remain."""
         changed = 0
@@ -299,9 +375,27 @@ class LiveTradeLedger:
             if symbols & open_strategy_symbols:
                 continue
 
+            metadata = {}
+            if close_metadata_resolver:
+                try:
+                    metadata = close_metadata_resolver(position, symbols) or {}
+                except Exception:
+                    metadata = {}
+
             position["status"] = "closed_external"
-            position["close_date"] = now_iso
-            position["exit_order_status"] = position.get("exit_order_status", "EXTERNAL")
+            position["close_date"] = str(metadata.get("close_date") or now_iso)
+            position["exit_order_status"] = str(
+                metadata.get("exit_order_status")
+                or position.get("exit_order_status")
+                or "EXTERNAL"
+            )
+            position["exit_reason"] = str(
+                metadata.get("exit_reason") or position.get("exit_reason") or "external_close"
+            )
+            if "close_value" in metadata:
+                position["close_value"] = round(max(0.0, safe_float(metadata.get("close_value"), 0.0)), 2)
+            if "realized_pnl" in metadata:
+                position["realized_pnl"] = round(safe_float(metadata.get("realized_pnl"), 0.0), 2)
             position["last_reconciled"] = now_iso
             changed += 1
 
@@ -320,6 +414,7 @@ class LiveTradeLedger:
             "open": 0,
             "closing": 0,
             "closed": 0,
+            "closed_external": 0,
             "closed_today": 0,
             "realized_pnl_today": 0.0,
         }
