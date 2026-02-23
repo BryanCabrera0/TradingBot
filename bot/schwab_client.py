@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import schwab
 from schwab.orders.options import (
@@ -24,6 +25,7 @@ from bot.file_security import tighten_file_permissions, validate_sensitive_file
 from bot.number_utils import safe_float, safe_int
 
 logger = logging.getLogger(__name__)
+EASTERN_TZ = ZoneInfo("America/New_York")
 
 
 class SchwabClient:
@@ -290,6 +292,22 @@ class SchwabClient:
         resp.raise_for_status()
         return resp.json()
 
+    def is_equity_market_open(self, now: Optional[datetime] = None) -> bool:
+        """Return whether the equity market is open right now."""
+        now_dt = now or datetime.now(EASTERN_TZ)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=EASTERN_TZ)
+
+        resp = self.client.get_market_hours(
+            [
+                self.client.MarketHours.Market.EQUITY,
+                self.client.MarketHours.Market.OPTION,
+            ],
+            date=now_dt.date(),
+        )
+        resp.raise_for_status()
+        return _market_open_from_hours_payload(resp.json(), now_dt)
+
     # ── Spread Order Builders ─────────────────────────────────────────
 
     def build_bull_put_spread(
@@ -501,3 +519,74 @@ def _mask_hash(account_hash: str) -> str:
     if len(account_hash) <= 8:
         return "***"
     return f"{account_hash[:4]}...{account_hash[-4:]}"
+
+
+def _market_open_from_hours_payload(payload: object, now_dt: datetime) -> bool:
+    """Parse market-hours payload and determine if regular equity session is open."""
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=EASTERN_TZ)
+
+    if not isinstance(payload, dict):
+        return False
+
+    market_blocks = []
+    for market_key in ("equity", "option"):
+        market_value = payload.get(market_key)
+        if isinstance(market_value, dict):
+            market_blocks.append(market_value)
+
+    if not market_blocks:
+        # Some payload variants may be nested one level deeper.
+        for value in payload.values():
+            if isinstance(value, dict):
+                market_blocks.append(value)
+
+    for market_block in market_blocks:
+        for product in market_block.values():
+            if not isinstance(product, dict):
+                continue
+            if not product.get("isOpen", False):
+                continue
+
+            session_hours = product.get("sessionHours", {})
+            if not isinstance(session_hours, dict):
+                return True
+
+            regular = session_hours.get("regularMarket", [])
+            if not isinstance(regular, list) or not regular:
+                return True
+
+            for session in regular:
+                if not isinstance(session, dict):
+                    continue
+                start = _parse_market_time(session.get("start"))
+                end = _parse_market_time(session.get("end"))
+                if start is None or end is None:
+                    continue
+                if start <= now_dt <= end:
+                    return True
+
+    return False
+
+
+def _parse_market_time(raw_time: object) -> Optional[datetime]:
+    """Parse Schwab market-hours timestamps with compact timezone offsets."""
+    if raw_time is None:
+        return None
+
+    value = str(raw_time).strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
+    if len(value) >= 5 and value[-5] in {"+", "-"} and value[-3] != ":":
+        value = f"{value[:-2]}:{value[-2:]}"
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=EASTERN_TZ)
+    return parsed

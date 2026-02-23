@@ -1,10 +1,11 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
 from bot.config import SchwabConfig
-from bot.schwab_client import SchwabClient, _make_option_symbol
+from bot.schwab_client import SchwabClient, _make_option_symbol, _market_open_from_hours_payload
 
 
 class SchwabClientParserTests(unittest.TestCase):
@@ -126,6 +127,39 @@ class SchwabClientParserTests(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 client.connect()
+
+    def test_market_hours_payload_reports_open_during_regular_session(self) -> None:
+        payload = {
+            "equity": {
+                "EQ": {
+                    "isOpen": True,
+                    "sessionHours": {
+                        "regularMarket": [
+                            {
+                                "start": "2026-02-23T14:30:00+0000",
+                                "end": "2026-02-23T21:00:00+0000",
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+        now_dt = datetime.fromisoformat("2026-02-23T15:00:00+00:00")
+
+        self.assertTrue(_market_open_from_hours_payload(payload, now_dt))
+
+    def test_market_hours_payload_reports_closed_when_is_open_false(self) -> None:
+        payload = {
+            "equity": {
+                "EQ": {
+                    "isOpen": False,
+                    "sessionHours": {"regularMarket": []},
+                }
+            }
+        }
+        now_dt = datetime.fromisoformat("2026-12-25T15:00:00+00:00")
+
+        self.assertFalse(_market_open_from_hours_payload(payload, now_dt))
 
 
 if __name__ == "__main__":

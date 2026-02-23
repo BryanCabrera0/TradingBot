@@ -109,6 +109,8 @@ class IronCondorStrategy(BaseStrategy):
         stop_loss_pct = self.config.get("stop_loss_pct", 2.0)
 
         for pos in positions:
+            if str(pos.get("status", "open")).lower() != "open":
+                continue
             if pos.get("strategy") != "iron_condor":
                 continue
 

@@ -101,6 +101,8 @@ class CoveredCallStrategy(BaseStrategy):
         profit_target_pct = self.config.get("profit_target_pct", 0.50)
 
         for pos in positions:
+            if str(pos.get("status", "open")).lower() != "open":
+                continue
             if pos.get("strategy") != "covered_call":
                 continue
 

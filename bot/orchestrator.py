@@ -13,14 +13,15 @@ from collections import defaultdict, deque
 import logging
 import time
 import traceback
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import schedule
 
 from bot.config import BotConfig, load_config
-from bot.schwab_client import SchwabClient
+from bot.live_trade_ledger import LiveTradeLedger
+from bot.schwab_client import SchwabClient, _make_option_symbol
 from bot.llm_advisor import LLMAdvisor
 from bot.news_scanner import NewsScanner
 from bot.number_utils import safe_float
@@ -40,6 +41,8 @@ OPEN_LONG_INSTRUCTIONS = {"BUY_TO_OPEN"}
 OPEN_SHORT_INSTRUCTIONS = {"SELL_TO_OPEN", "SELL_SHORT"}
 CLOSE_LONG_INSTRUCTIONS = {"SELL_TO_CLOSE"}
 CLOSE_SHORT_INSTRUCTIONS = {"BUY_TO_CLOSE", "BUY_TO_COVER"}
+ENTRY_ORDER_TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+EXIT_ORDER_TERMINAL = ENTRY_ORDER_TERMINAL
 
 
 class TradingBot:
@@ -49,10 +52,12 @@ class TradingBot:
         self.config = config or load_config()
         self.is_paper = self.config.trading_mode == "paper"
         self._running = False
+        self._market_open_cache: Optional[tuple[datetime, bool]] = None
 
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
         self.paper_trader = PaperTrader() if self.is_paper else None
+        self.live_ledger = None if self.is_paper else LiveTradeLedger()
         self.llm_advisor: Optional[LLMAdvisor] = None
         if self.config.llm.enabled:
             self.llm_advisor = LLMAdvisor(self.config.llm)
@@ -168,9 +173,9 @@ class TradingBot:
             underlying_price,
         )
 
-        logger.warning(
-            "Live exit automation currently requires tracked strategy metadata. "
-            "Monitor open live positions closely."
+        logger.info(
+            "Live ledger + exit automation enabled. Existing unmanaged live positions "
+            "may still require manual reconciliation."
         )
 
     def _validate_llm_readiness(self) -> None:
@@ -229,6 +234,30 @@ class TradingBot:
         market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
         return market_open <= now_et <= market_close
 
+    def _is_market_open_now(self) -> bool:
+        """Check market-open state, preferring broker market-hours in live mode."""
+        now_et = self._now_eastern()
+        if self.is_paper:
+            return self.is_market_open(now_et)
+
+        if self._market_open_cache:
+            checked_at, cached_value = self._market_open_cache
+            if now_et - checked_at < timedelta(minutes=5):
+                return cached_value
+
+        try:
+            is_open = self.schwab.is_equity_market_open(now=now_et)
+            self._market_open_cache = (now_et, is_open)
+            return is_open
+        except Exception as exc:
+            logger.warning(
+                "Falling back to approximate market-hours check: %s",
+                exc,
+            )
+            fallback = self.is_market_open(now_et)
+            self._market_open_cache = (now_et, fallback)
+            return fallback
+
     # ── Core Trading Loop ────────────────────────────────────────────
 
     def scan_and_trade(self) -> None:
@@ -263,6 +292,7 @@ class TradingBot:
             positions = self.paper_trader.get_positions()
             daily_pnl = self.paper_trader.get_daily_pnl()
         else:
+            self._reconcile_live_orders()
             balance = self.schwab.get_account_balance()
             positions = self._get_tracked_positions()
             daily_pnl = self._compute_live_daily_pnl()
@@ -272,6 +302,69 @@ class TradingBot:
             "Portfolio: Balance=$%s | Open positions: %d | Daily P/L: $%.2f",
             f"{balance:,.2f}", len(positions), daily_pnl,
         )
+
+    def _reconcile_live_orders(self) -> None:
+        """Poll pending live orders and advance ledger state on terminal statuses."""
+        if self.is_paper or not self.live_ledger:
+            return
+
+        for order_id in self.live_ledger.pending_entry_order_ids():
+            try:
+                order = self.schwab.get_order(order_id)
+            except Exception as exc:
+                logger.warning("Failed to fetch live entry order %s: %s", order_id, exc)
+                continue
+
+            status = str(order.get("status", "")).upper()
+            if status not in ENTRY_ORDER_TERMINAL:
+                continue
+
+            fill_summary = self._summarize_order_fill(order)
+            entry_credit = None
+            if fill_summary and fill_summary.get("net_cash", 0.0) > 0:
+                entry_credit = fill_summary.get("per_contract")
+            filled_qty = (
+                int(fill_summary["contracts"])
+                if fill_summary and fill_summary.get("contracts", 0) > 0
+                else None
+            )
+            filled_at = (
+                self._extract_order_terminal_time(order).isoformat()
+                if status == "FILLED"
+                else None
+            )
+            self.live_ledger.reconcile_entry_order(
+                order_id,
+                status=status,
+                filled_at=filled_at,
+                entry_credit=entry_credit,
+                filled_quantity=filled_qty,
+            )
+
+        for order_id in self.live_ledger.pending_exit_order_ids():
+            try:
+                order = self.schwab.get_order(order_id)
+            except Exception as exc:
+                logger.warning("Failed to fetch live exit order %s: %s", order_id, exc)
+                continue
+
+            status = str(order.get("status", "")).upper()
+            if status not in EXIT_ORDER_TERMINAL:
+                continue
+
+            fill_summary = self._summarize_order_fill(order)
+            close_value = fill_summary.get("per_contract") if fill_summary else None
+            filled_at = (
+                self._extract_order_terminal_time(order).isoformat()
+                if status == "FILLED"
+                else None
+            )
+            self.live_ledger.reconcile_exit_order(
+                order_id,
+                status=status,
+                filled_at=filled_at,
+                close_value=close_value,
+            )
 
     def _compute_live_daily_pnl(self) -> float:
         """Best-effort realized P/L for today's live fills using order history."""
@@ -568,6 +661,56 @@ class TradingBot:
             return parsed.replace(tzinfo=EASTERN_TZ)
         return parsed
 
+    @classmethod
+    def _extract_order_terminal_time(cls, order: dict) -> datetime:
+        """Best-effort terminal timestamp extraction from an order payload."""
+        candidates = [
+            order.get("closeTime"),
+            order.get("cancelTime"),
+            order.get("enteredTime"),
+        ]
+
+        for activity in order.get("orderActivityCollection", []):
+            if not isinstance(activity, dict):
+                continue
+            candidates.append(activity.get("executionTime"))
+            candidates.append(activity.get("time"))
+
+        for candidate in candidates:
+            parsed = cls._parse_order_timestamp(candidate)
+            if parsed is not None:
+                return parsed
+
+        return cls._now_eastern()
+
+    @classmethod
+    def _summarize_order_fill(cls, order: dict) -> Optional[dict]:
+        """Summarize filled order cashflow into contracts and per-contract price."""
+        fills = cls._extract_order_fills([order])
+        if not fills:
+            return None
+
+        net_cash = 0.0
+        contracts = 0.0
+        for fill in fills:
+            instruction = str(fill.get("instruction", "")).upper()
+            direction = 1.0 if instruction.startswith("SELL") else -1.0
+            quantity = safe_float(fill.get("quantity"), 0.0)
+            price = safe_float(fill.get("price"), 0.0)
+            multiplier = safe_float(fill.get("multiplier"), 1.0)
+            contracts = max(contracts, quantity)
+            net_cash += direction * quantity * price * multiplier
+
+        if contracts <= 0:
+            return None
+
+        per_contract = abs(net_cash) / (contracts * 100.0)
+        return {
+            "contracts": contracts,
+            "net_cash": net_cash,
+            "per_contract": round(per_contract, 2),
+        }
+
     def _get_scan_targets(self) -> list[str]:
         """Get the list of symbols to scan for opportunities.
 
@@ -806,19 +949,9 @@ class TradingBot:
             analysis.probability_of_profit * 100, analysis.score,
         )
 
+        details = self._build_position_details(analysis)
+
         if self.is_paper:
-            details = {
-                "expiration": analysis.expiration,
-                "dte": analysis.dte,
-                "short_strike": analysis.short_strike,
-                "long_strike": analysis.long_strike,
-                "put_short_strike": analysis.put_short_strike,
-                "put_long_strike": analysis.put_long_strike,
-                "call_short_strike": analysis.call_short_strike,
-                "call_long_strike": analysis.call_long_strike,
-                "probability_of_profit": analysis.probability_of_profit,
-                "score": analysis.score,
-            }
             result = self.paper_trader.execute_open(
                 strategy=signal.strategy,
                 symbol=signal.symbol,
@@ -835,7 +968,7 @@ class TradingBot:
             )
             return True
 
-        opened = self._execute_live_entry(signal)
+        opened = self._execute_live_entry(signal, details=details)
         if opened:
             self.risk_manager.register_open_position(
                 symbol=signal.symbol,
@@ -843,6 +976,22 @@ class TradingBot:
                 quantity=signal.quantity,
             )
         return opened
+
+    @staticmethod
+    def _build_position_details(analysis) -> dict:
+        """Serialize strategy analysis fields used for lifecycle management."""
+        return {
+            "expiration": analysis.expiration,
+            "dte": analysis.dte,
+            "short_strike": analysis.short_strike,
+            "long_strike": analysis.long_strike,
+            "put_short_strike": analysis.put_short_strike,
+            "put_long_strike": analysis.put_long_strike,
+            "call_short_strike": analysis.call_short_strike,
+            "call_long_strike": analysis.call_long_strike,
+            "probability_of_profit": analysis.probability_of_profit,
+            "score": analysis.score,
+        }
 
     def _review_entry_with_llm(self, signal: TradeSignal) -> bool:
         """Optionally review an entry with the configured LLM advisor."""
@@ -925,7 +1074,7 @@ class TradingBot:
 
         return True
 
-    def _execute_live_entry(self, signal: TradeSignal) -> bool:
+    def _execute_live_entry(self, signal: TradeSignal, details: Optional[dict] = None) -> bool:
         """Execute a real trade via Schwab API."""
         analysis = signal.analysis
         quantity = signal.quantity
@@ -984,6 +1133,34 @@ class TradingBot:
 
             result = self.schwab.place_order(order)
             logger.info("LIVE order placed: %s", result)
+            if self.live_ledger and analysis is not None:
+                order_id = str(result.get("order_id", "")).strip()
+                if order_id:
+                    self.live_ledger.register_entry_order(
+                        strategy=signal.strategy,
+                        symbol=signal.symbol,
+                        quantity=quantity,
+                        max_loss=analysis.max_loss,
+                        entry_credit=analysis.credit,
+                        details=details or self._build_position_details(analysis),
+                        entry_order_id=order_id,
+                        entry_order_status=str(result.get("status", "PLACED")),
+                    )
+                else:
+                    logger.warning(
+                        "Live order missing broker order_id; recording as immediately open."
+                    )
+                    self.live_ledger.register_entry_order(
+                        strategy=signal.strategy,
+                        symbol=signal.symbol,
+                        quantity=quantity,
+                        max_loss=analysis.max_loss,
+                        entry_credit=analysis.credit,
+                        details=details or self._build_position_details(analysis),
+                        entry_order_id="",
+                        entry_order_status="FILLED",
+                        opened_at=self._now_eastern().isoformat(),
+                    )
             return True
 
         except Exception as e:
@@ -1005,12 +1182,109 @@ class TradingBot:
             )
             logger.info("Paper close result: %s", result)
         else:
-            # For live trading, we'd need to build closing orders
-            # This depends on the specific position legs
+            closed = self._execute_live_exit(signal)
+            if not closed:
+                logger.warning(
+                    "Failed to submit live close order for %s.",
+                    signal.position_id,
+                )
+
+    def _execute_live_exit(self, signal: TradeSignal) -> bool:
+        """Execute a live exit order for a tracked strategy position."""
+        if not self.live_ledger or not signal.position_id:
+            return False
+
+        tracked = self.live_ledger.get_position(signal.position_id)
+        if not tracked:
+            logger.warning("Live position %s not found in ledger.", signal.position_id)
+            return False
+
+        if str(tracked.get("status", "")).lower() != "open":
             logger.info(
-                "Live closing not yet fully implemented for %s. "
-                "Manual review recommended.", signal.position_id,
+                "Skipping live exit for %s; current status is %s.",
+                signal.position_id,
+                tracked.get("status"),
             )
+            return False
+
+        details = tracked.get("details", {})
+        expiration = self._extract_expiration_key(
+            details.get("expiration", tracked.get("expiration", ""))
+        )
+        if not expiration:
+            logger.warning("Tracked live position %s missing expiration.", signal.position_id)
+            return False
+
+        quantity = max(1, int(tracked.get("quantity", 1)))
+        strategy = tracked.get("strategy", "")
+        symbol = tracked.get("symbol", signal.symbol)
+        debit_limit = self._resolve_live_close_debit(tracked)
+
+        try:
+            if strategy == "bull_put_spread":
+                order = self.schwab.build_bull_put_spread_close(
+                    symbol=symbol,
+                    expiration=expiration,
+                    short_strike=float(details.get("short_strike", 0.0)),
+                    long_strike=float(details.get("long_strike", 0.0)),
+                    quantity=quantity,
+                    price=debit_limit,
+                )
+            elif strategy == "bear_call_spread":
+                order = self.schwab.build_bear_call_spread_close(
+                    symbol=symbol,
+                    expiration=expiration,
+                    short_strike=float(details.get("short_strike", 0.0)),
+                    long_strike=float(details.get("long_strike", 0.0)),
+                    quantity=quantity,
+                    price=debit_limit,
+                )
+            elif strategy == "covered_call":
+                order = self.schwab.build_covered_call_close(
+                    symbol=symbol,
+                    expiration=expiration,
+                    short_strike=float(details.get("short_strike", 0.0)),
+                    quantity=quantity,
+                    price=debit_limit,
+                )
+            else:
+                logger.warning("Live exit not implemented for strategy: %s", strategy)
+                return False
+
+            result = self.schwab.place_order(order)
+            logger.info("LIVE exit order placed: %s", result)
+
+            order_id = str(result.get("order_id", "")).strip()
+            if not order_id:
+                logger.warning(
+                    "Live exit order for %s missing broker order_id.",
+                    signal.position_id,
+                )
+                return False
+
+            self.live_ledger.register_exit_order(
+                position_id=signal.position_id,
+                exit_order_id=order_id,
+                reason=signal.reason,
+            )
+            return True
+        except Exception as exc:
+            logger.error("Failed to place live close order: %s", exc)
+            logger.debug(traceback.format_exc())
+            return False
+
+    @staticmethod
+    def _resolve_live_close_debit(position: dict) -> float:
+        """Choose a positive close debit limit from latest mark or entry credit."""
+        mark = safe_float(position.get("current_value"), 0.0)
+        if mark > 0:
+            return round(mark, 2)
+
+        entry_credit = safe_float(position.get("entry_credit"), 0.0)
+        if entry_credit > 0:
+            return round(max(0.01, entry_credit), 2)
+
+        return 0.05
 
     # ── Data Fetching ────────────────────────────────────────────────
 
@@ -1026,19 +1300,168 @@ class TradingBot:
             return {}, 0.0
 
     def _get_tracked_positions(self) -> list:
-        """Get positions from Schwab and match with our tracked trades."""
-        # In a production bot, you'd maintain a local DB of positions
-        # For now, return positions from the API
-        try:
-            return self.schwab.get_positions()
-        except Exception as e:
-            logger.error("Failed to fetch positions: %s", e)
+        """Return strategy-normalized positions for risk checks and exits."""
+        if self.is_paper:
+            return self.paper_trader.get_positions() if self.paper_trader else []
+
+        if not self.live_ledger:
             return []
+
+        broker_positions = self._get_broker_positions()
+        if broker_positions is not None:
+            open_option_symbols = self._collect_broker_option_symbols(broker_positions)
+            self.live_ledger.close_missing_from_broker(
+                open_strategy_symbols=open_option_symbols,
+                position_symbol_resolver=self._resolve_live_option_symbols,
+            )
+
+        tracked = self.live_ledger.list_positions(
+            statuses={"opening", "open", "closing"}
+        )
+        self._refresh_live_position_values(tracked)
+        return tracked
+
+    def _get_broker_positions(self) -> Optional[list]:
+        """Fetch raw live broker positions."""
+        try:
+            positions = self.schwab.get_positions()
+            if isinstance(positions, list):
+                return positions
+            return []
+        except Exception as e:
+            logger.error("Failed to fetch broker positions: %s", e)
+            return None
+
+    @staticmethod
+    def _collect_broker_option_symbols(positions: list) -> set[str]:
+        """Collect option symbols with non-zero net quantity from broker payload."""
+        symbols: set[str] = set()
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            instrument = pos.get("instrument", {})
+            if not isinstance(instrument, dict):
+                continue
+            if str(instrument.get("assetType", "")).upper() != "OPTION":
+                continue
+
+            symbol = str(instrument.get("symbol", "")).strip()
+            if not symbol:
+                continue
+
+            long_qty = safe_float(pos.get("longQuantity"), 0.0)
+            short_qty = safe_float(pos.get("shortQuantity"), 0.0)
+            if abs(long_qty - short_qty) <= 1e-9:
+                continue
+            symbols.add(symbol)
+
+        return symbols
+
+    def _resolve_live_option_symbols(self, position: dict) -> set[str]:
+        """Build expected broker option symbols for a tracked strategy position."""
+        strategy = str(position.get("strategy", ""))
+        symbol = str(position.get("symbol", "")).strip()
+        details = position.get("details", {})
+        expiration = self._extract_expiration_key(
+            details.get("expiration", position.get("expiration", ""))
+        )
+        if not symbol or not expiration:
+            return set()
+
+        def build(contract_type: str, strike_key: str) -> Optional[str]:
+            strike = details.get(strike_key)
+            if strike in (None, ""):
+                return None
+            try:
+                return _make_option_symbol(symbol, expiration, contract_type, float(strike))
+            except Exception:
+                return None
+
+        if strategy == "bull_put_spread":
+            return {
+                s
+                for s in (
+                    build("P", "short_strike"),
+                    build("P", "long_strike"),
+                )
+                if s
+            }
+        if strategy == "bear_call_spread":
+            return {
+                s
+                for s in (
+                    build("C", "short_strike"),
+                    build("C", "long_strike"),
+                )
+                if s
+            }
+        if strategy == "covered_call":
+            leg = build("C", "short_strike")
+            return {leg} if leg else set()
+        if strategy == "iron_condor":
+            return {
+                s
+                for s in (
+                    build("P", "put_short_strike"),
+                    build("P", "put_long_strike"),
+                    build("C", "call_short_strike"),
+                    build("C", "call_long_strike"),
+                )
+                if s
+            }
+
+        return set()
+
+    def _refresh_live_position_values(self, positions: list[dict]) -> None:
+        """Update tracked live positions with current mark and DTE values."""
+        if not positions or not self.live_ledger:
+            return
+
+        chain_cache: dict[str, dict] = {}
+        for position in positions:
+            position_id = position.get("position_id")
+            symbol = position.get("symbol")
+            if not position_id or not symbol:
+                continue
+
+            status = str(position.get("status", "")).lower()
+            if status not in {"open", "closing"}:
+                continue
+
+            if symbol not in chain_cache:
+                chain_data, _ = self._get_chain_data(symbol)
+                chain_cache[symbol] = chain_data
+
+            chain_data = chain_cache.get(symbol, {})
+            if not chain_data:
+                continue
+
+            mark = self._estimate_paper_position_value(position, chain_data)
+            dte_remaining = position.get("dte_remaining")
+            expiration = self._extract_expiration_key(
+                (position.get("details") or {}).get("expiration", position.get("expiration", ""))
+            )
+            if expiration:
+                try:
+                    exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+                    dte_remaining = (exp_date - self._now_eastern().date()).days
+                    position["dte_remaining"] = dte_remaining
+                except ValueError:
+                    pass
+
+            if mark is not None:
+                position["current_value"] = mark
+
+            self.live_ledger.update_position_quote(
+                position_id,
+                current_value=mark,
+                dte_remaining=dte_remaining if isinstance(dte_remaining, int) else None,
+            )
 
     def _get_live_equity_shares(self, symbol: str) -> int:
         """Return net long shares for a symbol from live account positions."""
         total = 0.0
-        for pos in self._get_tracked_positions():
+        for pos in self._get_broker_positions() or []:
             instrument = pos.get("instrument", {})
             if instrument.get("assetType") != "EQUITY":
                 continue
@@ -1080,7 +1503,7 @@ class TradingBot:
             logger.info("Not a trading day (%s). Skipping scan.", today)
             return
 
-        if not self.is_market_open():
+        if not self._is_market_open_now():
             logger.info("Market is closed. Skipping scan.")
             return
 
@@ -1088,7 +1511,8 @@ class TradingBot:
 
     def _scheduled_position_check(self) -> None:
         """Position monitoring wrapper."""
-        if not self.is_market_open() and not self.is_paper:
+        if not self._is_market_open_now() and not self.is_paper:
+            self._reconcile_live_orders()
             return
 
         try:
@@ -1111,6 +1535,36 @@ class TradingBot:
             logger.info("Return: %.2f%%", summary.get("return_pct", 0))
             logger.info("Open positions: %d", summary["open_positions"])
             logger.info("=" * 60)
+            return
+
+        ledger_summary = (
+            self.live_ledger.summary(today_iso=self._now_eastern().date().isoformat())
+            if self.live_ledger
+            else {}
+        )
+        balance = 0.0
+        try:
+            balance = self.schwab.get_account_balance()
+        except Exception as exc:
+            logger.warning("Failed to fetch live balance for report: %s", exc)
+
+        logger.info("=" * 60)
+        logger.info("LIVE DAILY PERFORMANCE REPORT")
+        logger.info("=" * 60)
+        logger.info("Balance: $%s", f"{balance:,.2f}")
+        logger.info("Open strategy positions: %d", ledger_summary.get("open", 0))
+        logger.info("Pending entries: %d", ledger_summary.get("opening", 0))
+        logger.info("Pending exits: %d", ledger_summary.get("closing", 0))
+        logger.info("Closed today: %d", ledger_summary.get("closed_today", 0))
+        logger.info(
+            "Ledger realized P/L today: $%s",
+            f"{ledger_summary.get('realized_pnl_today', 0.0):,.2f}",
+        )
+        logger.info(
+            "Order-history daily P/L: $%s",
+            f"{self._compute_live_daily_pnl():,.2f}",
+        )
+        logger.info("=" * 60)
 
     def run(self) -> None:
         """Start the fully automated trading loop.
@@ -1132,9 +1586,12 @@ class TradingBot:
         self._validate_llm_readiness()
         self.setup_schedule()
 
-        # Run an initial scan immediately
-        logger.info("Running initial scan...")
-        self.scan_and_trade()
+        # Run an initial scan immediately when the market is open.
+        if self.is_paper or self._is_market_open_now():
+            logger.info("Running initial scan...")
+            self.scan_and_trade()
+        else:
+            logger.info("Skipping initial scan because market is closed.")
 
         self._running = True
         logger.info("Bot is now running. Press Ctrl+C to stop.")
@@ -1148,8 +1605,7 @@ class TradingBot:
             self._running = False
 
         # Final report
-        if self.is_paper:
-            self._daily_report()
+        self._daily_report()
 
     def stop(self) -> None:
         """Stop the bot gracefully."""

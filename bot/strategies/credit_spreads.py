@@ -169,6 +169,8 @@ class CreditSpreadStrategy(BaseStrategy):
         stop_loss_pct = self.config.get("stop_loss_pct", 2.0)
 
         for pos in positions:
+            if str(pos.get("status", "open")).lower() != "open":
+                continue
             if pos.get("strategy") not in ("bull_put_spread", "bear_call_spread"):
                 continue
 

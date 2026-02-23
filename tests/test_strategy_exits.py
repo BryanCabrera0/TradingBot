@@ -6,6 +6,24 @@ from bot.strategies.iron_condors import IronCondorStrategy
 
 
 class StrategyExitTests(unittest.TestCase):
+    def test_credit_spreads_skip_non_open_positions(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p0",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "status": "closing",
+                "entry_credit": 1.0,
+                "current_value": 0.1,
+                "dte_remaining": 2,
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(signals, [])
+
     def test_credit_spreads_no_duplicate_close_signals(self) -> None:
         strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
         positions = [
