@@ -35,24 +35,25 @@ cp .env.example .env
 3. Add Schwab credentials and OpenAI key in `.env`:
 - `SCHWAB_APP_KEY`
 - `SCHWAB_APP_SECRET`
+- `SCHWAB_ACCOUNT_HASH` (or `SCHWAB_ACCOUNT_INDEX`)
 - `OPENAI_API_KEY`
 
-4. Run first-time Schwab OAuth:
+4. Run guided live setup (credentials check + OAuth + account selection):
 
 ```bash
-python -m bot.auth
+python3 main.py --setup-live
 ```
 
 5. Run paper mode:
 
 ```bash
-python main.py
+python3 main.py
 ```
 
 6. Run live mode (after paper validation):
 
 ```bash
-python main.py --live
+python3 main.py --live
 ```
 
 ## LLM + News Intelligence
@@ -74,10 +75,10 @@ Tune these in `config.yaml`:
 ## Useful Commands
 
 ```bash
-python main.py --once
-python main.py --preflight-only
-python main.py --report
-python main.py --log-level DEBUG
+python3 main.py --once
+python3 main.py --preflight-only
+python3 main.py --report
+python3 main.py --log-level DEBUG
 ```
 
 ## Operational Alerts
@@ -86,6 +87,17 @@ You can enable webhook alerts for runtime failures/incidents:
 - `ALERTS_ENABLED=true`
 - `ALERTS_WEBHOOK_URL=...`
 - `ALERTS_MIN_LEVEL=ERROR`
+
+Live preflight enforces alerting by default (`ALERTS_REQUIRE_IN_LIVE=true`).
+
+## Runtime Hardening
+
+- Rotating logs via `logging.max_bytes` and `logging.backup_count`
+- Scanner request throttling + retry/backoff via `scanner.request_pause_seconds`,
+  `scanner.max_retry_attempts`, and `scanner.error_backoff_seconds`
+- Service templates for daemonized runs:
+  - `/Users/bryan/TradingBot/deploy/systemd/tradingbot.service`
+  - `/Users/bryan/TradingBot/deploy/launchd/com.bryan.tradingbot.plist`
 
 ## Project Layout
 

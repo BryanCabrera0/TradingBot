@@ -194,13 +194,15 @@ class TradingBot:
         if unsupported:
             raise RuntimeError(
                 "Live execution currently supports only "
-                "credit_spreads and covered_calls. "
+                "credit_spreads, iron_condors, and covered_calls. "
                 f"Disable unsupported strategies: {', '.join(unsupported)}"
             )
         if not enabled:
             raise RuntimeError("No enabled strategies in config.")
 
+        self._validate_live_alerting_readiness()
         self.connect()
+        self._validate_live_covered_call_readiness()
         self._validate_llm_readiness()
 
         probe_symbol = self.config.watchlist[0] if self.config.watchlist else "SPY"
@@ -227,6 +229,56 @@ class TradingBot:
         logger.info(
             "Live ledger + exit automation enabled. Existing broker positions "
             "will be bootstrapped into ledger on connect."
+        )
+
+    def _validate_live_alerting_readiness(self) -> None:
+        """Enforce runtime alert sink for live mode unless explicitly disabled."""
+        if self.is_paper:
+            return
+        if not self.config.alerts.require_in_live:
+            return
+        if not self.config.alerts.enabled:
+            raise RuntimeError(
+                "Live mode requires alerts.enabled=true (set ALERTS_ENABLED=true)."
+            )
+        if not str(self.config.alerts.webhook_url).strip():
+            raise RuntimeError(
+                "Live mode requires ALERTS_WEBHOOK_URL when alerts.require_in_live=true."
+            )
+
+    def _validate_live_covered_call_readiness(self) -> None:
+        """Validate covered-call live prerequisites before order flow starts."""
+        if self.is_paper or not self.config.covered_calls.enabled:
+            return
+
+        tickers = list(self.config.covered_calls.tickers or [])
+        if not tickers:
+            raise RuntimeError(
+                "Live covered_calls is enabled but covered_calls.tickers is empty."
+            )
+
+        broker_positions = self._get_broker_positions() or []
+        shares_by_symbol: dict[str, int] = defaultdict(int)
+        for pos in broker_positions:
+            instrument = pos.get("instrument", {})
+            if instrument.get("assetType") != "EQUITY":
+                continue
+            symbol = str(instrument.get("symbol", "")).upper()
+            long_qty = safe_int(pos.get("longQuantity"), 0)
+            short_qty = safe_int(pos.get("shortQuantity"), 0)
+            shares_by_symbol[symbol] += max(0, long_qty - short_qty)
+
+        eligible = [sym for sym in tickers if shares_by_symbol.get(sym, 0) >= 100]
+        if not eligible:
+            raise RuntimeError(
+                "Live covered_calls enabled but none of covered_calls.tickers has "
+                "at least 100 shares in the broker account."
+            )
+
+        logger.info(
+            "Live covered-call readiness passed: %d/%d configured tickers have >=100 shares.",
+            len(eligible),
+            len(tickers),
         )
 
     def _validate_llm_readiness(self) -> None:

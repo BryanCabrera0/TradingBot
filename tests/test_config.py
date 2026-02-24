@@ -29,7 +29,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
             cfg = load_config(config_path)
 
         self.assertEqual(cfg.trading_mode, "live")
@@ -51,7 +53,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
             cfg = load_config(config_path)
 
         self.assertEqual(cfg.trading_mode, "paper")
@@ -63,7 +67,7 @@ class ConfigTests(unittest.TestCase):
     def test_env_overrides_clamp_llm_numeric_settings(self) -> None:
         config_path = self._write_config("llm:\n  enabled: true\n")
 
-        with mock.patch.dict(
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
             os.environ,
             {
                 "LLM_TIMEOUT_SECONDS": "0",
@@ -91,7 +95,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
             cfg = load_config(config_path)
 
         self.assertEqual(cfg.news.provider, "google_rss")
@@ -111,7 +117,7 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch.dict(
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
             os.environ,
             {
                 "EXECUTION_STALE_ORDER_MINUTES": "0",
@@ -119,6 +125,9 @@ class ConfigTests(unittest.TestCase):
                 "ALERTS_ENABLED": "true",
                 "ALERTS_MIN_LEVEL": "critical",
                 "ALERTS_TIMEOUT_SECONDS": "0",
+                "ALERTS_REQUIRE_IN_LIVE": "false",
+                "LOG_MAX_BYTES": "512",
+                "LOG_BACKUP_COUNT": "0",
             },
             clear=True,
         ):
@@ -129,6 +138,9 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cfg.alerts.enabled)
         self.assertEqual(cfg.alerts.min_level, "CRITICAL")
         self.assertEqual(cfg.alerts.timeout_seconds, 1)
+        self.assertFalse(cfg.alerts.require_in_live)
+        self.assertEqual(cfg.log_max_bytes, 1024)
+        self.assertEqual(cfg.log_backup_count, 1)
 
 
 if __name__ == "__main__":

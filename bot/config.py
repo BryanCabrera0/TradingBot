@@ -19,6 +19,7 @@ class SchwabConfig:
     callback_url: str = "https://127.0.0.1:8182/callback"
     token_path: str = "./token.json"
     account_hash: str = ""
+    account_index: int = -1
 
 
 @dataclass
@@ -48,7 +49,7 @@ class IronCondorConfig:
 
 @dataclass
 class CoveredCallConfig:
-    enabled: bool = True
+    enabled: bool = False
     min_dte: int = 20
     max_dte: int = 45
     short_delta: float = 0.30
@@ -69,6 +70,14 @@ class ScannerConfig:
     min_underlying_volume: int = 500_000
     # Include movers from Schwab API
     include_movers: bool = True
+    # Pause between ticker requests during scans (helps avoid rate limits)
+    request_pause_seconds: float = 0.10
+    # Retry/backoff controls for transient API errors
+    error_backoff_seconds: float = 1.0
+    max_retry_attempts: int = 2
+    max_consecutive_errors: int = 20
+    # Optional hard cap on scanned universe size (0 = disabled)
+    max_symbols_per_scan: int = 0
 
 
 @dataclass
@@ -141,6 +150,7 @@ class AlertsConfig:
     webhook_url: str = ""
     min_level: str = "ERROR"
     timeout_seconds: int = 5
+    require_in_live: bool = True
 
 
 @dataclass
@@ -162,6 +172,8 @@ class BotConfig:
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     log_level: str = "INFO"
     log_file: str = "logs/tradingbot.log"
+    log_max_bytes: int = 10_485_760
+    log_backup_count: int = 5
 
 
 def load_config(config_path: str = "config.yaml") -> BotConfig:
@@ -187,6 +199,9 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.schwab.token_path = os.getenv("SCHWAB_TOKEN_PATH", cfg.schwab.token_path)
     cfg.schwab.account_hash = os.getenv(
         "SCHWAB_ACCOUNT_HASH", cfg.schwab.account_hash
+    )
+    cfg.schwab.account_index = _env_int(
+        "SCHWAB_ACCOUNT_INDEX", cfg.schwab.account_index, minimum=-1
     )
 
     env_mode = os.getenv("TRADING_MODE")
@@ -242,6 +257,13 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.alerts.min_level = os.getenv("ALERTS_MIN_LEVEL", cfg.alerts.min_level)
     cfg.alerts.timeout_seconds = _env_int(
         "ALERTS_TIMEOUT_SECONDS", cfg.alerts.timeout_seconds, minimum=1
+    )
+    cfg.alerts.require_in_live = _env_bool(
+        "ALERTS_REQUIRE_IN_LIVE", cfg.alerts.require_in_live
+    )
+    cfg.log_max_bytes = _env_int("LOG_MAX_BYTES", cfg.log_max_bytes, minimum=1024)
+    cfg.log_backup_count = _env_int(
+        "LOG_BACKUP_COUNT", cfg.log_backup_count, minimum=1
     )
 
     _normalize_config(cfg)
@@ -320,6 +342,8 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
     if log_cfg:
         cfg.log_level = log_cfg.get("level", cfg.log_level)
         cfg.log_file = log_cfg.get("file", cfg.log_file)
+        cfg.log_max_bytes = log_cfg.get("max_bytes", cfg.log_max_bytes)
+        cfg.log_backup_count = log_cfg.get("backup_count", cfg.log_backup_count)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -426,6 +450,11 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.execution.stale_order_minutes = max(1, int(cfg.execution.stale_order_minutes))
     cfg.execution.cancel_stale_orders = bool(cfg.execution.cancel_stale_orders)
     cfg.execution.include_partials_in_ledger = bool(cfg.execution.include_partials_in_ledger)
+    cfg.scanner.request_pause_seconds = max(0.0, float(cfg.scanner.request_pause_seconds))
+    cfg.scanner.error_backoff_seconds = max(0.1, float(cfg.scanner.error_backoff_seconds))
+    cfg.scanner.max_retry_attempts = max(0, int(cfg.scanner.max_retry_attempts))
+    cfg.scanner.max_consecutive_errors = max(1, int(cfg.scanner.max_consecutive_errors))
+    cfg.scanner.max_symbols_per_scan = max(0, int(cfg.scanner.max_symbols_per_scan))
     cfg.llm.timeout_seconds = max(1, int(cfg.llm.timeout_seconds))
     cfg.llm.temperature = max(0.0, min(2.0, float(cfg.llm.temperature)))
     cfg.llm.min_confidence = max(0.0, min(1.0, float(cfg.llm.min_confidence)))
@@ -460,6 +489,9 @@ def _normalize_config(cfg: BotConfig) -> None:
         transform=str.upper,
     )
     cfg.alerts.timeout_seconds = max(1, int(cfg.alerts.timeout_seconds))
+    cfg.alerts.require_in_live = bool(cfg.alerts.require_in_live)
+    cfg.log_max_bytes = max(1024, int(cfg.log_max_bytes))
+    cfg.log_backup_count = max(1, int(cfg.log_backup_count))
 
 
 def _normalize_choice(

@@ -36,7 +36,7 @@ strategies:
     stop_loss_pct: 2.0
 
   covered_calls:
-    enabled: true
+    enabled: false
     min_dte: 20
     max_dte: 45
     # Target delta for calls sold
@@ -61,6 +61,14 @@ scanner:
   min_underlying_volume: 500000
   # Pull trending movers from Schwab to add to the scan universe
   include_movers: true
+  # Pause between ticker API calls to reduce rate-limit pressure
+  request_pause_seconds: 0.10
+  # Retry/backoff controls for transient quote/chain failures
+  error_backoff_seconds: 1.0
+  max_retry_attempts: 2
+  max_consecutive_errors: 20
+  # Optional cap on number of symbols scanned each cycle (0 = disabled)
+  max_symbols_per_scan: 0
 
 # Fallback watchlist — only used if scanner is disabled
 watchlist:
@@ -154,8 +162,11 @@ alerts:
   webhook_url: ""
   min_level: ERROR
   timeout_seconds: 5
+  require_in_live: true
 
 # Logging
 logging:
   level: INFO
   file: logs/tradingbot.log
+  max_bytes: 10485760
+  backup_count: 5

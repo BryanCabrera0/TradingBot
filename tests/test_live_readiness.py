@@ -14,6 +14,7 @@ def make_live_config() -> BotConfig:
     cfg.trading_mode = "live"
     cfg.watchlist = ["SPY"]
     cfg.scanner.enabled = False
+    cfg.alerts.require_in_live = False
     return cfg
 
 
@@ -89,6 +90,19 @@ class LiveReadinessTests(unittest.TestCase):
 
         self.assertFalse(executed)
         bot.schwab.build_covered_call_open.assert_not_called()
+
+    def test_live_preflight_requires_alert_destination_when_enforced(self) -> None:
+        cfg = make_live_config()
+        cfg.alerts.require_in_live = True
+        cfg.alerts.enabled = False
+        cfg.credit_spreads.enabled = True
+        cfg.covered_calls.enabled = False
+        cfg.iron_condors.enabled = False
+
+        bot = TradingBot(cfg)
+
+        with self.assertRaises(RuntimeError):
+            bot.validate_live_readiness()
 
 
 if __name__ == "__main__":

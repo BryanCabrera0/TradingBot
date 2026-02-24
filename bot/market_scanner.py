@@ -12,6 +12,7 @@ Ranking criteria:
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
@@ -116,22 +117,36 @@ class MarketScanner:
         logger.info("=" * 60)
 
         universe = self._build_universe()
+        if self.config.max_symbols_per_scan > 0:
+            universe = universe[: self.config.max_symbols_per_scan]
         logger.info("Scanning %d tickers...", len(universe))
 
         scored: list[TickerScore] = []
+        pause_seconds = max(0.0, float(self.config.request_pause_seconds))
+        consecutive_errors = 0
 
         for i, symbol in enumerate(universe):
             try:
                 ticker_score = self._score_ticker(symbol)
                 if ticker_score and ticker_score.score > 0:
                     scored.append(ticker_score)
+                consecutive_errors = 0
 
                 if (i + 1) % 25 == 0:
                     logger.info("  Scanned %d/%d tickers...", i + 1, len(universe))
 
             except Exception as e:
+                consecutive_errors += 1
                 logger.debug("Error scoring %s: %s", symbol, e)
-                continue
+                if consecutive_errors >= self.config.max_consecutive_errors:
+                    logger.warning(
+                        "Stopping scan early after %d consecutive ticker errors.",
+                        consecutive_errors,
+                    )
+                    break
+            finally:
+                if pause_seconds > 0 and i + 1 < len(universe):
+                    time.sleep(pause_seconds)
 
         # Sort by composite score descending
         scored.sort(key=lambda t: t.score, reverse=True)
@@ -236,7 +251,11 @@ class MarketScanner:
 
         # Fetch a lightweight quote for underlying data
         try:
-            quote = self.schwab.get_quote(symbol)
+            quote = self._call_with_retries(
+                self.schwab.get_quote,
+                symbol,
+                operation=f"quote:{symbol}",
+            )
             q = quote.get("quote", quote)
             ts.underlying_price = safe_float(q.get("lastPrice", q.get("mark", 0)))
             ts.underlying_volume = safe_int(q.get("totalVolume", 0))
@@ -257,8 +276,10 @@ class MarketScanner:
         try:
             from_date = datetime.now() + timedelta(days=14)
             to_date = datetime.now() + timedelta(days=50)
-            chain = self.schwab.get_option_chain(
+            chain = self._call_with_retries(
+                self.schwab.get_option_chain,
                 symbol,
+                operation=f"chain:{symbol}",
                 strike_count=10,  # Fewer strikes = faster
                 from_date=from_date,
                 to_date=to_date,
@@ -369,6 +390,51 @@ class MarketScanner:
         score += exp_score * 5
 
         return round(score, 1)
+
+    def _call_with_retries(self, fn, *args, operation: str, **kwargs):
+        """Call an API function with retry/backoff for transient failures."""
+        attempts = max(0, int(self.config.max_retry_attempts))
+        backoff = max(0.1, float(self.config.error_backoff_seconds))
+
+        for attempt in range(attempts + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                if attempt >= attempts or not self._is_retryable_error(exc):
+                    raise
+                delay = backoff * (2 ** attempt)
+                logger.warning(
+                    "%s failed (attempt %d/%d): %s. Retrying in %.2fs.",
+                    operation,
+                    attempt + 1,
+                    attempts + 1,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+
+        raise RuntimeError(f"{operation} failed after retries")
+
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        """Return True for transient network/server/rate-limit failures."""
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status in {429, 500, 502, 503, 504}:
+            return True
+
+        text = str(exc).lower()
+        retry_markers = (
+            "429",
+            "rate limit",
+            "timeout",
+            "timed out",
+            "temporar",
+            "connection reset",
+            "connection aborted",
+            "service unavailable",
+        )
+        return any(marker in text for marker in retry_markers)
 
     def get_scan_report(self) -> str:
         """Get a formatted report of the last scan results."""

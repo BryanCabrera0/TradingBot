@@ -73,10 +73,10 @@ class SchwabClient:
                 "No token file found. You need to run the initial auth flow."
             )
             logger.info(
-                "Run: python -m bot.auth to complete browser-based authentication."
+                "Run: python3 -m bot.auth to complete browser-based authentication."
             )
             raise RuntimeError(
-                "Token file not found. Run `python -m bot.auth` first to "
+                "Token file not found. Run `python3 -m bot.auth` first to "
                 "complete the OAuth flow."
             )
 
@@ -100,6 +100,21 @@ class SchwabClient:
                     "No linked Schwab accounts found for this token."
                 )
             return None
+
+        if self.config.account_index >= 0:
+            index = int(self.config.account_index)
+            if index >= len(account_hashes):
+                raise RuntimeError(
+                    f"SCHWAB_ACCOUNT_INDEX={index} is out of range "
+                    f"(0..{len(account_hashes) - 1})."
+                )
+            self._account_hash = account_hashes[index]
+            logger.info(
+                "Using linked Schwab account hash by index %d: %s",
+                index,
+                _mask_hash(self._account_hash),
+            )
+            return self._account_hash
 
         if len(account_hashes) == 1:
             self._account_hash = account_hashes[0]

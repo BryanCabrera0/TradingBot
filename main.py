@@ -11,32 +11,39 @@ automatically trades options strategies including:
 
 Usage:
     # Paper trading (default — no real money)
-    python main.py
+    python3 main.py
 
     # Paper trading with custom config
-    python main.py --config my_config.yaml
+    python3 main.py --config my_config.yaml
 
     # Live trading (requires Schwab API credentials in .env)
-    python main.py --live
+    python3 main.py --live
 
     # Run a single scan (no continuous loop)
-    python main.py --once
+    python3 main.py --once
 
     # Show performance report
-    python main.py --report
+    python3 main.py --report
 """
 
 import argparse
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from bot.config import load_config
+from bot.live_setup import run_live_setup
 from bot.orchestrator import TradingBot
 from bot.paper_trader import PaperTrader
 
 
-def setup_logging(level: str = "INFO", log_file: str = "logs/tradingbot.log") -> None:
+def setup_logging(
+    level: str = "INFO",
+    log_file: str = "logs/tradingbot.log",
+    max_bytes: int = 10_485_760,
+    backup_count: int = 5,
+) -> None:
     """Configure logging to both console and file."""
     log_dir = Path(log_file).parent
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -58,8 +65,12 @@ def setup_logging(level: str = "INFO", log_file: str = "logs/tradingbot.log") ->
     console.setFormatter(console_fmt)
     root_logger.addHandler(console)
 
-    # File handler
-    file_handler = logging.FileHandler(log_file)
+    # Rotating file handler for long-running process safety.
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=max(1024, int(max_bytes)),
+        backupCount=max(1, int(backup_count)),
+    )
     file_handler.setLevel(log_level)
     file_fmt = logging.Formatter(
         "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
@@ -124,6 +135,10 @@ def main() -> None:
         help="Run startup checks and exit without starting the bot",
     )
     parser.add_argument(
+        "--setup-live", action="store_true",
+        help="Run guided live setup (credentials, OAuth token, account selection) and exit",
+    )
+    parser.add_argument(
         "--log-level", default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level from config",
@@ -135,6 +150,18 @@ def main() -> None:
         show_report()
         return
 
+    if args.setup_live:
+        try:
+            run_live_setup(
+                config_path=args.config,
+                auto_auth=True,
+                auto_select_account=True,
+            )
+        except Exception as exc:
+            print(f"Live setup failed: {exc}")
+            sys.exit(1)
+        return
+
     # Load config
     config = load_config(args.config)
 
@@ -144,10 +171,16 @@ def main() -> None:
         if not config.schwab.app_key or not config.schwab.app_secret:
             print("ERROR: Live trading requires SCHWAB_APP_KEY and SCHWAB_APP_SECRET")
             print("       Set them in your .env file. See .env.example.")
+            print("       Or run: python3 main.py --setup-live")
             sys.exit(1)
 
     log_level = args.log_level or config.log_level
-    setup_logging(log_level, config.log_file)
+    setup_logging(
+        log_level,
+        config.log_file,
+        max_bytes=config.log_max_bytes,
+        backup_count=config.log_backup_count,
+    )
 
     logger = logging.getLogger(__name__)
 

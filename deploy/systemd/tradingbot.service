@@ -1,0 +1,18 @@
+[Unit]
+Description=TradingBot automated options trading daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bryan
+WorkingDirectory=/Users/bryan/TradingBot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/Users/bryan/TradingBot/.venv/bin/python /Users/bryan/TradingBot/main.py --live
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

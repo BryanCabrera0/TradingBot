@@ -62,6 +62,22 @@ class MarketScannerTests(unittest.TestCase):
         self.assertIsNotNone(score)
         self.assertGreaterEqual(score.score, 0.0)
 
+    def test_scan_stops_after_max_consecutive_errors(self) -> None:
+        scanner = MarketScanner(
+            schwab_client=object(),
+            config=ScannerConfig(
+                request_pause_seconds=0.0,
+                max_consecutive_errors=2,
+            ),
+        )
+        scanner._build_universe = mock.Mock(return_value=["A", "B", "C", "D"])
+        scanner._score_ticker = mock.Mock(side_effect=RuntimeError("boom"))
+
+        results = scanner.scan()
+
+        self.assertEqual(results, [])
+        self.assertEqual(scanner._score_ticker.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

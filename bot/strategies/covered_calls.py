@@ -29,6 +29,8 @@ class CoveredCallStrategy(BaseStrategy):
 
         # Only trade on configured tickers
         allowed_tickers = self.config.get("tickers", [])
+        if not allowed_tickers:
+            return signals
         if allowed_tickers and symbol not in allowed_tickers:
             return signals
 

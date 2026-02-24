@@ -1,7 +1,7 @@
 """One-time OAuth authentication flow for Schwab API.
 
 Run this module directly to complete the initial browser-based auth:
-    python -m bot.auth
+    python3 -m bot.auth
 """
 
 from pathlib import Path
@@ -11,9 +11,9 @@ from bot.config import load_config
 from bot.file_security import tighten_file_permissions, validate_sensitive_file
 
 
-def run_auth_flow():
+def run_auth_flow(config_path: str = "config.yaml"):
     """Launch the OAuth browser flow and save the token."""
-    cfg = load_config()
+    cfg = load_config(config_path)
     token_path = Path(cfg.schwab.token_path).expanduser()
 
     print("=" * 60)

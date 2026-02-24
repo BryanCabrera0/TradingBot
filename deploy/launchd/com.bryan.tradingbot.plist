@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bryan.tradingbot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/bryan/TradingBot/.venv/bin/python</string>
+    <string>/Users/bryan/TradingBot/main.py</string>
+    <string>--live</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/bryan/TradingBot</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/bryan/TradingBot/logs/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/bryan/TradingBot/logs/launchd.err.log</string>
+</dict>
+</plist>
