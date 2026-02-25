@@ -20,6 +20,8 @@ Live execution supports all three strategies with:
 
 ## Quick Start
 
+Prerequisite: Python 3.10 or newer.
+
 1. Install dependencies:
 
 ```bash
