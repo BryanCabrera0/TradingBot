@@ -142,6 +142,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.log_max_bytes, 1024)
         self.assertEqual(cfg.log_backup_count, 1)
 
+    def test_placeholder_live_secrets_are_treated_as_missing(self) -> None:
+        config_path = self._write_config(
+            """
+            trading_mode: live
+            """
+        )
+
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ,
+            {
+                "SCHWAB_APP_KEY": "your_app_key_here",
+                "SCHWAB_APP_SECRET": "your_app_secret_here",
+                "SCHWAB_ACCOUNT_HASH": "your_account_hash_here",
+            },
+            clear=True,
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.schwab.app_key, "")
+        self.assertEqual(cfg.schwab.app_secret, "")
+        self.assertEqual(cfg.schwab.account_hash, "")
+
 
 if __name__ == "__main__":
     unittest.main()

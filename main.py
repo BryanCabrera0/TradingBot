@@ -19,6 +19,15 @@ Usage:
     # Live trading (requires Schwab API credentials in .env)
     python3 main.py --live
 
+    # Live trading (non-interactive confirmation bypass)
+    python3 main.py --live --yes
+
+    # Validate live configuration without broker connectivity
+    python3 main.py --live-readiness-only
+
+    # Prepare all local live runtime files/settings before broker access is active
+    python3 main.py --prepare-live
+
     # Run a single scan (no continuous loop)
     python3 main.py --once
 
@@ -139,6 +148,18 @@ def main() -> None:
         help="Run guided live setup (credentials, OAuth token, account selection) and exit",
     )
     parser.add_argument(
+        "--prepare-live", action="store_true",
+        help="Prepare local live runtime (env defaults + rendered service files) without broker connectivity",
+    )
+    parser.add_argument(
+        "--live-readiness-only", action="store_true",
+        help="Validate live configuration prerequisites without broker API calls",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Acknowledge live-trading confirmation prompt (useful for non-interactive runs)",
+    )
+    parser.add_argument(
         "--log-level", default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level from config",
@@ -150,12 +171,31 @@ def main() -> None:
         show_report()
         return
 
+    if args.prepare_live:
+        try:
+            run_live_setup(
+                config_path=args.config,
+                auto_auth=False,
+                auto_select_account=False,
+                prepare_only=True,
+                render_service_files=True,
+            )
+        except Exception as exc:
+            print(f"Live preparation failed: {exc}")
+            sys.exit(1)
+        return
+
+    if args.live_readiness_only:
+        args.live = True
+
     if args.setup_live:
         try:
             run_live_setup(
                 config_path=args.config,
                 auto_auth=True,
                 auto_select_account=True,
+                prepare_only=False,
+                render_service_files=True,
             )
         except Exception as exc:
             print(f"Live setup failed: {exc}")
@@ -199,13 +239,41 @@ def main() -> None:
         print("  ⚠  LIVE TRADING MODE — REAL MONEY AT RISK")
         print("  ⚠  Make sure you understand the risks before proceeding.")
         print()
-        confirm = input("  Type 'YES' to confirm live trading: ")
-        if confirm.strip() != "YES":
-            print("  Aborted.")
-            return
+        needs_confirmation = (
+            not args.preflight_only
+            and not args.yes
+            and not args.live_readiness_only
+        )
+        if needs_confirmation:
+            if not sys.stdin.isatty():
+                print("ERROR: Live confirmation required in non-interactive mode.")
+                print("       Re-run with --yes once you have validated your setup.")
+                sys.exit(2)
+            confirm = input("  Type 'YES' to confirm live trading: ")
+            if confirm.strip() != "YES":
+                print("  Aborted.")
+                return
 
     # Create and run the bot
     bot = TradingBot(config)
+    preflight_message = "Preflight checks passed."
+
+    if args.live_readiness_only:
+        logger.info(
+            "Running live configuration readiness checks (no broker connectivity)..."
+        )
+        try:
+            bot.validate_live_configuration(require_token_file=False)
+        except Exception as e:
+            logger.error("Live configuration readiness failed: %s", e)
+            bot._alert(
+                level="ERROR",
+                title="Live configuration readiness failed",
+                message=str(e),
+            )
+            sys.exit(1)
+        print("Live configuration readiness checks passed.")
+        return
 
     if config.trading_mode == "live":
         logger.info("Running live preflight checks...")
@@ -220,9 +288,29 @@ def main() -> None:
             )
             sys.exit(1)
     elif args.preflight_only:
-        logger.info("Running paper-mode connectivity preflight...")
+        logger.info("Running paper-mode preflight...")
         try:
             bot.connect()
+        except Exception as e:
+            # Allow local/offline paper preflight when Schwab auth has not been set up yet.
+            if "Token file not found" in str(e):
+                logger.warning(
+                    "Paper preflight market-data check skipped: %s",
+                    e,
+                )
+                preflight_message = (
+                    "Preflight checks passed (offline paper mode; "
+                    "Schwab market data not connected)."
+                )
+            else:
+                logger.error("Paper preflight failed: %s", e)
+                bot._alert(
+                    level="ERROR",
+                    title="Paper preflight failed",
+                    message=str(e),
+                )
+                sys.exit(1)
+        try:
             bot.validate_llm_readiness()
         except Exception as e:
             logger.error("Paper preflight failed: %s", e)
@@ -234,7 +322,7 @@ def main() -> None:
             sys.exit(1)
 
     if args.preflight_only:
-        print("Preflight checks passed.")
+        print(preflight_message)
         return
 
     if args.once:

@@ -12,3 +12,4 @@ logs/
 *.log
 paper_trades.json
 live_trades.json
+deploy/generated/

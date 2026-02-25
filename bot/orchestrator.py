@@ -11,6 +11,7 @@ This is the brain of the bot. It:
 
 from collections import defaultdict, deque
 import logging
+from pathlib import Path
 import re
 import time
 import traceback
@@ -189,21 +190,9 @@ class TradingBot:
         if self.is_paper:
             return
 
-        enabled = self._enabled_strategy_names()
-        unsupported = sorted(enabled - LIVE_SUPPORTED_ENTRY_STRATEGIES)
-        if unsupported:
-            raise RuntimeError(
-                "Live execution currently supports only "
-                "credit_spreads, iron_condors, and covered_calls. "
-                f"Disable unsupported strategies: {', '.join(unsupported)}"
-            )
-        if not enabled:
-            raise RuntimeError("No enabled strategies in config.")
-
-        self._validate_live_alerting_readiness()
+        self.validate_live_configuration(require_token_file=True)
         self.connect()
         self._validate_live_covered_call_readiness()
-        self._validate_llm_readiness()
 
         probe_symbol = self.config.watchlist[0] if self.config.watchlist else "SPY"
         quote = self.schwab.get_quote(probe_symbol)
@@ -231,6 +220,54 @@ class TradingBot:
             "will be bootstrapped into ledger on connect."
         )
 
+    def validate_live_configuration(self, *, require_token_file: bool = False) -> None:
+        """Validate live config/safety prerequisites without broker API calls."""
+        if self.is_paper:
+            return
+
+        if not self.config.schwab.app_key or not self.config.schwab.app_secret:
+            raise RuntimeError(
+                "Live mode requires SCHWAB_APP_KEY and SCHWAB_APP_SECRET."
+            )
+
+        enabled = self._enabled_strategy_names()
+        unsupported = sorted(enabled - LIVE_SUPPORTED_ENTRY_STRATEGIES)
+        if unsupported:
+            raise RuntimeError(
+                "Live execution currently supports only "
+                "credit_spreads, iron_condors, and covered_calls. "
+                f"Disable unsupported strategies: {', '.join(unsupported)}"
+            )
+        if not enabled:
+            raise RuntimeError("No enabled strategies in config.")
+
+        token_path = Path(self.config.schwab.token_path).expanduser()
+        if require_token_file:
+            if not token_path.exists():
+                raise RuntimeError(
+                    f"Schwab token file not found at {token_path}. "
+                    "Run `python3 main.py --setup-live`."
+                )
+        elif not token_path.exists():
+            logger.warning(
+                "Schwab token file not found at %s. "
+                "This is expected before OAuth is completed.",
+                token_path,
+            )
+
+        if (
+            not self.config.schwab.account_hash
+            and int(self.config.schwab.account_index) < 0
+        ):
+            logger.warning(
+                "SCHWAB_ACCOUNT_HASH / SCHWAB_ACCOUNT_INDEX not set. "
+                "Auto-resolution requires exactly one linked account."
+            )
+
+        self._validate_live_alerting_readiness()
+        self._validate_live_covered_call_configuration()
+        self._validate_llm_readiness()
+
     def _validate_live_alerting_readiness(self) -> None:
         """Enforce runtime alert sink for live mode unless explicitly disabled."""
         if self.is_paper:
@@ -246,8 +283,8 @@ class TradingBot:
                 "Live mode requires ALERTS_WEBHOOK_URL when alerts.require_in_live=true."
             )
 
-    def _validate_live_covered_call_readiness(self) -> None:
-        """Validate covered-call live prerequisites before order flow starts."""
+    def _validate_live_covered_call_configuration(self) -> None:
+        """Validate covered-call config that can be checked without broker calls."""
         if self.is_paper or not self.config.covered_calls.enabled:
             return
 
@@ -256,6 +293,13 @@ class TradingBot:
             raise RuntimeError(
                 "Live covered_calls is enabled but covered_calls.tickers is empty."
             )
+
+    def _validate_live_covered_call_readiness(self) -> None:
+        """Validate covered-call live prerequisites before order flow starts."""
+        if self.is_paper or not self.config.covered_calls.enabled:
+            return
+
+        tickers = list(self.config.covered_calls.tickers or [])
 
         broker_positions = self._get_broker_positions() or []
         shares_by_symbol: dict[str, int] = defaultdict(int)

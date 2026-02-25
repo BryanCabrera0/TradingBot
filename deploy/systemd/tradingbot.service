@@ -1,14 +1,15 @@
 [Unit]
+# Replace __PROJECT_ROOT__ before loading this unit.
 Description=TradingBot automated options trading daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=bryan
-WorkingDirectory=/Users/bryan/TradingBot
+WorkingDirectory=__PROJECT_ROOT__
+EnvironmentFile=__PROJECT_ROOT__/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/Users/bryan/TradingBot/.venv/bin/python /Users/bryan/TradingBot/main.py --live
+ExecStart=__PROJECT_ROOT__/.venv/bin/python __PROJECT_ROOT__/main.py --live --yes
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

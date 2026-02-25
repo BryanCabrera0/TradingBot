@@ -10,6 +10,7 @@ import yaml
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+SECRET_PLACEHOLDER_MARKERS = ("your_", "_here", "changeme")
 
 
 @dataclass
@@ -404,6 +405,16 @@ def _env_float(
 
 def _normalize_config(cfg: BotConfig) -> None:
     """Normalize string enum-like fields and sanitize basic list inputs."""
+    cfg.schwab.app_key = _sanitize_secret(
+        cfg.schwab.app_key, field_name="SCHWAB_APP_KEY"
+    )
+    cfg.schwab.app_secret = _sanitize_secret(
+        cfg.schwab.app_secret, field_name="SCHWAB_APP_SECRET"
+    )
+    cfg.schwab.account_hash = _sanitize_secret(
+        cfg.schwab.account_hash, field_name="SCHWAB_ACCOUNT_HASH"
+    )
+
     cfg.trading_mode = _normalize_choice(
         cfg.trading_mode,
         allowed={"paper", "live"},
@@ -566,3 +577,20 @@ def _normalize_string_list(value: object, default: list[str]) -> list[str]:
         normalized.append(text)
 
     return normalized or default
+
+
+def _sanitize_secret(value: object, field_name: str) -> str:
+    """Normalize sensitive string values and clear common placeholder values."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    if any(marker in lowered for marker in SECRET_PLACEHOLDER_MARKERS):
+        logger.warning(
+            "Ignoring placeholder value for %s. Set a real secret before live use.",
+            field_name,
+        )
+        return ""
+
+    return text

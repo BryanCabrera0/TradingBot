@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,9 @@ def make_live_config() -> BotConfig:
     cfg.watchlist = ["SPY"]
     cfg.scanner.enabled = False
     cfg.alerts.require_in_live = False
+    cfg.schwab.app_key = "test-key"
+    cfg.schwab.app_secret = "test-secret"
+    cfg.schwab.token_path = str(Path(__file__).resolve())
     return cfg
 
 
@@ -103,6 +107,41 @@ class LiveReadinessTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             bot.validate_live_readiness()
+
+    def test_live_configuration_readiness_passes_without_token_requirement(self) -> None:
+        cfg = make_live_config()
+        cfg.schwab.token_path = "/tmp/nonexistent-token.json"
+        cfg.credit_spreads.enabled = True
+        cfg.covered_calls.enabled = False
+        cfg.iron_condors.enabled = False
+
+        bot = TradingBot(cfg)
+
+        bot.validate_live_configuration(require_token_file=False)
+
+    def test_live_configuration_readiness_requires_token_when_requested(self) -> None:
+        cfg = make_live_config()
+        cfg.schwab.token_path = "/tmp/nonexistent-token.json"
+        cfg.credit_spreads.enabled = True
+        cfg.covered_calls.enabled = False
+        cfg.iron_condors.enabled = False
+
+        bot = TradingBot(cfg)
+
+        with self.assertRaises(RuntimeError):
+            bot.validate_live_configuration(require_token_file=True)
+
+    def test_live_configuration_readiness_requires_covered_call_tickers(self) -> None:
+        cfg = make_live_config()
+        cfg.credit_spreads.enabled = False
+        cfg.covered_calls.enabled = True
+        cfg.covered_calls.tickers = []
+        cfg.iron_condors.enabled = False
+
+        bot = TradingBot(cfg)
+
+        with self.assertRaises(RuntimeError):
+            bot.validate_live_configuration(require_token_file=False)
 
 
 if __name__ == "__main__":

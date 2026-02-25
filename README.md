@@ -38,22 +38,34 @@ cp .env.example .env
 - `SCHWAB_ACCOUNT_HASH` (or `SCHWAB_ACCOUNT_INDEX`)
 - `OPENAI_API_KEY`
 
-4. Run guided live setup (credentials check + OAuth + account selection):
+4. (Optional, before API access is active) prepare live runtime files/settings:
+
+```bash
+python3 main.py --prepare-live
+```
+
+5. Run guided live setup (credentials check + OAuth + account selection):
 
 ```bash
 python3 main.py --setup-live
 ```
 
-5. Run paper mode:
+6. Run paper mode:
 
 ```bash
 python3 main.py
 ```
 
-6. Run live mode (after paper validation):
+7. Run live mode (after paper validation):
 
 ```bash
 python3 main.py --live
+```
+
+For non-interactive environments (service managers), use:
+
+```bash
+python3 main.py --live --yes
 ```
 
 ## LLM + News Intelligence
@@ -75,11 +87,17 @@ Tune these in `config.yaml`:
 ## Useful Commands
 
 ```bash
+python3 main.py --prepare-live
+python3 main.py --live-readiness-only
 python3 main.py --once
 python3 main.py --preflight-only
 python3 main.py --report
 python3 main.py --log-level DEBUG
 ```
+
+Paper preflight supports an offline path if Schwab token auth is not yet set up.
+`--live-readiness-only` validates live configuration (credentials, strategy support,
+alert policy, LLM policy) without requiring broker connectivity.
 
 ## Operational Alerts
 
@@ -98,6 +116,9 @@ Live preflight enforces alerting by default (`ALERTS_REQUIRE_IN_LIVE=true`).
 - Service templates for daemonized runs:
   - `/Users/bryan/TradingBot/deploy/systemd/tradingbot.service`
   - `/Users/bryan/TradingBot/deploy/launchd/com.bryan.tradingbot.plist`
+  - rendered outputs from setup/prepare:
+    - `/Users/bryan/TradingBot/deploy/generated/systemd/tradingbot.service`
+    - `/Users/bryan/TradingBot/deploy/generated/launchd/com.bryan.tradingbot.plist`
 
 ## Project Layout
 

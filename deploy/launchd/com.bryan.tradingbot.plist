@@ -1,19 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Replace __PROJECT_ROOT__ before loading this plist. -->
 <dict>
   <key>Label</key>
   <string>com.bryan.tradingbot</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/bryan/TradingBot/.venv/bin/python</string>
-    <string>/Users/bryan/TradingBot/main.py</string>
+    <string>__PROJECT_ROOT__/.venv/bin/python</string>
+    <string>__PROJECT_ROOT__/main.py</string>
     <string>--live</string>
+    <string>--yes</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/bryan/TradingBot</string>
+  <string>__PROJECT_ROOT__</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -28,9 +30,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/bryan/TradingBot/logs/launchd.out.log</string>
+  <string>__PROJECT_ROOT__/logs/launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/bryan/TradingBot/logs/launchd.err.log</string>
+  <string>__PROJECT_ROOT__/logs/launchd.err.log</string>
 </dict>
 </plist>

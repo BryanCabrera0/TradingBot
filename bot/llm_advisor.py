@@ -12,6 +12,7 @@ from bot.config import LLMConfig
 from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
+SECRET_PLACEHOLDER_MARKERS = ("your_", "_here", "changeme")
 
 RISK_POLICIES = {
     "conservative": {
@@ -78,7 +79,7 @@ class LLMAdvisor:
                 return False, f"Ollama health check failed: {exc}"
 
         if provider == "openai":
-            if not os.getenv("OPENAI_API_KEY"):
+            if not _is_configured_secret(os.getenv("OPENAI_API_KEY")):
                 return False, "OPENAI_API_KEY is missing"
             return True, "OpenAI API key is configured"
 
@@ -122,7 +123,7 @@ class LLMAdvisor:
 
     def _query_openai(self, prompt: str) -> str:
         api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        if not _is_configured_secret(api_key):
             raise RuntimeError("OPENAI_API_KEY is missing")
 
         payload = {
@@ -322,3 +323,13 @@ def _clamp_float(value: object, minimum: float, maximum: float) -> float:
     except (TypeError, ValueError):
         parsed = minimum
     return max(minimum, min(maximum, parsed))
+
+
+def _is_configured_secret(value: object) -> bool:
+    """Return True when a secret-like value is non-empty and not placeholder text."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+
+    lowered = text.lower()
+    return not any(marker in lowered for marker in SECRET_PLACEHOLDER_MARKERS)

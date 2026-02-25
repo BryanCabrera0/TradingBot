@@ -130,6 +130,17 @@ class LLMAdvisorTests(unittest.TestCase):
 
         self.assertIn("headline risk", raw)
 
+    def test_openai_health_check_rejects_placeholder_key(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="openai"))
+
+        with mock.patch.dict(
+            os.environ, {"OPENAI_API_KEY": "your_openai_key_here"}, clear=True
+        ):
+            ok, message = advisor.health_check()
+
+        self.assertFalse(ok)
+        self.assertIn("missing", message.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
