@@ -6,6 +6,7 @@ from typing import Optional
 from bot.analysis import analyze_credit_spread, find_option_by_delta, find_spread_wing
 from bot.dividend_calendar import DividendCalendar
 from bot.iv_history import IVHistory
+from bot.number_utils import safe_int
 from bot.strategies.base import BaseStrategy, TradeSignal
 from bot.technicals import TechnicalContext
 
@@ -274,6 +275,10 @@ class CreditSpreadStrategy(BaseStrategy):
         """Check open credit spreads for adaptive exit/defense/roll conditions."""
         signals = []
         base_stop_loss_pct = float(self.config.get("stop_loss_pct", 2.0))
+        adaptive_targets = bool(self.config.get("adaptive_targets", True))
+        trailing_enabled = bool(self.config.get("trailing_stop_enabled", False))
+        trail_activation = float(self.config.get("trailing_stop_activation_pct", 0.25))
+        trail_floor = float(self.config.get("trailing_stop_floor_pct", 0.10))
 
         for pos in positions:
             if str(pos.get("status", "open")).lower() != "open":
@@ -284,13 +289,13 @@ class CreditSpreadStrategy(BaseStrategy):
             entry_credit = float(pos.get("entry_credit", 0) or 0)
             current_value = float(pos.get("current_value", 0) or 0)
             quantity = max(1, int(pos.get("quantity", 1)))
-            dte_remaining = int(pos.get("dte_remaining", 999) or 999)
+            dte_remaining = safe_int(pos.get("dte_remaining"), 999)
             details = pos.get("details", {}) or {}
             underlying_price = float(pos.get("underlying_price", 0.0) or 0.0)
 
             pnl = entry_credit - current_value
             pnl_pct = (pnl / entry_credit) if entry_credit > 0 else 0.0
-            stop_loss_pct = base_stop_loss_pct
+            stop_loss_pct = self._stop_loss_for_position(pos, base_stop_loss_pct)
 
             if self._is_short_strike_tested(pos, underlying_price, details):
                 stop_loss_pct = min(stop_loss_pct, 1.5)
@@ -324,15 +329,36 @@ class CreditSpreadStrategy(BaseStrategy):
                 )
                 continue
 
-            profit_target_pct = self._profit_target_for_dte(dte_remaining)
+            max_seen = float(details.get("max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)) or pnl_pct)
+            max_seen = max(max_seen, pnl_pct)
+            details["max_profit_pct_seen"] = max_seen
+            pos["max_profit_pct_seen"] = max_seen
+
+            profit_target_pct = (
+                self._profit_target_for_dte(dte_remaining)
+                if adaptive_targets
+                else float(self.config.get("profit_target_pct", 0.50))
+            )
             if pos.get("partial_closed", False):
                 profit_target_pct = max(profit_target_pct, 0.65)
 
             exit_reason = ""
             if entry_credit > 0:
-                if pnl_pct >= profit_target_pct:
+                trailing_lock = None
+                if trailing_enabled and max_seen >= trail_activation and pnl_pct > 0:
+                    trailing_lock = self._trailing_lock_pct(
+                        max_seen=max_seen,
+                        activation=trail_activation,
+                        floor=trail_floor,
+                    )
+                    if pnl_pct <= trailing_lock:
+                        exit_reason = (
+                            f"Trailing stop hit ({pnl_pct:.1%} <= {trailing_lock:.1%})"
+                        )
+
+                if not exit_reason and pnl_pct >= profit_target_pct:
                     exit_reason = f"Profit target reached ({pnl_pct:.1%})"
-                elif pnl < 0 and abs(pnl) >= entry_credit * stop_loss_pct:
+                elif not exit_reason and pnl < 0 and abs(pnl) >= entry_credit * stop_loss_pct:
                     exit_reason = f"Stop loss triggered (loss {abs(pnl):.2f})"
 
             if not exit_reason and dte_remaining <= 5:
@@ -354,11 +380,31 @@ class CreditSpreadStrategy(BaseStrategy):
 
     @staticmethod
     def _profit_target_for_dte(dte_remaining: int) -> float:
-        if dte_remaining <= 14:
-            return 0.25
+        if dte_remaining < 10:
+            return 0.20
+        if dte_remaining <= 20:
+            return 0.30
         if dte_remaining <= 30:
-            return 0.50
-        return 0.65
+            return 0.40
+        return 0.50
+
+    @staticmethod
+    def _trailing_lock_pct(*, max_seen: float, activation: float, floor: float) -> float:
+        gain_above_activation = max(0.0, max_seen - activation)
+        lock = floor + (gain_above_activation * 0.50)
+        lock = min(max_seen - 0.01, lock)
+        return max(floor, min(max_seen, lock))
+
+    @staticmethod
+    def _stop_loss_for_position(position: dict, base_stop_loss_pct: float) -> float:
+        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        regime = str(position.get("regime", details.get("regime", ""))).upper()
+        iv_rank = float(position.get("iv_rank", details.get("iv_rank", 50.0)) or 50.0)
+        if regime in {"CRASH/CRISIS", "CRISIS"}:
+            return 1.5
+        if regime in {"HIGH_VOL_CHOP", "ELEVATED"} or iv_rank >= 70.0:
+            return max(base_stop_loss_pct, 2.5)
+        return max(1.0, base_stop_loss_pct)
 
     @staticmethod
     def _is_short_strike_tested(position: dict, underlying_price: float, details: dict) -> bool:

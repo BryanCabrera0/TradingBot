@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -41,6 +42,8 @@ class Backtester:
         *,
         data_dir: Path | str = "bot/data",
         initial_balance: float = 100_000.0,
+        commission_per_contract: float = 0.65,
+        base_slippage_pct: float = 0.02,
     ):
         self.config = config or load_config()
         self.data_dir = ensure_data_dir(data_dir)
@@ -50,6 +53,10 @@ class Backtester:
         self.positions: list[dict] = []
         self.equity_curve: list[dict] = []
         self._daily_realized: dict[str, float] = {}
+        self.commission_per_contract = max(0.0, float(commission_per_contract))
+        self.base_slippage_pct = max(0.0, float(base_slippage_pct))
+        self.total_fees = 0.0
+        self.total_slippage = 0.0
 
         self.risk_manager = RiskManager(self.config.risk)
         self.strategies = self._build_strategies()
@@ -150,19 +157,28 @@ class Backtester:
         pid = f"bt_{uuid.uuid4().hex[:10]}"
         entry_credit = max(0.0, float(analysis.credit))
         quantity = max(1, int(signal.quantity))
-        self.cash_balance += entry_credit * quantity * 100.0
+        slippage_per_contract = entry_credit * self._slippage_factor(analysis.score)
+        effective_credit = max(0.0, entry_credit - slippage_per_contract)
+        commission = quantity * self.commission_per_contract
+        self.cash_balance += effective_credit * quantity * 100.0
+        self.cash_balance -= commission
+        self.total_fees += commission
+        self.total_slippage += slippage_per_contract * quantity * 100.0
 
         position = {
             "position_id": pid,
             "strategy": signal.strategy,
             "symbol": signal.symbol,
-            "entry_credit": round(entry_credit, 4),
-            "current_value": round(entry_credit, 4),
+            "entry_credit": round(effective_credit, 4),
+            "current_value": round(effective_credit, 4),
             "quantity": quantity,
             "max_loss": float(analysis.max_loss),
             "open_date": datetime.utcnow().isoformat(),
             "expiration": analysis.expiration,
             "dte_remaining": int(analysis.dte),
+            "entry_slippage_per_contract": round(slippage_per_contract, 4),
+            "commission_open": round(commission, 4),
+            "regime": signal.metadata.get("regime", "unknown"),
             "details": {
                 "expiration": analysis.expiration,
                 "dte": analysis.dte,
@@ -192,9 +208,16 @@ class Backtester:
         position = self.positions.pop(index)
         close_value = float(position.get("current_value", 0.0))
         quantity = max(1, int(position.get("quantity", 1)))
-        self.cash_balance -= close_value * quantity * 100.0
+        exit_slippage_per_contract = close_value * self._slippage_factor(float(position.get("details", {}).get("score", 50.0)))
+        effective_close = max(0.0, close_value + exit_slippage_per_contract)
+        commission = quantity * self.commission_per_contract
+        self.cash_balance -= effective_close * quantity * 100.0
+        self.cash_balance -= commission
+        self.total_fees += commission
+        self.total_slippage += exit_slippage_per_contract * quantity * 100.0
 
-        pnl = (float(position.get("entry_credit", 0.0)) - close_value) * quantity * 100.0
+        pnl = (float(position.get("entry_credit", 0.0)) - effective_close) * quantity * 100.0
+        pnl -= commission
         opened_at = _parse_datetime(position.get("open_date"))
         days_in_trade = (
             max(0, (trading_day - opened_at.date()).days) if opened_at else max(0, int(position.get("dte_remaining", 0)))
@@ -202,11 +225,13 @@ class Backtester:
         closed = {
             **position,
             "close_date": trading_day.isoformat(),
-            "close_value": round(close_value, 4),
+            "close_value": round(effective_close, 4),
             "pnl": round(pnl, 2),
             "reason": reason,
             "days_in_trade": days_in_trade,
             "status": "closed",
+            "commission_close": round(commission, 4),
+            "exit_slippage_per_contract": round(exit_slippage_per_contract, 4),
         }
         self.closed_trades.append(closed)
         self._daily_realized[trading_day.isoformat()] = (
@@ -247,6 +272,12 @@ class Backtester:
             }
         )
 
+    def _slippage_factor(self, score: float) -> float:
+        """Simple liquidity-aware slippage proxy."""
+        quality = max(0.0, min(100.0, float(score or 0.0))) / 100.0
+        # Better scores imply tighter markets and lower slippage.
+        return max(0.001, self.base_slippage_pct * (1.2 - quality))
+
     def _load_snapshots_for_day(self, trading_day: date) -> dict[str, dict]:
         iso = trading_day.isoformat()
         snapshots: dict[str, dict] = {}
@@ -278,6 +309,9 @@ class Backtester:
         sharpe = _sharpe_ratio(daily_returns)
         sortino = _sortino_ratio(daily_returns)
         max_drawdown = _max_drawdown(equities)
+        total_days = max(1, (end_date - start_date).days)
+        annualized_return = ((1.0 + total_return) ** (365.0 / total_days) - 1.0) if total_return > -1.0 else -1.0
+        calmar = (annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
 
         wins = [trade["pnl"] for trade in self.closed_trades if trade.get("pnl", 0.0) > 0]
         losses = [trade["pnl"] for trade in self.closed_trades if trade.get("pnl", 0.0) < 0]
@@ -288,13 +322,19 @@ class Backtester:
         )
 
         monthly = _monthly_returns(self.equity_curve, self.initial_balance)
+        strategy_performance = _strategy_performance(self.closed_trades)
+        regime_performance = _regime_performance(self.closed_trades)
+        walk_forward = self._walk_forward_analysis(equities)
+        monte_carlo = self._monte_carlo_simulation(self.closed_trades)
         report = {
             "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
             "initial_balance": round(self.initial_balance, 2),
             "ending_equity": round(equities[-1], 2) if equities else round(self.initial_balance, 2),
             "total_return": round(total_return, 6),
+            "annualized_return": round(annualized_return, 6),
             "sharpe_ratio": round(sharpe, 4),
             "sortino_ratio": round(sortino, 4),
+            "calmar_ratio": round(calmar, 4),
             "max_drawdown": round(max_drawdown, 6),
             "win_rate": round((len(wins) / max(1, len(self.closed_trades))), 4),
             "average_winner": round(float(np.mean(wins)) if wins else 0.0, 2),
@@ -302,6 +342,16 @@ class Backtester:
             "profit_factor": round((sum(wins) / abs(sum(losses))) if losses else float("inf"), 4),
             "average_days_in_trade": round(avg_days, 2),
             "monthly_returns": monthly,
+            "strategy_performance": strategy_performance,
+            "regime_performance": regime_performance,
+            "walk_forward": walk_forward,
+            "monte_carlo": monte_carlo,
+            "transaction_costs": {
+                "total_fees": round(self.total_fees, 2),
+                "total_slippage": round(self.total_slippage, 2),
+                "commission_per_contract": round(self.commission_per_contract, 4),
+                "base_slippage_pct": round(self.base_slippage_pct, 4),
+            },
             "closed_trades": len(self.closed_trades),
             "open_positions": len(self.positions),
             "equity_curve": self.equity_curve,
@@ -312,9 +362,128 @@ class Backtester:
         logs_dir = ensure_data_dir("logs")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = logs_dir / f"backtest_{timestamp}.json"
+        html_path = logs_dir / f"backtest_{timestamp}.html"
+        report["chart_html_path"] = str(html_path)
         dump_json(path, report)
+        self._write_html_report(report, html_path)
         logger.info("Backtest report written: %s", path)
         return str(path)
+
+    def _walk_forward_analysis(self, equities: list[float]) -> dict:
+        if len(equities) < 40:
+            return {"windows": [], "avg_test_return": 0.0}
+        window_train = 30
+        window_test = 10
+        cursor = 0
+        windows = []
+        while cursor + window_train + window_test <= len(equities):
+            train = equities[cursor : cursor + window_train]
+            test = equities[cursor + window_train : cursor + window_train + window_test]
+            train_returns = _daily_returns(train)
+            test_return = ((test[-1] / test[0]) - 1.0) if test and test[0] > 0 else 0.0
+            windows.append(
+                {
+                    "train_mean_return": round(float(np.mean(train_returns)) if train_returns else 0.0, 6),
+                    "test_return": round(test_return, 6),
+                    "train_size": len(train),
+                    "test_size": len(test),
+                }
+            )
+            cursor += window_test
+        avg_test_return = float(np.mean([w["test_return"] for w in windows])) if windows else 0.0
+        return {"windows": windows, "avg_test_return": round(avg_test_return, 6)}
+
+    def _monte_carlo_simulation(self, closed_trades: list[dict]) -> dict:
+        pnls = [float(trade.get("pnl", 0.0) or 0.0) for trade in closed_trades if isinstance(trade, dict)]
+        if len(pnls) < 2:
+            return {
+                "iterations": 0,
+                "drawdown_p50": 0.0,
+                "drawdown_p90": 0.0,
+                "drawdown_p99": 0.0,
+            }
+
+        iterations = 10_000
+        drawdowns: list[float] = []
+        base = float(self.initial_balance)
+        for _ in range(iterations):
+            equity = base
+            peak = base
+            max_dd = 0.0
+            for pnl in random.sample(pnls, len(pnls)):
+                equity += pnl
+                peak = max(peak, equity)
+                if peak > 0:
+                    max_dd = min(max_dd, (equity - peak) / peak)
+            drawdowns.append(abs(max_dd))
+
+        arr = np.array(drawdowns, dtype=float)
+        return {
+            "iterations": iterations,
+            "drawdown_p50": round(float(np.percentile(arr, 50)), 6),
+            "drawdown_p90": round(float(np.percentile(arr, 90)), 6),
+            "drawdown_p99": round(float(np.percentile(arr, 99)), 6),
+        }
+
+    def _write_html_report(self, report: dict, output_path: Path) -> None:
+        equity_curve = report.get("equity_curve", [])
+        values = [float(point.get("equity", 0.0) or 0.0) for point in equity_curve]
+        if not values:
+            html = "<html><body><h1>Backtest</h1><p>No equity data.</p></body></html>"
+            output_path.write_text(html, encoding="utf-8")
+            return
+
+        width = 900
+        height = 320
+        pad = 24
+        min_value = min(values)
+        max_value = max(values)
+        span = max(1e-9, max_value - min_value)
+        points = []
+        for idx, value in enumerate(values):
+            x = pad + (idx / max(1, len(values) - 1)) * (width - (pad * 2))
+            y = height - pad - ((value - min_value) / span) * (height - (pad * 2))
+            points.append(f"{x:.2f},{y:.2f}")
+        polyline = " ".join(points)
+
+        html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Backtest Report</title>
+  <style>
+    body {{ font-family: Helvetica, Arial, sans-serif; margin: 16px; color: #19222b; }}
+    .grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 12px; }}
+    .card {{ border:1px solid #dde6ec; border-radius:8px; padding:10px; }}
+    svg {{ width:100%; height:auto; border:1px solid #e3eaef; border-radius:6px; }}
+    table {{ border-collapse: collapse; width:100%; }}
+    td, th {{ border-bottom:1px solid #eef3f7; padding:6px; text-align:left; }}
+  </style>
+</head>
+<body>
+  <h1>Backtest Report</h1>
+  <div class="grid">
+    <div class="card">
+      <h3>Equity Curve</h3>
+      <svg viewBox="0 0 {width} {height}" preserveAspectRatio="none">
+        <polyline points="{polyline}" fill="none" stroke="#0b6e8c" stroke-width="2"/>
+      </svg>
+    </div>
+    <div class="card">
+      <h3>Summary</h3>
+      <table>
+        <tr><th>Total Return</th><td>{report.get("total_return", 0):.2%}</td></tr>
+        <tr><th>Sharpe</th><td>{report.get("sharpe_ratio", 0):.3f}</td></tr>
+        <tr><th>Sortino</th><td>{report.get("sortino_ratio", 0):.3f}</td></tr>
+        <tr><th>Calmar</th><td>{report.get("calmar_ratio", 0):.3f}</td></tr>
+        <tr><th>Max DD</th><td>{report.get("max_drawdown", 0):.2%}</td></tr>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+        output_path.write_text(html, encoding="utf-8")
 
 
 def _chain_from_snapshot(frame: pd.DataFrame) -> dict:
@@ -402,6 +571,43 @@ def _estimate_position_value(position: dict, chain_data: dict) -> Optional[float
         return max(short_mid, 0.0)
 
     return None
+
+
+def _strategy_performance(closed_trades: list[dict]) -> dict:
+    grouped: dict[str, list[float]] = {}
+    for trade in closed_trades:
+        if not isinstance(trade, dict):
+            continue
+        strategy = str(trade.get("strategy", "unknown"))
+        grouped.setdefault(strategy, []).append(float(trade.get("pnl", 0.0) or 0.0))
+    out = {}
+    for strategy, pnls in grouped.items():
+        wins = [value for value in pnls if value > 0]
+        out[strategy] = {
+            "trades": len(pnls),
+            "win_rate": round(len(wins) / max(1, len(pnls)), 4),
+            "total_pnl": round(sum(pnls), 2),
+            "avg_pnl": round(float(np.mean(pnls)) if pnls else 0.0, 2),
+        }
+    return out
+
+
+def _regime_performance(closed_trades: list[dict]) -> dict:
+    grouped: dict[str, list[float]] = {}
+    for trade in closed_trades:
+        if not isinstance(trade, dict):
+            continue
+        regime = str(trade.get("regime", "unknown"))
+        grouped.setdefault(regime, []).append(float(trade.get("pnl", 0.0) or 0.0))
+    out = {}
+    for regime, pnls in grouped.items():
+        wins = [value for value in pnls if value > 0]
+        out[regime] = {
+            "trades": len(pnls),
+            "win_rate": round(len(wins) / max(1, len(pnls)), 4),
+            "total_pnl": round(sum(pnls), 2),
+        }
+    return out
 
 
 def _business_days(start_date: date, end_date: date) -> list[date]:

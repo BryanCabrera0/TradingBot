@@ -6,6 +6,7 @@ from typing import Optional
 from bot.analysis import SpreadAnalysis, find_option_by_delta
 from bot.dividend_calendar import DividendCalendar
 from bot.iv_history import IVHistory
+from bot.number_utils import safe_int
 from bot.strategies.base import BaseStrategy, TradeSignal
 from bot.technicals import TechnicalContext
 
@@ -123,6 +124,10 @@ class CoveredCallStrategy(BaseStrategy):
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
         """Check open covered calls for adaptive profit targets and partial exits."""
         signals = []
+        adaptive_targets = bool(self.config.get("adaptive_targets", True))
+        trailing_enabled = bool(self.config.get("trailing_stop_enabled", False))
+        trail_activation = float(self.config.get("trailing_stop_activation_pct", 0.25))
+        trail_floor = float(self.config.get("trailing_stop_floor_pct", 0.10))
 
         for pos in positions:
             if str(pos.get("status", "open")).lower() != "open":
@@ -133,7 +138,7 @@ class CoveredCallStrategy(BaseStrategy):
             entry_credit = float(pos.get("entry_credit", 0) or 0)
             current_value = float(pos.get("current_value", 0) or 0)
             quantity = max(1, int(pos.get("quantity", 1)))
-            dte_remaining = int(pos.get("dte_remaining", 999) or 999)
+            dte_remaining = safe_int(pos.get("dte_remaining"), 999)
             pnl = entry_credit - current_value
             pnl_pct = (pnl / entry_credit) if entry_credit > 0 else 0.0
 
@@ -150,13 +155,32 @@ class CoveredCallStrategy(BaseStrategy):
                 )
                 continue
 
-            target_pct = self._profit_target_for_dte(dte_remaining)
+            details = pos.get("details", {}) or {}
+            max_seen = float(details.get("max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)) or pnl_pct)
+            max_seen = max(max_seen, pnl_pct)
+            details["max_profit_pct_seen"] = max_seen
+            pos["max_profit_pct_seen"] = max_seen
+
+            target_pct = (
+                self._profit_target_for_dte(dte_remaining)
+                if adaptive_targets
+                else float(self.config.get("profit_target_pct", 0.50))
+            )
             if pos.get("partial_closed", False):
                 target_pct = max(target_pct, 0.65)
 
             exit_reason = ""
-            if entry_credit > 0 and pnl_pct >= target_pct:
-                exit_reason = f"Profit target reached ({pnl_pct:.1%})"
+            if entry_credit > 0:
+                if trailing_enabled and max_seen >= trail_activation and pnl_pct > 0:
+                    trail_lock = self._trailing_lock_pct(
+                        max_seen=max_seen,
+                        activation=trail_activation,
+                        floor=trail_floor,
+                    )
+                    if pnl_pct <= trail_lock:
+                        exit_reason = f"Trailing stop hit ({pnl_pct:.1%} <= {trail_lock:.1%})"
+                if not exit_reason and pnl_pct >= target_pct:
+                    exit_reason = f"Profit target reached ({pnl_pct:.1%})"
             elif dte_remaining <= 3:
                 exit_reason = f"Approaching expiration ({dte_remaining} DTE)"
 
@@ -176,11 +200,20 @@ class CoveredCallStrategy(BaseStrategy):
 
     @staticmethod
     def _profit_target_for_dte(dte_remaining: int) -> float:
-        if dte_remaining <= 14:
-            return 0.25
+        if dte_remaining < 10:
+            return 0.20
+        if dte_remaining <= 20:
+            return 0.30
         if dte_remaining <= 30:
-            return 0.50
-        return 0.65
+            return 0.40
+        return 0.50
+
+    @staticmethod
+    def _trailing_lock_pct(*, max_seen: float, activation: float, floor: float) -> float:
+        gain_above_activation = max(0.0, max_seen - activation)
+        lock = floor + (gain_above_activation * 0.50)
+        lock = min(max_seen - 0.01, lock)
+        return max(floor, min(max_seen, lock))
 
     @staticmethod
     def _score_covered_call(

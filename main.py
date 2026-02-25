@@ -8,6 +8,11 @@ automatically trades options strategies including:
   - Bull put spreads / Bear call spreads (credit spreads)
   - Iron condors
   - Covered calls
+  - Naked puts (cash-secured)
+  - Calendar spreads
+  - Short strangles / index straddles
+  - Broken-wing butterflies
+  - Earnings volatility-crush plays
 
 Usage:
     # Paper trading (default — no real money)

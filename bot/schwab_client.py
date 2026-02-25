@@ -45,6 +45,9 @@ class SchwabClient:
         self._client = None
         self._account_hash = config.account_hash
         self._configured_accounts = list(config.accounts or [])
+        self._stream_client = None
+        self._stream_connected = False
+        self._stream_last_error: str = ""
 
     def connect(self) -> None:
         """Authenticate and create the API client."""
@@ -87,6 +90,108 @@ class SchwabClient:
         if self._client is None:
             raise RuntimeError("Client not connected. Call connect() first.")
         return self._client
+
+    def start_streaming(self) -> bool:
+        """Best-effort start of Schwab streaming; returns False on unsupported setups."""
+        if self._stream_connected:
+            return True
+        try:
+            from schwab.streaming import StreamClient  # type: ignore
+        except Exception as exc:  # pragma: no cover - depends on schwab-py extras
+            self._stream_last_error = f"Streaming import unavailable: {exc}"
+            logger.warning(self._stream_last_error)
+            self._stream_connected = False
+            return False
+
+        try:  # pragma: no cover - runtime integration
+            account_hash = self._require_account_hash()
+            stream_client = StreamClient(self.client, account_id=account_hash)
+            stream_client.login()
+            self._stream_client = stream_client
+            self._stream_connected = True
+            self._stream_last_error = ""
+            logger.info("Schwab streaming connected.")
+            return True
+        except Exception as exc:
+            self._stream_last_error = str(exc)
+            self._stream_connected = False
+            self._stream_client = None
+            logger.warning("Schwab streaming unavailable, using polling fallback: %s", exc)
+            return False
+
+    def stop_streaming(self) -> None:
+        if not self._stream_client:
+            self._stream_connected = False
+            return
+        try:  # pragma: no cover - runtime integration
+            logout = getattr(self._stream_client, "logout", None)
+            if callable(logout):
+                logout()
+        except Exception:
+            pass
+        self._stream_connected = False
+        self._stream_client = None
+
+    def streaming_connected(self) -> bool:
+        return bool(self._stream_connected)
+
+    def stream_quotes(self, symbols: list[str], handler) -> bool:
+        """Subscribe to equity quote stream when streaming is available."""
+        if not symbols:
+            return False
+        if not self._stream_connected and not self.start_streaming():
+            return False
+        try:  # pragma: no cover - runtime integration
+            add_handler = getattr(self._stream_client, "add_level_one_equity_handler", None)
+            subscribe = getattr(self._stream_client, "level_one_equity_subs", None)
+            if callable(add_handler):
+                add_handler(handler)
+            if callable(subscribe):
+                subscribe([symbol.upper() for symbol in symbols])
+            return True
+        except Exception as exc:
+            self._stream_last_error = str(exc)
+            self._stream_connected = False
+            logger.warning("Quote streaming subscription failed: %s", exc)
+            return False
+
+    def stream_option_level_one(self, option_symbols: list[str], handler) -> bool:
+        """Subscribe to options level-1 stream when available."""
+        if not option_symbols:
+            return False
+        if not self._stream_connected and not self.start_streaming():
+            return False
+        try:  # pragma: no cover - runtime integration
+            add_handler = getattr(self._stream_client, "add_level_one_option_handler", None)
+            subscribe = getattr(self._stream_client, "level_one_option_subs", None)
+            if callable(add_handler):
+                add_handler(handler)
+            if callable(subscribe):
+                subscribe(option_symbols)
+            return True
+        except Exception as exc:
+            self._stream_last_error = str(exc)
+            self._stream_connected = False
+            logger.warning("Option streaming subscription failed: %s", exc)
+            return False
+
+    def stream_account_activity(self, handler) -> bool:
+        """Subscribe to account activity stream when available."""
+        if not self._stream_connected and not self.start_streaming():
+            return False
+        try:  # pragma: no cover - runtime integration
+            add_handler = getattr(self._stream_client, "add_account_activity_handler", None)
+            subscribe = getattr(self._stream_client, "account_activity_sub", None)
+            if callable(add_handler):
+                add_handler(handler)
+            if callable(subscribe):
+                subscribe()
+            return True
+        except Exception as exc:
+            self._stream_last_error = str(exc)
+            self._stream_connected = False
+            logger.warning("Account activity streaming subscription failed: %s", exc)
+            return False
 
     def _retry_api_call(
         self,

@@ -104,8 +104,8 @@ class StrategyExitTests(unittest.TestCase):
                 "strategy": "bull_put_spread",
                 "symbol": "SPY",
                 "entry_credit": 1.0,
-                "current_value": 0.75,
-                "dte_remaining": 10,
+                "current_value": 0.79,
+                "dte_remaining": 9,
                 "status": "open",
                 "details": {"short_strike": 95.0},
             }
@@ -133,7 +133,8 @@ class StrategyExitTests(unittest.TestCase):
 
         signals = strategy.check_exits(positions, market_client=None)
 
-        self.assertEqual(signals, [])
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].action, "close")
 
     def test_partial_close_at_40pct(self) -> None:
         strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})

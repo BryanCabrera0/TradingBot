@@ -135,6 +135,11 @@ class RiskConfig:
     max_sector_risk_pct: float = 40.0
     correlation_lookback_days: int = 60
     correlation_threshold: float = 0.8
+    max_portfolio_correlation: float = 0.85
+    var_enabled: bool = False
+    var_lookback_days: int = 60
+    var_limit_pct_95: float = 3.0
+    var_limit_pct_99: float = 5.0
 
 
 @dataclass
@@ -165,7 +170,7 @@ class LLMConfig:
     enabled: bool = False
     # "ollama" for local models, "openai" for cloud models
     provider: str = "openai"
-    model: str = "gpt-4.1"
+    model: str = "gpt-5.2-pro"
     base_url: str = "http://127.0.0.1:11434"
     mode: str = "advisory"  # "advisory" or "blocking"
     risk_style: str = "moderate"  # "conservative" | "moderate" | "aggressive"
@@ -173,6 +178,16 @@ class LLMConfig:
     temperature: float = 0.1
     min_confidence: float = 0.55
     track_record_file: str = "bot/data/llm_track_record.json"
+    reasoning_effort: str = "high"
+    text_verbosity: str = "low"
+    max_output_tokens: int = 900
+    chat_fallback_model: str = "gpt-4.1"
+    ensemble_enabled: bool = False
+    ensemble_models: list = field(default_factory=lambda: ["openai:gpt-5.2-pro"])
+    ensemble_agreement_threshold: float = 0.66
+    journal_enabled: bool = False
+    journal_file: str = "bot/data/trade_journal.json"
+    journal_context_entries: int = 20
 
 
 @dataclass
@@ -188,6 +203,11 @@ class NewsConfig:
     finnhub_api_key: str = ""
     llm_sentiment_enabled: bool = True
     llm_sentiment_cache_seconds: int = 1800
+    llm_model: str = "gpt-5.2-pro"
+    llm_reasoning_effort: str = "medium"
+    llm_text_verbosity: str = "low"
+    llm_max_output_tokens: int = 400
+    llm_chat_fallback_model: str = "gpt-4.1"
     market_queries: list = field(
         default_factory=lambda: [
             "stock market",
@@ -206,6 +226,150 @@ class AlertsConfig:
     min_level: str = "ERROR"
     timeout_seconds: int = 5
     require_in_live: bool = True
+    trade_notifications: bool = False
+    daily_summary: bool = False
+    regime_changes: bool = False
+    weekly_summary: bool = False
+    drawdown_thresholds: list = field(default_factory=lambda: [1.0, 2.0, 3.0])
+    webhook_format: str = "generic"  # generic | slack | discord
+
+
+@dataclass
+class RegimeConfig:
+    enabled: bool = False
+    min_confidence: float = 0.55
+    uncertain_size_scalar: float = 0.80
+
+
+@dataclass
+class VolSurfaceConfig:
+    enabled: bool = False
+    require_positive_vol_risk_premium: bool = True
+    max_vol_of_vol_for_condors: float = 0.20
+
+
+@dataclass
+class EconCalendarConfig:
+    enabled: bool = False
+    refresh_days: int = 1
+    cache_file: str = "bot/data/econ_calendar.json"
+    high_severity_policy: str = "reduce_size"  # skip | reduce_size | widen | none
+    medium_severity_policy: str = "widen"
+    low_severity_policy: str = "none"
+
+
+@dataclass
+class FlowConfig:
+    enabled: bool = False
+    unusual_volume_multiple: float = 5.0
+    include_in_llm_context: bool = True
+
+
+@dataclass
+class RollingConfig:
+    enabled: bool = False
+    min_dte_trigger: int = 7
+    min_credit_for_roll: float = 0.15
+    max_rolls_per_position: int = 2
+    allow_defensive_rolls: bool = True
+
+
+@dataclass
+class ExitsConfig:
+    adaptive_targets: bool = True
+    trailing_stop_enabled: bool = False
+    trailing_stop_activation_pct: float = 0.25
+    trailing_stop_floor_pct: float = 0.10
+
+
+@dataclass
+class AdjustmentsConfig:
+    enabled: bool = False
+    delta_test_threshold: float = 0.50
+    min_dte_remaining: int = 7
+    max_adjustments_per_position: int = 2
+
+
+@dataclass
+class SizingConfig:
+    method: str = "fixed"  # fixed | kelly
+    kelly_fraction: float = 0.5
+    kelly_min_trades: int = 30
+    drawdown_decay_threshold: float = 0.05
+
+
+@dataclass
+class HedgingConfig:
+    enabled: bool = False
+    delta_hedge_trigger: float = 50.0
+    tail_risk_enabled: bool = False
+    max_hedge_cost_pct: float = 1.0
+    auto_execute: bool = False
+
+
+@dataclass
+class LLMStrategistConfig:
+    enabled: bool = False
+    provider: str = "openai"
+    model: str = "gpt-5.2-pro"
+    timeout_seconds: int = 20
+    max_directives: int = 3
+
+
+@dataclass
+class CircuitBreakerConfig:
+    strategy_loss_streak_limit: int = 5
+    strategy_cooldown_hours: int = 24
+    symbol_loss_streak_limit: int = 2
+    symbol_blacklist_days: int = 7
+    portfolio_drawdown_halt_pct: float = 5.0
+    portfolio_halt_hours: int = 48
+    api_error_rate_threshold: float = 0.30
+    api_window_minutes: int = 10
+    llm_timeout_streak: int = 3
+
+
+@dataclass
+class DegradationConfig:
+    enabled: bool = True
+    fallback_watchlist_on_scanner_failure: bool = True
+    fallback_polling_on_stream_failure: bool = True
+    continue_on_strategy_errors: bool = True
+    rule_only_on_llm_failures: bool = True
+
+
+@dataclass
+class StranglesConfig:
+    enabled: bool = False
+    min_iv_rank: float = 70.0
+    short_delta: float = 0.16
+    min_account_balance: float = 25000.0
+    allow_straddles_on: list = field(default_factory=lambda: ["SPY", "QQQ", "IWM"])
+    min_dte: int = 20
+    max_dte: int = 45
+    profit_target_pct: float = 0.50
+    stop_loss_multiple: float = 2.0
+
+
+@dataclass
+class BrokenWingButterflyConfig:
+    enabled: bool = False
+    min_dte: int = 20
+    max_dte: int = 45
+    short_delta: float = 0.30
+    near_wing_width: float = 5.0
+    far_wing_width: float = 10.0
+    min_credit: float = 0.10
+
+
+@dataclass
+class EarningsVolCrushConfig:
+    enabled: bool = False
+    min_dte: int = 1
+    max_dte: int = 3
+    max_position_risk_pct: float = 0.5
+    min_iv_rank: float = 75.0
+    wing_width: float = 10.0
 
 
 def _default_risk_profiles() -> dict[str, RiskConfig]:
@@ -241,11 +405,26 @@ class BotConfig:
     covered_calls: CoveredCallConfig = field(default_factory=CoveredCallConfig)
     naked_puts: NakedPutConfig = field(default_factory=NakedPutConfig)
     calendar_spreads: CalendarSpreadConfig = field(default_factory=CalendarSpreadConfig)
+    strangles: StranglesConfig = field(default_factory=StranglesConfig)
+    broken_wing_butterfly: BrokenWingButterflyConfig = field(default_factory=BrokenWingButterflyConfig)
+    earnings_vol_crush: EarningsVolCrushConfig = field(default_factory=EarningsVolCrushConfig)
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
     watchlist: list = field(
         default_factory=lambda: ["SPY", "QQQ", "IWM", "AAPL", "MSFT"]
     )
     risk: RiskConfig = field(default_factory=RiskConfig)
+    sizing: SizingConfig = field(default_factory=SizingConfig)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
+    vol_surface: VolSurfaceConfig = field(default_factory=VolSurfaceConfig)
+    econ_calendar: EconCalendarConfig = field(default_factory=EconCalendarConfig)
+    options_flow: FlowConfig = field(default_factory=FlowConfig)
+    rolling: RollingConfig = field(default_factory=RollingConfig)
+    exits: ExitsConfig = field(default_factory=ExitsConfig)
+    adjustments: AdjustmentsConfig = field(default_factory=AdjustmentsConfig)
+    hedging: HedgingConfig = field(default_factory=HedgingConfig)
+    llm_strategist: LLMStrategistConfig = field(default_factory=LLMStrategistConfig)
+    circuit_breakers: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
+    degradation: DegradationConfig = field(default_factory=DegradationConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -309,6 +488,50 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "LLM_TRACK_RECORD_FILE",
         cfg.llm.track_record_file,
     )
+    cfg.llm.reasoning_effort = os.getenv(
+        "LLM_REASONING_EFFORT",
+        cfg.llm.reasoning_effort,
+    )
+    cfg.llm.text_verbosity = os.getenv(
+        "LLM_TEXT_VERBOSITY",
+        cfg.llm.text_verbosity,
+    )
+    cfg.llm.max_output_tokens = _env_int(
+        "LLM_MAX_OUTPUT_TOKENS",
+        cfg.llm.max_output_tokens,
+        minimum=64,
+    )
+    cfg.llm.chat_fallback_model = os.getenv(
+        "LLM_CHAT_FALLBACK_MODEL",
+        cfg.llm.chat_fallback_model,
+    )
+    cfg.llm.ensemble_enabled = _env_bool(
+        "LLM_ENSEMBLE_ENABLED",
+        cfg.llm.ensemble_enabled,
+    )
+    env_ensemble_models = os.getenv("LLM_ENSEMBLE_MODELS")
+    if env_ensemble_models:
+        cfg.llm.ensemble_models = [
+            item.strip()
+            for item in env_ensemble_models.split(",")
+            if item.strip()
+        ]
+    cfg.llm.ensemble_agreement_threshold = _env_float(
+        "LLM_ENSEMBLE_AGREEMENT_THRESHOLD",
+        cfg.llm.ensemble_agreement_threshold,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    cfg.llm.journal_enabled = _env_bool(
+        "LLM_JOURNAL_ENABLED",
+        cfg.llm.journal_enabled,
+    )
+    cfg.llm.journal_file = os.getenv("LLM_JOURNAL_FILE", cfg.llm.journal_file)
+    cfg.llm.journal_context_entries = _env_int(
+        "LLM_JOURNAL_CONTEXT_ENTRIES",
+        cfg.llm.journal_context_entries,
+        minimum=1,
+    )
     cfg.news.enabled = _env_bool("NEWS_ENABLED", cfg.news.enabled)
     cfg.news.cache_seconds = _env_int(
         "NEWS_CACHE_SECONDS", cfg.news.cache_seconds, minimum=0
@@ -341,6 +564,27 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         cfg.news.llm_sentiment_cache_seconds,
         minimum=0,
     )
+    cfg.news.llm_model = os.getenv(
+        "NEWS_LLM_MODEL",
+        cfg.news.llm_model,
+    )
+    cfg.news.llm_reasoning_effort = os.getenv(
+        "NEWS_LLM_REASONING_EFFORT",
+        cfg.news.llm_reasoning_effort,
+    )
+    cfg.news.llm_text_verbosity = os.getenv(
+        "NEWS_LLM_TEXT_VERBOSITY",
+        cfg.news.llm_text_verbosity,
+    )
+    cfg.news.llm_max_output_tokens = _env_int(
+        "NEWS_LLM_MAX_OUTPUT_TOKENS",
+        cfg.news.llm_max_output_tokens,
+        minimum=64,
+    )
+    cfg.news.llm_chat_fallback_model = os.getenv(
+        "NEWS_LLM_CHAT_FALLBACK_MODEL",
+        cfg.news.llm_chat_fallback_model,
+    )
     cfg.execution.cancel_stale_orders = _env_bool(
         "EXECUTION_CANCEL_STALE_ORDERS", cfg.execution.cancel_stale_orders
     )
@@ -359,6 +603,22 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     )
     cfg.alerts.require_in_live = _env_bool(
         "ALERTS_REQUIRE_IN_LIVE", cfg.alerts.require_in_live
+    )
+    cfg.alerts.trade_notifications = _env_bool(
+        "ALERTS_TRADE_NOTIFICATIONS",
+        cfg.alerts.trade_notifications,
+    )
+    cfg.alerts.daily_summary = _env_bool(
+        "ALERTS_DAILY_SUMMARY",
+        cfg.alerts.daily_summary,
+    )
+    cfg.alerts.regime_changes = _env_bool(
+        "ALERTS_REGIME_CHANGES",
+        cfg.alerts.regime_changes,
+    )
+    cfg.alerts.weekly_summary = _env_bool(
+        "ALERTS_WEEKLY_SUMMARY",
+        cfg.alerts.weekly_summary,
     )
     cfg.log_max_bytes = _env_int("LOG_MAX_BYTES", cfg.log_max_bytes, minimum=1024)
     cfg.log_backup_count = _env_int(
@@ -429,6 +689,24 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
             if hasattr(cfg.calendar_spreads, key):
                 setattr(cfg.calendar_spreads, key, val)
 
+    strangles = strats.get("strangles", {})
+    if strangles:
+        for key, val in strangles.items():
+            if hasattr(cfg.strangles, key):
+                setattr(cfg.strangles, key, val)
+
+    bwb = strats.get("broken_wing_butterfly", {})
+    if bwb:
+        for key, val in bwb.items():
+            if hasattr(cfg.broken_wing_butterfly, key):
+                setattr(cfg.broken_wing_butterfly, key, val)
+
+    crush = strats.get("earnings_vol_crush", {})
+    if crush:
+        for key, val in crush.items():
+            if hasattr(cfg.earnings_vol_crush, key):
+                setattr(cfg.earnings_vol_crush, key, val)
+
     scanner = raw.get("scanner", {})
     if scanner:
         for key, val in scanner.items():
@@ -440,6 +718,78 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in risk.items():
             if hasattr(cfg.risk, key):
                 setattr(cfg.risk, key, val)
+
+    sizing = raw.get("sizing", {})
+    if sizing:
+        for key, val in sizing.items():
+            if hasattr(cfg.sizing, key):
+                setattr(cfg.sizing, key, val)
+
+    regime = raw.get("regime", {})
+    if regime:
+        for key, val in regime.items():
+            if hasattr(cfg.regime, key):
+                setattr(cfg.regime, key, val)
+
+    vol_surface = raw.get("vol_surface", {})
+    if vol_surface:
+        for key, val in vol_surface.items():
+            if hasattr(cfg.vol_surface, key):
+                setattr(cfg.vol_surface, key, val)
+
+    econ = raw.get("econ_calendar", {})
+    if econ:
+        for key, val in econ.items():
+            if hasattr(cfg.econ_calendar, key):
+                setattr(cfg.econ_calendar, key, val)
+
+    flow = raw.get("options_flow", {})
+    if flow:
+        for key, val in flow.items():
+            if hasattr(cfg.options_flow, key):
+                setattr(cfg.options_flow, key, val)
+
+    rolling = raw.get("rolling", {})
+    if rolling:
+        for key, val in rolling.items():
+            if hasattr(cfg.rolling, key):
+                setattr(cfg.rolling, key, val)
+
+    exits = raw.get("exits", {})
+    if exits:
+        for key, val in exits.items():
+            if hasattr(cfg.exits, key):
+                setattr(cfg.exits, key, val)
+
+    adjustments = raw.get("adjustments", {})
+    if adjustments:
+        for key, val in adjustments.items():
+            if hasattr(cfg.adjustments, key):
+                setattr(cfg.adjustments, key, val)
+
+    hedging = raw.get("hedging", {})
+    if hedging:
+        for key, val in hedging.items():
+            if hasattr(cfg.hedging, key):
+                setattr(cfg.hedging, key, val)
+
+    strategist = raw.get("llm_strategist", {})
+    if strategist:
+        for key, val in strategist.items():
+            if hasattr(cfg.llm_strategist, key):
+                setattr(cfg.llm_strategist, key, val)
+
+    breakers = raw.get("circuit_breakers", {})
+    if breakers:
+        for key, val in breakers.items():
+            if hasattr(cfg.circuit_breakers, key):
+                setattr(cfg.circuit_breakers, key, val)
+
+    degradation = raw.get("degradation", {})
+    if degradation:
+        for key, val in degradation.items():
+            if hasattr(cfg.degradation, key):
+                setattr(cfg.degradation, key, val)
 
     sched = raw.get("schedule", {})
     if sched:
@@ -586,6 +936,18 @@ def _normalize_config(cfg: BotConfig) -> None:
         default="moderate",
         field_name="llm.risk_style",
     )
+    cfg.llm.reasoning_effort = _normalize_choice(
+        cfg.llm.reasoning_effort,
+        allowed={"none", "low", "medium", "high", "xhigh"},
+        default="high",
+        field_name="llm.reasoning_effort",
+    )
+    cfg.llm.text_verbosity = _normalize_choice(
+        cfg.llm.text_verbosity,
+        allowed={"low", "medium", "high"},
+        default="low",
+        field_name="llm.text_verbosity",
+    )
 
     cfg.log_level = _normalize_choice(
         cfg.log_level,
@@ -617,7 +979,22 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.llm.timeout_seconds = max(1, int(cfg.llm.timeout_seconds))
     cfg.llm.temperature = max(0.0, min(2.0, float(cfg.llm.temperature)))
     cfg.llm.min_confidence = max(0.0, min(1.0, float(cfg.llm.min_confidence)))
+    cfg.llm.max_output_tokens = max(64, int(cfg.llm.max_output_tokens))
     cfg.llm.track_record_file = str(cfg.llm.track_record_file or "bot/data/llm_track_record.json")
+    llm_chat_fallback = str(cfg.llm.chat_fallback_model or "").strip()
+    cfg.llm.chat_fallback_model = llm_chat_fallback or "gpt-4.1"
+    cfg.llm.ensemble_enabled = bool(cfg.llm.ensemble_enabled)
+    cfg.llm.ensemble_agreement_threshold = max(
+        0.0,
+        min(1.0, float(cfg.llm.ensemble_agreement_threshold)),
+    )
+    cfg.llm.ensemble_models = _normalize_string_list(
+        cfg.llm.ensemble_models,
+        default=["openai:gpt-5.2-pro"],
+    )
+    cfg.llm.journal_enabled = bool(cfg.llm.journal_enabled)
+    cfg.llm.journal_file = str(cfg.llm.journal_file or "bot/data/trade_journal.json")
+    cfg.llm.journal_context_entries = max(1, int(cfg.llm.journal_context_entries))
     if cfg.llm.provider == "anthropic":
         if not str(cfg.llm.model).strip() or str(cfg.llm.model).strip().lower().startswith("gpt-"):
             cfg.llm.model = "claude-sonnet-4-20250514"
@@ -639,6 +1016,22 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.news.llm_sentiment_enabled = bool(cfg.news.llm_sentiment_enabled)
     cfg.news.llm_sentiment_cache_seconds = max(0, int(cfg.news.llm_sentiment_cache_seconds))
+    cfg.news.llm_model = str(cfg.news.llm_model or "gpt-5.2-pro").strip()
+    cfg.news.llm_reasoning_effort = _normalize_choice(
+        cfg.news.llm_reasoning_effort,
+        allowed={"none", "low", "medium", "high", "xhigh"},
+        default="medium",
+        field_name="news.llm_reasoning_effort",
+    )
+    cfg.news.llm_text_verbosity = _normalize_choice(
+        cfg.news.llm_text_verbosity,
+        allowed={"low", "medium", "high"},
+        default="low",
+        field_name="news.llm_text_verbosity",
+    )
+    cfg.news.llm_max_output_tokens = max(64, int(cfg.news.llm_max_output_tokens))
+    news_chat_fallback = str(cfg.news.llm_chat_fallback_model or "").strip()
+    cfg.news.llm_chat_fallback_model = news_chat_fallback or "gpt-4.1"
     cfg.news.market_queries = _normalize_string_list(
         cfg.news.market_queries,
         default=[
@@ -658,6 +1051,20 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.alerts.timeout_seconds = max(1, int(cfg.alerts.timeout_seconds))
     cfg.alerts.require_in_live = bool(cfg.alerts.require_in_live)
+    cfg.alerts.trade_notifications = bool(cfg.alerts.trade_notifications)
+    cfg.alerts.daily_summary = bool(cfg.alerts.daily_summary)
+    cfg.alerts.regime_changes = bool(cfg.alerts.regime_changes)
+    cfg.alerts.weekly_summary = bool(cfg.alerts.weekly_summary)
+    cfg.alerts.webhook_format = _normalize_choice(
+        cfg.alerts.webhook_format,
+        allowed={"generic", "slack", "discord"},
+        default="generic",
+        field_name="alerts.webhook_format",
+    )
+    cfg.alerts.drawdown_thresholds = _normalize_positive_float_list(
+        cfg.alerts.drawdown_thresholds,
+        default=[1.0, 2.0, 3.0],
+    )
     cfg.log_max_bytes = max(1024, int(cfg.log_max_bytes))
     cfg.log_backup_count = max(1, int(cfg.log_backup_count))
     cfg.execution.entry_step_timeout_seconds = max(10, int(cfg.execution.entry_step_timeout_seconds))
@@ -674,6 +1081,84 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.risk = _normalize_risk_config(cfg.risk)
     cfg.risk_profiles = _normalize_risk_profiles(cfg.risk_profiles)
     cfg.schwab.accounts = _normalize_accounts(cfg.schwab.accounts)
+    cfg.sizing.method = _normalize_choice(
+        cfg.sizing.method,
+        allowed={"fixed", "kelly"},
+        default="fixed",
+        field_name="sizing.method",
+    )
+    cfg.sizing.kelly_fraction = max(0.0, min(1.0, float(cfg.sizing.kelly_fraction)))
+    cfg.sizing.kelly_min_trades = max(1, int(cfg.sizing.kelly_min_trades))
+    cfg.sizing.drawdown_decay_threshold = max(0.0, min(1.0, float(cfg.sizing.drawdown_decay_threshold)))
+    cfg.regime.min_confidence = max(0.0, min(1.0, float(cfg.regime.min_confidence)))
+    cfg.regime.uncertain_size_scalar = max(0.1, min(2.0, float(cfg.regime.uncertain_size_scalar)))
+    cfg.vol_surface.max_vol_of_vol_for_condors = max(0.0, float(cfg.vol_surface.max_vol_of_vol_for_condors))
+    cfg.econ_calendar.refresh_days = max(1, int(cfg.econ_calendar.refresh_days))
+    cfg.econ_calendar.high_severity_policy = _normalize_choice(
+        cfg.econ_calendar.high_severity_policy,
+        allowed={"skip", "reduce_size", "widen", "none"},
+        default="reduce_size",
+        field_name="econ_calendar.high_severity_policy",
+    )
+    cfg.econ_calendar.medium_severity_policy = _normalize_choice(
+        cfg.econ_calendar.medium_severity_policy,
+        allowed={"skip", "reduce_size", "widen", "none"},
+        default="widen",
+        field_name="econ_calendar.medium_severity_policy",
+    )
+    cfg.econ_calendar.low_severity_policy = _normalize_choice(
+        cfg.econ_calendar.low_severity_policy,
+        allowed={"skip", "reduce_size", "widen", "none"},
+        default="none",
+        field_name="econ_calendar.low_severity_policy",
+    )
+    cfg.options_flow.unusual_volume_multiple = max(1.0, float(cfg.options_flow.unusual_volume_multiple))
+    cfg.rolling.min_dte_trigger = max(1, int(cfg.rolling.min_dte_trigger))
+    cfg.rolling.min_credit_for_roll = max(0.0, float(cfg.rolling.min_credit_for_roll))
+    cfg.rolling.max_rolls_per_position = max(0, int(cfg.rolling.max_rolls_per_position))
+    cfg.exits.trailing_stop_activation_pct = max(0.0, min(1.0, float(cfg.exits.trailing_stop_activation_pct)))
+    cfg.exits.trailing_stop_floor_pct = max(0.0, min(1.0, float(cfg.exits.trailing_stop_floor_pct)))
+    cfg.adjustments.delta_test_threshold = max(0.0, min(1.0, float(cfg.adjustments.delta_test_threshold)))
+    cfg.adjustments.min_dte_remaining = max(0, int(cfg.adjustments.min_dte_remaining))
+    cfg.adjustments.max_adjustments_per_position = max(0, int(cfg.adjustments.max_adjustments_per_position))
+    cfg.hedging.delta_hedge_trigger = max(0.0, float(cfg.hedging.delta_hedge_trigger))
+    cfg.hedging.max_hedge_cost_pct = max(0.0, float(cfg.hedging.max_hedge_cost_pct))
+    cfg.llm_strategist.provider = _normalize_choice(
+        cfg.llm_strategist.provider,
+        allowed={"openai", "anthropic", "ollama"},
+        default="openai",
+        field_name="llm_strategist.provider",
+    )
+    cfg.llm_strategist.timeout_seconds = max(1, int(cfg.llm_strategist.timeout_seconds))
+    cfg.llm_strategist.max_directives = max(1, int(cfg.llm_strategist.max_directives))
+    cfg.circuit_breakers.strategy_loss_streak_limit = max(1, int(cfg.circuit_breakers.strategy_loss_streak_limit))
+    cfg.circuit_breakers.strategy_cooldown_hours = max(1, int(cfg.circuit_breakers.strategy_cooldown_hours))
+    cfg.circuit_breakers.symbol_loss_streak_limit = max(1, int(cfg.circuit_breakers.symbol_loss_streak_limit))
+    cfg.circuit_breakers.symbol_blacklist_days = max(1, int(cfg.circuit_breakers.symbol_blacklist_days))
+    cfg.circuit_breakers.portfolio_drawdown_halt_pct = max(0.0, float(cfg.circuit_breakers.portfolio_drawdown_halt_pct))
+    cfg.circuit_breakers.portfolio_halt_hours = max(1, int(cfg.circuit_breakers.portfolio_halt_hours))
+    cfg.circuit_breakers.api_error_rate_threshold = max(0.0, min(1.0, float(cfg.circuit_breakers.api_error_rate_threshold)))
+    cfg.circuit_breakers.api_window_minutes = max(1, int(cfg.circuit_breakers.api_window_minutes))
+    cfg.circuit_breakers.llm_timeout_streak = max(1, int(cfg.circuit_breakers.llm_timeout_streak))
+    cfg.strangles.allow_straddles_on = _normalize_symbol_list(
+        cfg.strangles.allow_straddles_on,
+        default=["SPY", "QQQ", "IWM"],
+    )
+    cfg.strangles.short_delta = max(0.01, min(0.49, float(cfg.strangles.short_delta)))
+    cfg.strangles.min_iv_rank = max(0.0, min(100.0, float(cfg.strangles.min_iv_rank)))
+    cfg.strangles.min_dte = max(1, int(cfg.strangles.min_dte))
+    cfg.strangles.max_dte = max(cfg.strangles.min_dte, int(cfg.strangles.max_dte))
+    cfg.broken_wing_butterfly.min_dte = max(1, int(cfg.broken_wing_butterfly.min_dte))
+    cfg.broken_wing_butterfly.max_dte = max(cfg.broken_wing_butterfly.min_dte, int(cfg.broken_wing_butterfly.max_dte))
+    cfg.broken_wing_butterfly.short_delta = max(0.01, min(0.49, float(cfg.broken_wing_butterfly.short_delta)))
+    cfg.broken_wing_butterfly.near_wing_width = max(0.5, float(cfg.broken_wing_butterfly.near_wing_width))
+    cfg.broken_wing_butterfly.far_wing_width = max(cfg.broken_wing_butterfly.near_wing_width, float(cfg.broken_wing_butterfly.far_wing_width))
+    cfg.broken_wing_butterfly.min_credit = max(0.0, float(cfg.broken_wing_butterfly.min_credit))
+    cfg.earnings_vol_crush.min_dte = max(0, int(cfg.earnings_vol_crush.min_dte))
+    cfg.earnings_vol_crush.max_dte = max(cfg.earnings_vol_crush.min_dte, int(cfg.earnings_vol_crush.max_dte))
+    cfg.earnings_vol_crush.max_position_risk_pct = max(0.0, float(cfg.earnings_vol_crush.max_position_risk_pct))
+    cfg.earnings_vol_crush.min_iv_rank = max(0.0, min(100.0, float(cfg.earnings_vol_crush.min_iv_rank)))
+    cfg.earnings_vol_crush.wing_width = max(0.5, float(cfg.earnings_vol_crush.wing_width))
 
 
 def _normalize_choice(
@@ -766,6 +1251,22 @@ def _normalize_float_list(value: object, default: list[float]) -> list[float]:
     return normalized or list(default)
 
 
+def _normalize_positive_float_list(value: object, default: list[float]) -> list[float]:
+    """Normalize a list of positive float values."""
+    if not isinstance(value, list):
+        return list(default)
+
+    normalized: list[float] = []
+    for raw in value:
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            normalized.append(parsed)
+    return normalized or list(default)
+
+
 def _normalize_accounts(value: object) -> list[SchwabAccountConfig]:
     """Normalize configured multi-account definitions."""
     if not isinstance(value, list):
@@ -825,6 +1326,11 @@ def _normalize_risk_config(risk_cfg: RiskConfig) -> RiskConfig:
     risk_cfg.max_sector_risk_pct = max(0.0, min(100.0, float(risk_cfg.max_sector_risk_pct)))
     risk_cfg.correlation_lookback_days = max(20, int(risk_cfg.correlation_lookback_days))
     risk_cfg.correlation_threshold = max(0.0, min(1.0, float(risk_cfg.correlation_threshold)))
+    risk_cfg.max_portfolio_correlation = max(0.0, min(1.0, float(risk_cfg.max_portfolio_correlation)))
+    risk_cfg.var_enabled = bool(risk_cfg.var_enabled)
+    risk_cfg.var_lookback_days = max(20, int(risk_cfg.var_lookback_days))
+    risk_cfg.var_limit_pct_95 = max(0.0, float(risk_cfg.var_limit_pct_95))
+    risk_cfg.var_limit_pct_99 = max(0.0, float(risk_cfg.var_limit_pct_99))
     return risk_cfg
 
 

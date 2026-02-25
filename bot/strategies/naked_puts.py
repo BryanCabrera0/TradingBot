@@ -7,6 +7,7 @@ from typing import Optional
 
 from bot.analysis import SpreadAnalysis, find_option_by_delta
 from bot.iv_history import IVHistory
+from bot.number_utils import safe_int
 from bot.strategies.base import BaseStrategy, TradeSignal
 from bot.technicals import TechnicalContext
 
@@ -119,7 +120,7 @@ class NakedPutStrategy(BaseStrategy):
 
             entry_credit = float(position.get("entry_credit", 0.0) or 0.0)
             current_value = float(position.get("current_value", 0.0) or 0.0)
-            dte_remaining = int(position.get("dte_remaining", 999) or 999)
+            dte_remaining = safe_int(position.get("dte_remaining"), 999)
             quantity = max(1, int(position.get("quantity", 1)))
 
             pnl_pct = ((entry_credit - current_value) / entry_credit) if entry_credit > 0 else 0.0

@@ -1,26 +1,77 @@
-# Trading Bot
+# TradingBot
 
-Automated options trading bot for Charles Schwab / ThinkorSwim with:
-- rule-based strategy scanning,
-- portfolio risk controls,
-- LLM trade review using OpenAI GPT (`gpt-4.1`),
-- symbol + macro news intelligence for trade context.
+Production-grade automated options trading bot for Charles Schwab (`schwab-py`) with paper + live execution, multi-strategy scanning, portfolio risk controls, LLM-assisted decisioning, and analytics/backtesting.
 
-## Strategies
+## Core Capabilities
 
-- Credit spreads (bull put / bear call)
-- Iron condors
-- Covered calls
+- Strategies:
+  - Credit spreads (bull put / bear call)
+  - Iron condors
+  - Covered calls
+  - Naked puts (cash-secured)
+  - Calendar spreads
+  - Short strangles / index straddles
+  - Broken wing butterfly
+  - Earnings volatility crush
+- Portfolio risk engine:
+  - position + portfolio risk limits
+  - portfolio Greeks (delta/theta/gamma/vega)
+  - sector concentration guard
+  - correlation guard + correlation matrix
+  - VaR limits (95/99)
+  - Kelly/fixed sizing modes
+- Intelligence layers:
+  - market regime detector
+  - vol-surface analyzer
+  - economic calendar filter
+  - options-flow analyzer
+  - technical context (RSI, SMA, MACD, ATR, Bollinger, volume ratio)
+  - news scanner (Google RSS + Finnhub + LLM sentiment)
+- LLM system:
+  - OpenAI / Anthropic / Ollama providers
+  - default OpenAI model: `gpt-5.2-pro`
+  - Responses API with Chat Completions fallback
+  - optional ensemble voting
+  - cycle-level LLM portfolio strategist
+  - verdict track record + trade journal feedback loop
+- Execution & resilience:
+  - smart order ladder (entry/exit)
+  - live ledger reconciliation
+  - startup state recovery
+  - websocket streaming with polling fallback
+  - circuit breakers + graceful degradation
+  - graceful SIGTERM/SIGINT shutdown with pending-order cancellation
+- Analytics:
+  - historical backtester (walk-forward, Monte Carlo, costs/slippage, regime-tagged stats)
+  - HTML dashboard (auto-refresh, Greeks, VaR, correlation heatmap, circuit state, LLM accuracy)
+  - webhook alerts (generic / Slack / Discord formats)
 
-Live execution supports all three strategies with:
-- persistent live trade ledger (`live_trades.json`),
-- order reconciliation (including stale-order cancellation policy),
-- automated exit order placement,
-- broker market-hours checks.
+## Architecture
+
+```mermaid
+flowchart TD
+    A[SchwabClient] --> B[Orchestrator]
+    B --> C[MarketScanner]
+    B --> D[Strategies]
+    B --> E[RiskManager]
+    B --> F[LLMAdvisor]
+    B --> G[LLMStrategist]
+    B --> H[NewsScanner]
+    B --> I[RegimeDetector]
+    B --> J[VolSurface]
+    B --> K[EconCalendar]
+    B --> L[OptionsFlow]
+    B --> M[RollManager]
+    B --> N[AdjustmentEngine]
+    B --> O[Hedger]
+    B --> P[LiveTradeLedger]
+    B --> Q[Dashboard]
+    B --> R[Alerts]
+    S[Backtester] --> D
+    S --> E
+```
 
 ## Quick Start
-
-Prerequisite: Python 3.10 or newer.
 
 1. Install dependencies:
 
@@ -28,116 +79,77 @@ Prerequisite: Python 3.10 or newer.
 pip install -r requirements.txt
 ```
 
-2. Configure env:
+2. Configure environment:
 
 ```bash
 cp .env.example .env
 ```
 
-3. Add Schwab credentials and OpenAI key in `.env`:
+3. Set required keys in `.env`:
+
 - `SCHWAB_APP_KEY`
 - `SCHWAB_APP_SECRET`
 - `SCHWAB_ACCOUNT_HASH` (or `SCHWAB_ACCOUNT_INDEX`)
-- `OPENAI_API_KEY`
+- `OPENAI_API_KEY` (if `LLM_PROVIDER=openai`)
 
-4. (Optional, before API access is active) prepare live runtime files/settings:
-
-```bash
-python3 main.py --prepare-live
-```
-
-5. Run guided live setup (credentials check + OAuth + account selection):
-
-```bash
-python3 main.py --setup-live
-```
-
-6. Run paper mode:
+4. Run in paper mode:
 
 ```bash
 python3 main.py
 ```
 
-7. Run live mode (after paper validation):
-
-```bash
-python3 main.py --live
-```
-
-For non-interactive environments (service managers), use:
-
-```bash
-python3 main.py --live --yes
-```
-
-## LLM + News Intelligence
-
-- LLM provider: OpenAI Responses API
-- Default model: `gpt-4.1`
-- Review mode: `advisory` or `blocking`
-- News scanner:
-  - ticker-specific headlines (earnings, analysts, events),
-  - market-level headlines (Fed, inflation, volatility, macro risk),
-  - lightweight sentiment/topic extraction fed into LLM context.
-
-Tune these in `config.yaml`:
-- `llm.*`
-- `news.*`
-- `execution.*`
-- `alerts.*`
-
-## Useful Commands
+5. Live setup / validation:
 
 ```bash
 python3 main.py --prepare-live
+python3 main.py --setup-live
 python3 main.py --live-readiness-only
-python3 main.py --once
-python3 main.py --preflight-only
-python3 main.py --report
-python3 main.py --log-level DEBUG
 ```
 
-Paper preflight supports an offline path if Schwab token auth is not yet set up.
-`--live-readiness-only` validates live configuration (credentials, strategy support,
-alert policy, LLM policy) without requiring broker connectivity.
+## CLI
 
-## Operational Alerts
+```bash
+python3 main.py --once
+python3 main.py --report
+python3 main.py --dashboard
+python3 main.py --fetch-data --start 2024-01-01 --end 2025-12-31
+python3 main.py --backtest --start 2024-01-01 --end 2025-12-31
+python3 main.py --live --yes
+```
 
-You can enable webhook alerts for runtime failures/incidents:
-- `ALERTS_ENABLED=true`
-- `ALERTS_WEBHOOK_URL=...`
-- `ALERTS_MIN_LEVEL=ERROR`
+## Configuration
 
-Live preflight enforces alerting by default (`ALERTS_REQUIRE_IN_LIVE=true`).
+- Primary config file: `config.yaml`
+- Environment overrides: `.env` (see `.env.example`)
+- New advanced sections in `config.yaml`:
+  - `sizing`, `regime`, `vol_surface`, `econ_calendar`, `options_flow`
+  - `rolling`, `exits`, `adjustments`, `hedging`
+  - `llm_strategist`, `circuit_breakers`, `degradation`
+  - `risk_profiles`, expanded `risk` (correlation + VaR)
+  - expanded `alerts` and `execution`
 
-## Runtime Hardening
+All advanced features are toggleable and default to non-breaking values.
 
-- Rotating logs via `logging.max_bytes` and `logging.backup_count`
-- Scanner request throttling + retry/backoff via `scanner.request_pause_seconds`,
-  `scanner.max_retry_attempts`, and `scanner.error_backoff_seconds`
-- Service templates for daemonized runs:
-  - `/Users/bryan/TradingBot/deploy/systemd/tradingbot.service`
-  - `/Users/bryan/TradingBot/deploy/launchd/com.bryan.tradingbot.plist`
-  - rendered outputs from setup/prepare:
-    - `/Users/bryan/TradingBot/deploy/generated/systemd/tradingbot.service`
-    - `/Users/bryan/TradingBot/deploy/generated/launchd/com.bryan.tradingbot.plist`
+## Data & Artifacts
 
-## Project Layout
+- Runtime data: `bot/data/`
+- Logs/reporting: `logs/`
+- Key persisted files include:
+  - `bot/data/iv_history.json`
+  - `bot/data/earnings_cache.json`
+  - `bot/data/econ_calendar.json`
+  - `bot/data/llm_track_record.json`
+  - `bot/data/trade_journal.json`
+  - `bot/data/execution_quality.json`
+  - `bot/data/scanner_history.json`
+  - `bot/data/sector_map.json`
 
-```text
-main.py
-bot/
-  orchestrator.py
-  market_scanner.py
-  news_scanner.py
-  llm_advisor.py
-  risk_manager.py
-  schwab_client.py
-  paper_trader.py
-  strategies/
-tests/
+## Testing
+
+```bash
+python3 -m pytest -q
 ```
 
 ## Disclaimer
 
-This software is for educational and personal use. Options trading involves substantial risk of loss. Past performance does not guarantee future results. Use at your own risk. Always test thoroughly in paper mode before trading with real money.
+Options trading has substantial risk. Use paper mode first, validate behavior thoroughly, and apply conservative limits before enabling live trading.

@@ -61,6 +61,34 @@ strategies:
     profit_target_pct: 0.25
     exit_dte: 7
 
+  strangles:
+    enabled: false
+    min_iv_rank: 70.0
+    short_delta: 0.16
+    min_account_balance: 25000.0
+    allow_straddles_on: ["SPY", "QQQ", "IWM"]
+    min_dte: 20
+    max_dte: 45
+    profit_target_pct: 0.50
+    stop_loss_multiple: 2.0
+
+  broken_wing_butterfly:
+    enabled: false
+    min_dte: 20
+    max_dte: 45
+    short_delta: 0.30
+    near_wing_width: 5.0
+    far_wing_width: 10.0
+    min_credit: 0.10
+
+  earnings_vol_crush:
+    enabled: false
+    min_dte: 1
+    max_dte: 3
+    max_position_risk_pct: 0.5
+    min_iv_rank: 75.0
+    wing_width: 10.0
+
 # Market Scanner — dynamically finds the best stocks for options trading
 # When enabled, the bot scans 150+ tickers across all sectors and ranks them
 # by options volume, implied volatility, bid-ask tightness, and liquidity.
@@ -132,6 +160,13 @@ risk:
   # Correlation guard lookback and threshold
   correlation_lookback_days: 60
   correlation_threshold: 0.8
+  # Portfolio-level average correlation guard
+  max_portfolio_correlation: 0.85
+  # Parametric VaR guardrails (disabled by default)
+  var_enabled: false
+  var_lookback_days: 60
+  var_limit_pct_95: 3.0
+  var_limit_pct_99: 5.0
 
 risk_profiles:
   conservative:
@@ -149,6 +184,86 @@ risk_profiles:
     max_position_risk_pct: 3.0
     max_open_positions: 15
     max_daily_loss_pct: 5.0
+
+sizing:
+  method: fixed   # fixed | kelly
+  kelly_fraction: 0.5
+  kelly_min_trades: 30
+  drawdown_decay_threshold: 0.05
+
+regime:
+  enabled: false
+  min_confidence: 0.55
+  uncertain_size_scalar: 0.80
+
+vol_surface:
+  enabled: false
+  require_positive_vol_risk_premium: true
+  max_vol_of_vol_for_condors: 0.20
+
+econ_calendar:
+  enabled: false
+  refresh_days: 1
+  cache_file: bot/data/econ_calendar.json
+  high_severity_policy: reduce_size
+  medium_severity_policy: widen
+  low_severity_policy: none
+
+options_flow:
+  enabled: false
+  unusual_volume_multiple: 5.0
+  include_in_llm_context: true
+
+rolling:
+  enabled: false
+  min_dte_trigger: 7
+  min_credit_for_roll: 0.15
+  max_rolls_per_position: 2
+  allow_defensive_rolls: true
+
+exits:
+  adaptive_targets: true
+  trailing_stop_enabled: false
+  trailing_stop_activation_pct: 0.25
+  trailing_stop_floor_pct: 0.10
+
+adjustments:
+  enabled: false
+  delta_test_threshold: 0.50
+  min_dte_remaining: 7
+  max_adjustments_per_position: 2
+
+hedging:
+  enabled: false
+  delta_hedge_trigger: 50.0
+  tail_risk_enabled: false
+  max_hedge_cost_pct: 1.0
+  auto_execute: false
+
+llm_strategist:
+  enabled: false
+  provider: openai
+  model: gpt-5.2-pro
+  timeout_seconds: 20
+  max_directives: 3
+
+circuit_breakers:
+  strategy_loss_streak_limit: 5
+  strategy_cooldown_hours: 24
+  symbol_loss_streak_limit: 2
+  symbol_blacklist_days: 7
+  portfolio_drawdown_halt_pct: 5.0
+  portfolio_halt_hours: 48
+  api_error_rate_threshold: 0.30
+  api_window_minutes: 10
+  llm_timeout_streak: 3
+
+degradation:
+  enabled: true
+  fallback_watchlist_on_scanner_failure: true
+  fallback_polling_on_stream_failure: true
+  continue_on_strategy_errors: true
+  rule_only_on_llm_failures: true
 
 # Scheduling
 schedule:
@@ -186,7 +301,7 @@ execution:
 llm:
   enabled: true
   provider: openai
-  model: gpt-4.1
+  model: gpt-5.2-pro
   base_url: http://127.0.0.1:11434
   mode: advisory   # advisory | blocking
   risk_style: moderate   # conservative | moderate | aggressive
@@ -194,6 +309,18 @@ llm:
   temperature: 0.1
   min_confidence: 0.55
   track_record_file: bot/data/llm_track_record.json
+  reasoning_effort: high
+  text_verbosity: low
+  max_output_tokens: 900
+  chat_fallback_model: gpt-4.1
+  ensemble_enabled: false
+  ensemble_models:
+    - openai:gpt-5.2-pro
+    - anthropic:claude-sonnet-4-20250514
+  ensemble_agreement_threshold: 0.66
+  journal_enabled: false
+  journal_file: bot/data/trade_journal.json
+  journal_context_entries: 20
 
 # News intelligence layer
 # Pulls stock-specific and market-level headlines and includes them in LLM review context.
@@ -209,6 +336,11 @@ news:
   finnhub_api_key: ""
   llm_sentiment_enabled: true
   llm_sentiment_cache_seconds: 1800
+  llm_model: gpt-5.2-pro
+  llm_reasoning_effort: medium
+  llm_text_verbosity: low
+  llm_max_output_tokens: 400
+  llm_chat_fallback_model: gpt-4.1
   market_queries:
     - "stock market"
     - "federal reserve interest rates"
@@ -234,6 +366,12 @@ alerts:
   min_level: ERROR
   timeout_seconds: 5
   require_in_live: true
+  trade_notifications: false
+  daily_summary: false
+  regime_changes: false
+  weekly_summary: false
+  drawdown_thresholds: [1.0, 2.0, 3.0]
+  webhook_format: generic  # generic | slack | discord
 
 # Logging
 logging:

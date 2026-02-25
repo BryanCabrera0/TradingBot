@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from bot.analysis import SpreadAnalysis, find_option_by_strike
+from bot.number_utils import safe_int
 from bot.strategies.base import BaseStrategy, TradeSignal
 from bot.technicals import TechnicalContext
 
@@ -162,7 +163,7 @@ class CalendarSpreadStrategy(BaseStrategy):
 
             entry_debit = abs(float(position.get("entry_credit", 0.0) or 0.0))
             current_mark = abs(float(position.get("current_value", 0.0) or 0.0))
-            dte_remaining = int(position.get("dte_remaining", 999) or 999)
+            dte_remaining = safe_int(position.get("dte_remaining"), 999)
             quantity = max(1, int(position.get("quantity", 1)))
 
             profit_target = entry_debit * (1.0 + profit_target_pct)

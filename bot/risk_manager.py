@@ -41,11 +41,34 @@ class RiskManager:
 
     def __init__(self, config: RiskConfig):
         self.config = config
+        self.sizing_config: dict = {
+            "method": "fixed",
+            "kelly_fraction": 0.5,
+            "kelly_min_trades": 30,
+            "drawdown_decay_threshold": 0.05,
+        }
         self.portfolio = PortfolioState()
         self.earnings_calendar = EarningsCalendar()
         self.sector_map = self._load_sector_map()
         self._price_history_provider: Optional[Callable[[str, int], list[dict]]] = None
         self._returns_cache: dict[str, np.ndarray] = {}
+        self._closed_trades: list[dict] = []
+        self._equity_peak: float = 0.0
+        self._correlation_matrix: dict[str, dict[str, float]] = {}
+        self._var_metrics: dict[str, float] = {"var95": 0.0, "var99": 0.0}
+
+    def set_sizing_config(self, sizing: object) -> None:
+        if sizing is None:
+            return
+        if isinstance(sizing, dict):
+            self.sizing_config.update(sizing)
+            return
+        for key in self.sizing_config:
+            if hasattr(sizing, key):
+                self.sizing_config[key] = getattr(sizing, key)
+
+    def update_trade_history(self, closed_trades: list[dict]) -> None:
+        self._closed_trades = [item for item in (closed_trades or []) if isinstance(item, dict)]
 
     def set_price_history_provider(self, provider: Optional[Callable[[str, int], list[dict]]]) -> None:
         """Register a callable used for correlation checks."""
@@ -96,6 +119,9 @@ class RiskManager:
         self.portfolio.net_gamma = round(net_gamma, 4)
         self.portfolio.net_vega = round(net_vega, 4)
         self.portfolio.sector_risk = sector_risk
+        self._equity_peak = max(self._equity_peak, self.portfolio.account_balance)
+        self._refresh_correlation_matrix()
+        self._refresh_var_metrics()
 
     def can_open_more_positions(self) -> bool:
         """Return whether the portfolio has capacity for another position."""
@@ -277,6 +303,24 @@ class RiskManager:
                 f"{effective_count}/{self.config.max_positions_per_symbol}"
             )
 
+        if self.config.var_enabled:
+            var95 = float(self._var_metrics.get("var95", 0.0))
+            var99 = float(self._var_metrics.get("var99", 0.0))
+            limit95 = balance * (float(self.config.var_limit_pct_95) / 100.0)
+            limit99 = balance * (float(self.config.var_limit_pct_99) / 100.0)
+            if var95 > limit95 or var99 > limit99:
+                return False, (
+                    f"Portfolio VaR exceeded limits (95%: {var95:,.2f}/{limit95:,.2f}, "
+                    f"99%: {var99:,.2f}/{limit99:,.2f})"
+                )
+
+        projected_corr = self._projected_portfolio_correlation(signal.symbol)
+        if projected_corr > float(self.config.max_portfolio_correlation):
+            return False, (
+                f"Portfolio correlation too high: {projected_corr:.2f} > "
+                f"{float(self.config.max_portfolio_correlation):.2f}"
+            )
+
         logger.info(
             "Trade APPROVED: %s %s on %s | Risk: $%.2f | Portfolio risk: $%.2f/$%.2f",
             signal.action,
@@ -299,7 +343,12 @@ class RiskManager:
         if risk_per_contract <= 0:
             return 1
 
-        contracts = int(max_risk_per_trade / risk_per_contract)
+        method = str(self.sizing_config.get("method", "fixed")).strip().lower()
+        if method == "kelly":
+            fraction = self._kelly_fraction(signal)
+            contracts = int((max_risk_per_trade * fraction) / risk_per_contract)
+        else:
+            contracts = int(max_risk_per_trade / risk_per_contract)
         return max(1, min(contracts, 10))
 
     def get_portfolio_greeks(self) -> dict:
@@ -310,6 +359,12 @@ class RiskManager:
             "gamma": round(self.portfolio.net_gamma, 4),
             "vega": round(self.portfolio.net_vega, 4),
         }
+
+    def get_correlation_matrix(self) -> dict:
+        return self._correlation_matrix
+
+    def get_var_metrics(self) -> dict:
+        return dict(self._var_metrics)
 
     def _load_sector_map(self) -> dict[str, str]:
         payload = load_json(SECTOR_MAP_PATH, {})
@@ -375,3 +430,139 @@ class RiskManager:
         returns = np.diff(closes) / closes[:-1]
         self._returns_cache[symbol_key] = returns
         return returns
+
+    def _kelly_fraction(self, signal: TradeSignal) -> float:
+        kelly_weight = max(0.0, min(1.0, float(self.sizing_config.get("kelly_fraction", 0.5))))
+        min_trades = max(1, int(self.sizing_config.get("kelly_min_trades", 30)))
+
+        win_rate, avg_win, avg_loss = self._historical_edge()
+        if win_rate is None or len(self._closed_trades) < min_trades:
+            analysis = signal.analysis
+            if analysis is None:
+                return 1.0
+            win_rate = max(0.01, min(0.99, float(analysis.probability_of_profit)))
+            avg_win = max(0.01, float(analysis.credit))
+            avg_loss = max(0.01, float(analysis.max_loss))
+
+        # Kelly = (p*W - (1-p)*L)/W.
+        kelly_raw = ((win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)) / max(avg_win, 1e-9)
+        kelly_raw = max(0.0, min(1.0, kelly_raw))
+        fractional = kelly_raw * kelly_weight
+
+        drawdown = self._current_drawdown()
+        decay_threshold = max(0.0, float(self.sizing_config.get("drawdown_decay_threshold", 0.05)))
+        if drawdown > decay_threshold > 0:
+            # Anti-martingale: decay sizing when drawdown is elevated.
+            fractional *= max(0.25, 1.0 - ((drawdown - decay_threshold) / max(decay_threshold, 1e-9)))
+
+        return max(0.1, min(1.0, fractional))
+
+    def _historical_edge(self) -> tuple[Optional[float], float, float]:
+        if not self._closed_trades:
+            return None, 0.0, 0.0
+        pnls = [float(item.get("pnl", 0.0) or 0.0) for item in self._closed_trades]
+        winners = [value for value in pnls if value > 0]
+        losers = [abs(value) for value in pnls if value < 0]
+        if not winners or not losers:
+            return None, 0.0, 0.0
+        win_rate = len(winners) / max(1, len(pnls))
+        return win_rate, float(np.mean(winners)), float(np.mean(losers))
+
+    def _current_drawdown(self) -> float:
+        if self._equity_peak <= 0:
+            return 0.0
+        current = max(0.0, float(self.portfolio.account_balance))
+        return max(0.0, (self._equity_peak - current) / self._equity_peak)
+
+    def _refresh_correlation_matrix(self) -> None:
+        symbols = sorted(
+            {str(item.get("symbol", "")).upper() for item in self.portfolio.open_positions if item.get("symbol")}
+        )
+        matrix: dict[str, dict[str, float]] = {}
+        if len(symbols) < 2:
+            self._correlation_matrix = matrix
+            return
+        returns = {symbol: self._load_returns(symbol) for symbol in symbols}
+        for left in symbols:
+            matrix[left] = {}
+            for right in symbols:
+                if left == right:
+                    matrix[left][right] = 1.0
+                    continue
+                l = returns.get(left)
+                r = returns.get(right)
+                if l is None or r is None:
+                    matrix[left][right] = 0.0
+                    continue
+                size = min(len(l), len(r))
+                if size < 20:
+                    matrix[left][right] = 0.0
+                    continue
+                corr = float(np.corrcoef(l[-size:], r[-size:])[0, 1])
+                matrix[left][right] = 0.0 if np.isnan(corr) else round(corr, 6)
+        self._correlation_matrix = matrix
+
+    def _refresh_var_metrics(self) -> None:
+        if not self.config.var_enabled:
+            self._var_metrics = {"var95": 0.0, "var99": 0.0}
+            return
+        symbols = [str(item.get("symbol", "")).upper() for item in self.portfolio.open_positions if item.get("symbol")]
+        if not symbols:
+            self._var_metrics = {"var95": 0.0, "var99": 0.0}
+            return
+
+        returns = []
+        weights = []
+        total_risk = max(1.0, float(self.portfolio.total_risk_deployed))
+        for position in self.portfolio.open_positions:
+            symbol = str(position.get("symbol", "")).upper()
+            series = self._load_returns(symbol)
+            if series is None or len(series) < 20:
+                continue
+            risk = max(0.0, float(position.get("max_loss", 0.0))) * max(1, int(position.get("quantity", 1))) * 100.0
+            returns.append(series)
+            weights.append(risk / total_risk)
+
+        if len(returns) < 1:
+            self._var_metrics = {"var95": 0.0, "var99": 0.0}
+            return
+
+        min_len = min(len(series) for series in returns)
+        if min_len < 20:
+            self._var_metrics = {"var95": 0.0, "var99": 0.0}
+            return
+
+        aligned = np.vstack([series[-min_len:] for series in returns])
+        weighted = np.average(aligned, axis=0, weights=np.array(weights))
+        sigma = float(np.std(weighted, ddof=1))
+        account = max(0.0, float(self.portfolio.account_balance))
+        self._var_metrics = {
+            "var95": round(account * 1.645 * sigma, 4),
+            "var99": round(account * 2.326 * sigma, 4),
+        }
+
+    def _projected_portfolio_correlation(self, symbol: str) -> float:
+        symbol = str(symbol).upper().strip()
+        if not symbol:
+            return 0.0
+        target = self._load_returns(symbol)
+        if target is None or len(target) < 20:
+            return 0.0
+        corrs = []
+        for position in self.portfolio.open_positions:
+            other = str(position.get("symbol", "")).upper().strip()
+            if not other or other == symbol:
+                continue
+            series = self._load_returns(other)
+            if series is None or len(series) < 20:
+                continue
+            size = min(len(target), len(series))
+            if size < 20:
+                continue
+            corr = float(np.corrcoef(target[-size:], series[-size:])[0, 1])
+            if np.isnan(corr):
+                continue
+            corrs.append(corr)
+        if not corrs:
+            return 0.0
+        return float(np.mean(corrs))

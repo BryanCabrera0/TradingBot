@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from bot.analysis import SpreadAnalysis
@@ -132,6 +133,100 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertEqual(sector["sector_etf"], "XLK")
         self.assertGreater(sector["sector_vs_spy"], 0.0)
         self.assertGreater(sector["symbol_vs_sector"], 0.0)
+
+    def test_portfolio_strategist_skip_sector_directive_is_enforced(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_strategist = mock.Mock()
+        bot.llm_strategist.review_portfolio.return_value = [
+            SimpleNamespace(
+                action="skip_sector",
+                reason="Too concentrated",
+                payload={"sector": "Information Technology"},
+            )
+        ]
+        bot.risk_manager.sector_map["AAPL"] = "Information Technology"
+        bot.risk_manager.sector_map["XOM"] = "Energy"
+
+        bot._apply_portfolio_strategist()
+
+        self.assertTrue(bot._is_symbol_sector_skipped("AAPL"))
+        self.assertFalse(bot._is_symbol_sector_skipped("XOM"))
+
+    def test_portfolio_strategist_reduce_delta_closes_heaviest_position(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_strategist = mock.Mock()
+        bot.llm_strategist.review_portfolio.return_value = [
+            SimpleNamespace(
+                action="reduce_delta",
+                reason="Net delta too high",
+                payload={"count": 1, "direction": "positive"},
+            )
+        ]
+        bot.risk_manager.portfolio.net_delta = 42.0
+        bot._get_tracked_positions = mock.Mock(
+            return_value=[
+                {
+                    "position_id": "p_hi",
+                    "status": "open",
+                    "symbol": "AAPL",
+                    "strategy": "bull_put_spread",
+                    "quantity": 1,
+                    "details": {"net_delta": 18.0},
+                },
+                {
+                    "position_id": "p_lo",
+                    "status": "open",
+                    "symbol": "MSFT",
+                    "strategy": "bull_put_spread",
+                    "quantity": 1,
+                    "details": {"net_delta": 7.0},
+                },
+                {
+                    "position_id": "p_neg",
+                    "status": "open",
+                    "symbol": "QQQ",
+                    "strategy": "bear_call_spread",
+                    "quantity": 1,
+                    "details": {"net_delta": -10.0},
+                },
+            ]
+        )
+        bot._execute_exit = mock.Mock()
+
+        bot._apply_portfolio_strategist()
+
+        bot._execute_exit.assert_called_once()
+        signal = bot._execute_exit.call_args.args[0]
+        self.assertEqual(signal.position_id, "p_hi")
+        self.assertEqual(signal.action, "close")
+
+    def test_option_stream_subscription_uses_atm_contracts(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.schwab.streaming_connected = mock.Mock(return_value=True)
+        bot.schwab.stream_option_level_one = mock.Mock(return_value=True)
+        chain = {
+            "calls": {
+                "2026-04-17": [
+                    {"dte": 30, "strike": 95.0, "symbol": "SPY_041726C95"},
+                    {"dte": 30, "strike": 100.0, "symbol": "SPY_041726C100"},
+                    {"dte": 30, "strike": 105.0, "symbol": "SPY_041726C105"},
+                ]
+            },
+            "puts": {
+                "2026-04-17": [
+                    {"dte": 30, "strike": 95.0, "symbol": "SPY_041726P95"},
+                    {"dte": 30, "strike": 100.0, "symbol": "SPY_041726P100"},
+                    {"dte": 30, "strike": 105.0, "symbol": "SPY_041726P105"},
+                ]
+            },
+        }
+
+        bot._subscribe_option_stream_for_symbol("SPY", chain, 100.0)
+        bot._subscribe_option_stream_for_symbol("SPY", chain, 100.0)
+
+        bot.schwab.stream_option_level_one.assert_called_once()
+        symbols = bot.schwab.stream_option_level_one.call_args.args[0]
+        self.assertEqual(set(symbols), {"SPY_041726C100", "SPY_041726P100"})
 
 
 if __name__ == "__main__":

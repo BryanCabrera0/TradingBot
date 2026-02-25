@@ -186,6 +186,98 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         self.assertEqual(imported, 1)
         bot.live_ledger.register_entry_order.assert_called_once()
 
+    def test_execute_roll_does_not_close_without_replacement(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot._get_tracked_positions = mock.Mock(
+            return_value=[
+                {
+                    "position_id": "pos1",
+                    "status": "open",
+                    "symbol": "SPY",
+                    "strategy": "bull_put_spread",
+                    "dte_remaining": 7,
+                    "details": {"roll_count": 0},
+                }
+            ]
+        )
+        bot.roll_manager.evaluate = mock.Mock(
+            return_value=mock.Mock(should_roll=True, reason="ok", min_credit_required=0.1)
+        )
+        bot._get_chain_data = mock.Mock(return_value=({"calls": {}, "puts": {}}, 0.0))
+        bot._execute_exit = mock.Mock()
+        bot._try_execute_entry = mock.Mock()
+
+        bot._execute_roll(
+            TradeSignal(
+                action="roll",
+                strategy="bull_put_spread",
+                symbol="SPY",
+                position_id="pos1",
+                quantity=1,
+                metadata={},
+            )
+        )
+
+        bot._execute_exit.assert_not_called()
+        bot._try_execute_entry.assert_not_called()
+
+    def test_execute_roll_closes_and_opens_when_replacement_exists(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot._get_tracked_positions = mock.Mock(
+            return_value=[
+                {
+                    "position_id": "pos1",
+                    "status": "open",
+                    "symbol": "SPY",
+                    "strategy": "bull_put_spread",
+                    "dte_remaining": 7,
+                    "details": {"roll_count": 0},
+                }
+            ]
+        )
+        bot.roll_manager.evaluate = mock.Mock(
+            return_value=mock.Mock(should_roll=True, reason="ok", min_credit_required=0.1)
+        )
+        bot._get_chain_data = mock.Mock(return_value=({"calls": {"2026-04-17": [{"dte": 40}]}, "puts": {"2026-04-17": [{"dte": 40}]}}, 500.0))
+        bot.technicals.get_context = mock.Mock(return_value=None)
+        candidate = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-04-17",
+                dte=40,
+                short_strike=490,
+                long_strike=480,
+                credit=1.2,
+                max_loss=8.8,
+                probability_of_profit=0.65,
+                score=70,
+            ),
+            metadata={},
+        )
+        strategy = mock.Mock()
+        strategy.scan_for_entries = mock.Mock(return_value=[candidate])
+        bot.strategies = [strategy]
+        bot._execute_exit = mock.Mock()
+        bot._try_execute_entry = mock.Mock()
+
+        bot._execute_roll(
+            TradeSignal(
+                action="roll",
+                strategy="bull_put_spread",
+                symbol="SPY",
+                position_id="pos1",
+                quantity=1,
+                metadata={},
+            )
+        )
+
+        bot._execute_exit.assert_called_once()
+        bot._try_execute_entry.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

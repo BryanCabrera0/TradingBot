@@ -67,7 +67,7 @@ class NewsScanner:
         self._cache: dict[str, tuple[float, list[NewsItem]]] = {}
         self._sentiment_cache: dict[str, tuple[float, dict]] = {}
 
-    def build_context(self, symbol: str) -> dict:
+    def build_context(self, symbol: str, *, macro_events: Optional[dict] = None) -> dict:
         """Return a structured news context payload for the requested symbol."""
         symbol_news = self.get_symbol_news(symbol) if self.config.include_symbol_news else []
         market_news = self.get_market_news() if self.config.include_market_news else []
@@ -83,6 +83,7 @@ class NewsScanner:
             "dominant_market_topics": _top_topics(market_news, limit=5),
             "llm_sentiment": sentiment,
             "trade_policy": policy,
+            "economic_events": macro_events or {},
         }
 
     def get_symbol_news(self, symbol: str) -> list[NewsItem]:
@@ -270,11 +271,15 @@ class NewsScanner:
         try:
             raw = request_openai_json(
                 api_key=api_key,
-                model="gpt-4.1",
+                model=self.config.llm_model,
                 system_prompt="You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
                 user_prompt=json.dumps(prompt, separators=(",", ":")),
                 timeout_seconds=self.config.request_timeout_seconds,
                 temperature=0.0,
+                reasoning_effort=self.config.llm_reasoning_effort,
+                text_verbosity=self.config.llm_text_verbosity,
+                max_output_tokens=self.config.llm_max_output_tokens,
+                chat_fallback_model=self.config.llm_chat_fallback_model,
                 schema_name="news_sentiment",
                 schema={
                     "type": "object",

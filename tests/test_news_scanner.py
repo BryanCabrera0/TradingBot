@@ -152,6 +152,42 @@ class NewsScannerTests(unittest.TestCase):
 
         self.assertEqual(sentiment["sentiment"], "bullish")
 
+    def test_llm_sentiment_uses_gpt52pro_capability_payload(self) -> None:
+        scanner = NewsScanner(
+            NewsConfig(
+                enabled=True,
+                llm_sentiment_enabled=True,
+                llm_sentiment_cache_seconds=0,
+                llm_model="gpt-5.2-pro",
+                llm_reasoning_effort="medium",
+                llm_text_verbosity="low",
+                llm_max_output_tokens=256,
+                llm_chat_fallback_model="gpt-4.1",
+            )
+        )
+        response = mock.Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output_text": '{"sentiment":"neutral","confidence":61,"key_event":null}'
+        }
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.openai_compat.requests.post", return_value=response) as post:
+                sentiment = scanner.get_symbol_sentiment(
+                    "AAPL",
+                    headlines=[mock.Mock(title="AAPL announces new AI roadmap")],
+                )
+
+        self.assertEqual(sentiment["sentiment"], "neutral")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "gpt-5.2-pro")
+        self.assertEqual(payload["reasoning"]["effort"], "medium")
+        self.assertEqual(payload["text"]["verbosity"], "low")
+        self.assertEqual(payload["max_output_tokens"], 256)
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("format", payload["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
