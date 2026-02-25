@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 import schwab
 from schwab.orders.generic import OrderBuilder
 from schwab.orders.options import (
-    OptionSymbol,
     bear_call_vertical_close,
     bear_call_vertical_open,
     bull_put_vertical_close,
@@ -772,11 +771,11 @@ def _extract_expiration_date(raw_expiration: object, fallback: str) -> str:
 def _make_option_symbol(
     underlying: str, expiration: str, put_call: str, strike: float
 ) -> str:
-    """Create a Schwab-compatible option symbol."""
+    """Create a Schwab-compatible option symbol in stable underscore format."""
     expiration_key = expiration.split("T", 1)[0].split(":", 1)[0]
     expiration_date = datetime.strptime(expiration_key, "%Y-%m-%d").date()
-    strike_price = f"{float(strike):.3f}".rstrip("0").rstrip(".")
-    return OptionSymbol(underlying, expiration_date, put_call, strike_price).build()
+    strike_text = f"{float(strike):.3f}".rstrip("0").rstrip(".")
+    return f"{underlying.upper()}_{expiration_date:%m%d%y}{put_call.upper()}{strike_text}"
 
 
 def _extract_account_hashes(raw_accounts: object) -> list[str]:
