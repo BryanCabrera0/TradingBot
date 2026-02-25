@@ -156,6 +156,7 @@ class PaperTrader:
         position_id: str,
         close_value: Optional[float] = None,
         reason: str = "",
+        quantity: Optional[int] = None,
     ) -> dict:
         """Simulate closing a position."""
         position = None
@@ -173,12 +174,13 @@ class PaperTrader:
             close_value = position.get("current_value", 0)
 
         entry_credit = position["entry_credit"]
-        quantity = position["quantity"]
+        open_quantity = max(1, int(position.get("quantity", 1)))
+        close_quantity = max(1, min(open_quantity, int(quantity or open_quantity)))
         pnl_per_contract = entry_credit - close_value
-        total_pnl = pnl_per_contract * quantity * 100
+        total_pnl = pnl_per_contract * close_quantity * 100
 
         # Debit to close
-        total_debit = close_value * quantity * 100
+        total_debit = close_value * close_quantity * 100
         self.balance -= total_debit
 
         # Record the closed trade
@@ -189,12 +191,19 @@ class PaperTrader:
             "pnl_per_contract": pnl_per_contract,
             "pnl": total_pnl,
             "reason": reason,
-            "status": "closed",
+            "status": "closed" if close_quantity >= open_quantity else "partial_closed",
+            "closed_quantity": close_quantity,
         }
         self.closed_trades.append(closed)
 
-        # Remove from open positions
-        self.positions = [p for p in self.positions if p["position_id"] != position_id]
+        if close_quantity >= open_quantity:
+            # Remove from open positions
+            self.positions = [p for p in self.positions if p["position_id"] != position_id]
+            remaining_quantity = 0
+        else:
+            remaining_quantity = open_quantity - close_quantity
+            position["quantity"] = remaining_quantity
+            position["partial_closed"] = True
 
         order_id = str(uuid.uuid4())[:8]
         self.orders.append({
@@ -203,7 +212,7 @@ class PaperTrader:
             "position_id": position_id,
             "symbol": position["symbol"],
             "debit": close_value,
-            "quantity": quantity,
+            "quantity": close_quantity,
             "pnl": total_pnl,
             "reason": reason,
             "timestamp": datetime.now().isoformat(),
@@ -222,9 +231,15 @@ class PaperTrader:
             "position_id": position_id,
             "pnl": total_pnl,
             "status": "FILLED",
+            "closed_quantity": close_quantity,
+            "remaining_quantity": remaining_quantity,
         }
 
-    def update_position_values(self, market_prices: dict) -> None:
+    def update_position_values(
+        self,
+        market_prices: dict,
+        position_meta: Optional[dict] = None,
+    ) -> None:
         """Update current values of open positions based on market data.
 
         market_prices: dict mapping position_id -> current mid price of the spread.
@@ -233,6 +248,10 @@ class PaperTrader:
             pid = position["position_id"]
             if pid in market_prices:
                 position["current_value"] = market_prices[pid]
+            if position_meta and pid in position_meta:
+                meta = position_meta.get(pid, {})
+                if isinstance(meta, dict):
+                    position.update(meta)
 
             # Update DTE
             exp = position.get("expiration", "")

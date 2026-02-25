@@ -10,6 +10,7 @@ This is the brain of the bot. It:
 """
 
 from collections import defaultdict, deque
+import copy
 import logging
 from pathlib import Path
 import re
@@ -23,6 +24,8 @@ import schedule
 
 from bot.alerts import AlertManager
 from bot.config import BotConfig, load_config
+from bot.data_store import dump_json, load_json
+from bot.dashboard import generate_dashboard
 from bot.live_trade_ledger import LiveTradeLedger
 from bot.schwab_client import SchwabClient
 from bot.llm_advisor import LLMAdvisor
@@ -30,7 +33,8 @@ from bot.news_scanner import NewsScanner
 from bot.number_utils import safe_float, safe_int
 from bot.paper_trader import PaperTrader
 from bot.risk_manager import RiskManager
-from bot.market_scanner import MarketScanner
+from bot.market_scanner import MarketScanner, SECTOR_ETF_BY_SYMBOL
+from bot.technicals import TechnicalAnalyzer
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
 from bot.strategies.covered_calls import CoveredCallStrategy
@@ -74,12 +78,16 @@ class TradingBot:
         self._running = False
         self._market_open_cache: Optional[tuple[datetime, bool]] = None
         self._live_bootstrap_done = False
+        self._base_risk_config = copy.deepcopy(self.config.risk)
+        self._active_account: Optional[dict] = None
+        self._equity_history: list[dict] = []
 
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
         self.paper_trader = PaperTrader() if self.is_paper else None
         self.live_ledger = None if self.is_paper else LiveTradeLedger()
         self.alerts = AlertManager(self.config.alerts)
+        self.technicals = TechnicalAnalyzer()
         self.llm_advisor: Optional[LLMAdvisor] = None
         if self.config.llm.enabled:
             self.llm_advisor = LLMAdvisor(self.config.llm)
@@ -89,6 +97,8 @@ class TradingBot:
 
         # Market data is required in both paper and live modes.
         self.schwab = SchwabClient(self.config.schwab)
+        self.risk_manager.set_price_history_provider(self.schwab.get_price_history)
+        self._configure_active_account()
 
         # Initialize market scanner
         self.scanner: Optional[MarketScanner] = None
@@ -109,6 +119,23 @@ class TradingBot:
             self.strategies.append(
                 CoveredCallStrategy(vars(self.config.covered_calls))
             )
+
+        self._base_strategy_min_credit = {
+            strategy.name: float(strategy.config.get("min_credit_pct", 0.0))
+            for strategy in self.strategies
+        }
+        self.circuit_state = {
+            "regime": "normal",
+            "vix": None,
+            "halt_entries": False,
+            "consecutive_loss_pause_until": None,
+            "weekly_loss_pause_until": None,
+        }
+        self._breaker_alert_flags = {
+            "crisis": False,
+            "consecutive_loss": False,
+            "weekly_loss": False,
+        }
 
         scanner_status = "ON (dynamic market scan)" if self.scanner else "OFF (static watchlist)"
         logger.info(
@@ -132,6 +159,53 @@ class TradingBot:
                 self.config.news.max_symbol_headlines,
                 self.config.news.max_market_headlines,
             )
+
+    def _configure_active_account(self) -> None:
+        """Select active account/profile for live mode from config accounts list."""
+        if self.is_paper:
+            return
+
+        configured = self.schwab.configured_accounts()
+        if not configured:
+            return
+
+        selected = configured[0]
+        configured_hash = str(self.config.schwab.account_hash or "").strip()
+        if configured_hash:
+            for account in configured:
+                if str(account.get("hash", "")).strip() == configured_hash:
+                    selected = account
+                    break
+        self._active_account = selected
+
+        account_hash = str(selected.get("hash", "")).strip()
+        if account_hash:
+            self.schwab.select_account(account_hash)
+
+        profile = str(selected.get("risk_profile", "moderate")).strip().lower()
+        self._apply_risk_profile(profile)
+        logger.info(
+            "Active account profile: %s (...%s) risk=%s",
+            selected.get("name") or "account",
+            account_hash[-4:] if account_hash else "auto",
+            profile,
+        )
+
+    def _apply_risk_profile(self, profile: str) -> None:
+        """Apply account risk-profile multipliers to runtime risk config."""
+        self.risk_manager.config = copy.deepcopy(self._base_risk_config)
+        if profile == "aggressive":
+            self.risk_manager.config.max_open_positions = max(
+                1, int(round(self.risk_manager.config.max_open_positions * 1.5))
+            )
+            self.risk_manager.config.max_position_risk_pct *= 1.25
+            self.risk_manager.config.max_portfolio_risk_pct *= 1.25
+        elif profile == "conservative":
+            self.risk_manager.config.max_open_positions = max(
+                1, int(round(self.risk_manager.config.max_open_positions * 0.7))
+            )
+            self.risk_manager.config.max_position_risk_pct *= 0.70
+            self.risk_manager.config.max_portfolio_risk_pct *= 0.70
 
     def _alert(
         self,
@@ -355,6 +429,221 @@ class TradingBot:
             enabled.add("covered_calls")
         return enabled
 
+    def _entries_allowed(self) -> bool:
+        """Return True when no circuit breaker currently blocks new entries."""
+        now = self._now_eastern()
+        if self.circuit_state.get("halt_entries"):
+            return False
+
+        cons_until = self.circuit_state.get("consecutive_loss_pause_until")
+        if cons_until:
+            try:
+                cons_dt = datetime.fromisoformat(str(cons_until))
+                if cons_dt.tzinfo is None:
+                    cons_dt = cons_dt.replace(tzinfo=EASTERN_TZ)
+                if now < cons_dt:
+                    return False
+            except ValueError:
+                pass
+
+        weekly_until = self.circuit_state.get("weekly_loss_pause_until")
+        if weekly_until:
+            try:
+                weekly_dt = datetime.fromisoformat(str(weekly_until))
+                if weekly_dt.tzinfo is None:
+                    weekly_dt = weekly_dt.replace(tzinfo=EASTERN_TZ)
+                if now < weekly_dt:
+                    return False
+            except ValueError:
+                pass
+
+        return True
+
+    def _update_market_regime(self) -> None:
+        """Refresh VIX-based volatility regime and risk throttles."""
+        vix_value = None
+        for symbol in ("$VIX", "^VIX", "VIX"):
+            try:
+                quote = self.schwab.get_quote(symbol)
+            except Exception:
+                continue
+            ref = quote.get("quote", quote) if isinstance(quote, dict) else {}
+            value = safe_float(ref.get("lastPrice", ref.get("mark", 0.0)))
+            if value > 0:
+                vix_value = value
+                break
+
+        if vix_value is None:
+            return
+
+        self.circuit_state["vix"] = round(vix_value, 2)
+        if vix_value > 35:
+            regime = "crisis"
+            self.circuit_state["halt_entries"] = True
+            if not self._breaker_alert_flags["crisis"]:
+                logger.warning(
+                    "CIRCUIT BREAKER: VIX=%.2f, halting new entries",
+                    vix_value,
+                )
+                self._alert(
+                    level="ERROR",
+                    title="CIRCUIT BREAKER",
+                    message=f"VIX={vix_value:.2f}, halting new entries",
+                )
+                self._breaker_alert_flags["crisis"] = True
+        elif vix_value >= 25:
+            regime = "elevated"
+            self.circuit_state["halt_entries"] = False
+            self._breaker_alert_flags["crisis"] = False
+        elif vix_value >= 15:
+            regime = "normal"
+            self.circuit_state["halt_entries"] = False
+            self._breaker_alert_flags["crisis"] = False
+        else:
+            regime = "low_vol"
+            self.circuit_state["halt_entries"] = False
+            self._breaker_alert_flags["crisis"] = False
+
+        self.circuit_state["regime"] = regime
+        self._apply_regime_adjustments(regime)
+
+    def _apply_regime_adjustments(self, regime: str) -> None:
+        """Adjust risk/entry thresholds based on volatility regime."""
+        # Reset to base profile values before applying overlays.
+        profile = (
+            str((self._active_account or {}).get("risk_profile", "moderate")).strip().lower()
+            if self._active_account
+            else "moderate"
+        )
+        self._apply_risk_profile(profile)
+
+        if regime != "elevated":
+            for strategy in self.strategies:
+                if strategy.name in self._base_strategy_min_credit:
+                    strategy.config["min_credit_pct"] = self._base_strategy_min_credit[strategy.name]
+            return
+
+        self.risk_manager.config.max_open_positions = max(
+            1, int(round(self.risk_manager.config.max_open_positions * 0.70))
+        )
+        for strategy in self.strategies:
+            base_credit = self._base_strategy_min_credit.get(strategy.name)
+            if base_credit is None:
+                continue
+            strategy.config["min_credit_pct"] = round(base_credit * 1.20, 4)
+
+    def _update_loss_breakers(self) -> None:
+        """Apply consecutive-loss and weekly-loss entry pauses."""
+        now = self._now_eastern()
+        closed = self._recent_closed_trades()
+        if not closed:
+            return
+
+        recent_three = closed[-3:]
+        if len(recent_three) == 3:
+            max_loss_hits = 0
+            for trade in recent_three:
+                pnl = float(trade.get("pnl", 0.0))
+                max_loss = abs(float(trade.get("max_loss", 0.0)) * max(1, int(trade.get("quantity", 1))) * 100.0)
+                if max_loss > 0 and pnl <= (-0.95 * max_loss):
+                    max_loss_hits += 1
+            if max_loss_hits == 3:
+                pause_until = now + timedelta(hours=24)
+                existing = self.circuit_state.get("consecutive_loss_pause_until")
+                existing_dt = None
+                if existing:
+                    try:
+                        existing_dt = datetime.fromisoformat(str(existing))
+                    except ValueError:
+                        existing_dt = None
+                if not existing_dt or now >= existing_dt:
+                    self.circuit_state["consecutive_loss_pause_until"] = pause_until.isoformat()
+                    if not self._breaker_alert_flags["consecutive_loss"]:
+                        self._alert(
+                            level="ERROR",
+                            title="Consecutive loss breaker",
+                            message=f"Pausing entries until {pause_until.isoformat()}",
+                        )
+                        self._breaker_alert_flags["consecutive_loss"] = True
+        else:
+            self._breaker_alert_flags["consecutive_loss"] = False
+
+        week_start = now.date() - timedelta(days=now.weekday())
+        weekly_loss = 0.0
+        for trade in closed:
+            close_date_raw = str(trade.get("close_date", ""))
+            close_date = close_date_raw.split("T", 1)[0]
+            try:
+                closed_day = datetime.strptime(close_date, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if closed_day >= week_start:
+                weekly_loss += float(trade.get("pnl", 0.0))
+
+        balance = max(1.0, float(self.risk_manager.portfolio.account_balance or 0.0))
+        weekly_limit = -0.05 * balance
+        if weekly_loss <= weekly_limit:
+            days_until_monday = (7 - now.weekday()) % 7 or 7
+            pause_until = datetime.combine(
+                now.date() + timedelta(days=days_until_monday),
+                datetime.min.time(),
+                tzinfo=EASTERN_TZ,
+            )
+            existing = self.circuit_state.get("weekly_loss_pause_until")
+            existing_dt = None
+            if existing:
+                try:
+                    existing_dt = datetime.fromisoformat(str(existing))
+                except ValueError:
+                    existing_dt = None
+            if not existing_dt or now >= existing_dt:
+                self.circuit_state["weekly_loss_pause_until"] = pause_until.isoformat()
+                if not self._breaker_alert_flags["weekly_loss"]:
+                    self._alert(
+                        level="ERROR",
+                        title="Weekly loss breaker",
+                        message=f"Weekly loss {weekly_loss:,.2f} breached 5% threshold. "
+                                f"Entries paused until {pause_until.isoformat()}",
+                    )
+                    self._breaker_alert_flags["weekly_loss"] = True
+        else:
+            self._breaker_alert_flags["weekly_loss"] = False
+
+    def _recent_closed_trades(self) -> list[dict]:
+        """Return closed trades from paper or live tracking."""
+        if self.is_paper and self.paper_trader:
+            closed = []
+            for trade in self.paper_trader.closed_trades:
+                if not isinstance(trade, dict):
+                    continue
+                closed.append(
+                    {
+                        "close_date": trade.get("close_date", ""),
+                        "pnl": float(trade.get("pnl", 0.0) or 0.0),
+                        "max_loss": float(trade.get("max_loss", 0.0) or 0.0),
+                        "quantity": int(trade.get("closed_quantity", trade.get("quantity", 1)) or 1),
+                    }
+                )
+            return sorted(closed, key=lambda t: str(t.get("close_date", "")))
+
+        if not self.live_ledger:
+            return []
+
+        closed_positions = self.live_ledger.list_positions(statuses={"closed", "closed_external"})
+        normalized = []
+        for pos in closed_positions:
+            if not isinstance(pos, dict):
+                continue
+            normalized.append(
+                {
+                    "close_date": pos.get("close_date", ""),
+                    "pnl": float(pos.get("realized_pnl", 0.0) or 0.0),
+                    "max_loss": float(pos.get("max_loss", 0.0) or 0.0),
+                    "quantity": int(pos.get("quantity", 1) or 1),
+                }
+            )
+        return sorted(normalized, key=lambda t: str(t.get("close_date", "")))
+
     # ── Market Hours Check ───────────────────────────────────────────
 
     @classmethod
@@ -423,8 +712,15 @@ class TradingBot:
             # Check exits on existing positions first
             self._check_exits()
 
+            # Update circuit breakers/regime state before considering new entries.
+            self._update_market_regime()
+            self._update_loss_breakers()
+
             # Scan for new entries
-            self._scan_for_entries()
+            if self._entries_allowed():
+                self._scan_for_entries()
+            else:
+                logger.warning("Entry scanning paused by circuit breaker state.")
 
             logger.info("Scan cycle complete.")
 
@@ -454,6 +750,13 @@ class TradingBot:
             "Portfolio: Balance=$%s | Open positions: %d | Daily P/L: $%.2f",
             f"{balance:,.2f}", len(positions), daily_pnl,
         )
+        self._equity_history.append(
+            {
+                "date": self._now_eastern().date().isoformat(),
+                "equity": round(float(balance), 2),
+            }
+        )
+        self._equity_history = self._equity_history[-365:]
 
     def _reconcile_live_orders(self) -> None:
         """Poll pending live orders and advance ledger state on terminal statuses."""
@@ -1024,14 +1327,55 @@ class TradingBot:
 
                 # Run each strategy
                 all_signals = []
+                technical_context = None
+                try:
+                    technical_context = self.technicals.get_context(symbol, self.schwab)
+                except Exception as exc:
+                    logger.debug("Technical context unavailable for %s: %s", symbol, exc)
                 for strategy in self.strategies:
                     signals = strategy.scan_for_entries(
-                        symbol, chain_data, underlying_price
+                        symbol,
+                        chain_data,
+                        underlying_price,
+                        technical_context=technical_context,
+                        market_context={},
                     )
+                    if technical_context is not None:
+                        tech_payload = technical_context.to_dict()
+                        for signal in signals:
+                            signal.metadata["technical_context"] = tech_payload
                     all_signals.extend(signals)
 
                 if not all_signals:
                     logger.info("No opportunities found on %s.", symbol)
+                    continue
+
+                if self.news_scanner:
+                    try:
+                        policy = self.news_scanner.trade_direction_policy(symbol)
+                    except Exception as exc:
+                        logger.debug("News policy unavailable for %s: %s", symbol, exc)
+                        policy = {"block_all": False, "allow_bull_put": True, "allow_bear_call": True}
+
+                    if policy.get("block_all"):
+                        logger.info(
+                            "Skipping %s: %s",
+                            symbol,
+                            policy.get("reason") or "news event risk",
+                        )
+                        continue
+
+                    filtered = []
+                    for signal in all_signals:
+                        if signal.strategy == "bull_put_spread" and not policy.get("allow_bull_put", True):
+                            continue
+                        if signal.strategy == "bear_call_spread" and not policy.get("allow_bear_call", True):
+                            continue
+                        filtered.append(signal)
+                    all_signals = filtered
+
+                if not all_signals:
+                    logger.info("No news-compliant opportunities found on %s.", symbol)
                     continue
 
                 # Sort by score and take the best
@@ -1069,6 +1413,9 @@ class TradingBot:
             all_exit_signals.extend(exit_signals)
 
         for signal in all_exit_signals:
+            if signal.action == "roll":
+                self._execute_roll(signal)
+                continue
             self._execute_exit(signal)
 
     def _refresh_paper_position_values(self) -> None:
@@ -1082,6 +1429,7 @@ class TradingBot:
 
         chain_cache: dict[str, dict] = {}
         position_marks: dict[str, float] = {}
+        position_meta: dict[str, dict] = {}
 
         for position in positions:
             position_id = position.get("position_id")
@@ -1097,12 +1445,16 @@ class TradingBot:
             if not chain_data:
                 continue
 
+            position_meta[position_id] = {
+                "underlying_price": float(chain_data.get("underlying_price", 0.0) or 0.0)
+            }
+
             mark = self._estimate_paper_position_value(position, chain_data)
             if mark is not None:
                 position_marks[position_id] = mark
 
-        if position_marks:
-            self.paper_trader.update_position_values(position_marks)
+        if position_marks or position_meta:
+            self.paper_trader.update_position_values(position_marks, position_meta=position_meta)
 
     def _estimate_paper_position_value(
         self, position: dict, chain_data: dict
@@ -1188,7 +1540,8 @@ class TradingBot:
         """Attempt to execute an entry trade after risk approval."""
         # Calculate position size
         quantity = self.risk_manager.calculate_position_size(signal)
-        signal.quantity = quantity
+        size_multiplier = max(0.1, float(signal.size_multiplier or 1.0))
+        signal.quantity = max(1, int(round(quantity * size_multiplier)))
 
         # Risk check
         approved, reason = self.risk_manager.approve_trade(signal)
@@ -1228,11 +1581,21 @@ class TradingBot:
                 details=details,
             )
             logger.info("Paper trade opened: %s", result)
+            review_id = signal.metadata.get("llm_review_id")
+            position_id = result.get("position_id")
+            if self.llm_advisor and review_id and position_id:
+                self.llm_advisor.bind_position(str(review_id), str(position_id))
             self.risk_manager.register_open_position(
                 symbol=signal.symbol,
                 max_loss_per_contract=effective_max_loss,
                 quantity=signal.quantity,
                 strategy=signal.strategy,
+                greeks={
+                    "net_delta": getattr(analysis, "net_delta", 0.0),
+                    "net_theta": getattr(analysis, "net_theta", 0.0),
+                    "net_gamma": getattr(analysis, "net_gamma", 0.0),
+                    "net_vega": getattr(analysis, "net_vega", 0.0),
+                },
             )
             return True
 
@@ -1242,11 +1605,21 @@ class TradingBot:
             max_loss_per_contract=effective_max_loss,
         )
         if opened:
+            review_id = signal.metadata.get("llm_review_id")
+            live_position_id = signal.metadata.get("live_position_id")
+            if self.llm_advisor and review_id and live_position_id:
+                self.llm_advisor.bind_position(str(review_id), str(live_position_id))
             self.risk_manager.register_open_position(
                 symbol=signal.symbol,
                 max_loss_per_contract=effective_max_loss,
                 quantity=signal.quantity,
                 strategy=signal.strategy,
+                greeks={
+                    "net_delta": getattr(analysis, "net_delta", 0.0),
+                    "net_theta": getattr(analysis, "net_theta", 0.0),
+                    "net_gamma": getattr(analysis, "net_gamma", 0.0),
+                    "net_vega": getattr(analysis, "net_vega", 0.0),
+                },
             )
         return opened
 
@@ -1264,6 +1637,10 @@ class TradingBot:
             "call_long_strike": analysis.call_long_strike,
             "probability_of_profit": analysis.probability_of_profit,
             "score": analysis.score,
+            "net_delta": getattr(analysis, "net_delta", 0.0),
+            "net_theta": getattr(analysis, "net_theta", 0.0),
+            "net_gamma": getattr(analysis, "net_gamma", 0.0),
+            "net_vega": getattr(analysis, "net_vega", 0.0),
         }
 
     def _review_entry_with_llm(self, signal: TradeSignal) -> bool:
@@ -1271,16 +1648,53 @@ class TradingBot:
         if not self.llm_advisor or signal.action != "open":
             return True
 
+        earnings_proximity = None
+        if signal.analysis is not None:
+            in_window, earnings_date = self.risk_manager.earnings_calendar.earnings_within_window(
+                signal.symbol,
+                signal.analysis.expiration,
+            )
+            if in_window:
+                earnings_proximity = {
+                    "in_window": True,
+                    "earnings_date": earnings_date,
+                    "expiration": signal.analysis.expiration,
+                }
+            else:
+                earnings_proximity = {"in_window": False}
+
+        sector_performance = signal.metadata.get("sector_performance")
+        if not isinstance(sector_performance, dict) or not sector_performance:
+            sector_performance = self._sector_performance_context(signal.symbol)
+
         context = {
             "trading_mode": self.config.trading_mode,
             "account_balance": self.risk_manager.portfolio.account_balance,
             "open_positions": len(self.risk_manager.portfolio.open_positions),
             "daily_pnl": self.risk_manager.portfolio.daily_pnl,
             "deployed_risk": self.risk_manager.portfolio.total_risk_deployed,
+            "technical_context": signal.metadata.get("technical_context", {}),
+            "iv_rank": signal.metadata.get("iv_rank"),
+            "iv_percentile": signal.metadata.get("iv_rank"),
+            "earnings_proximity": earnings_proximity,
+            "portfolio_exposure": {
+                "total_delta": self.risk_manager.portfolio.net_delta,
+                "total_theta": self.risk_manager.portfolio.net_theta,
+                "total_gamma": self.risk_manager.portfolio.net_gamma,
+                "total_vega": self.risk_manager.portfolio.net_vega,
+                "sector_concentration": self.risk_manager.portfolio.sector_risk,
+            },
+            "sector_performance": sector_performance,
         }
         if self.news_scanner:
             try:
-                context["news"] = self.news_scanner.build_context(signal.symbol)
+                news = self.news_scanner.build_context(signal.symbol)
+                context["news"] = news
+                context["news_sentiment_summary"] = {
+                    "symbol_sentiment": news.get("symbol_sentiment", 0.0),
+                    "market_sentiment": news.get("market_sentiment", 0.0),
+                    "dominant_market_topics": news.get("dominant_market_topics", []),
+                }
             except Exception as exc:
                 logger.warning(
                     "Failed to fetch news context for %s: %s",
@@ -1297,6 +1711,8 @@ class TradingBot:
 
             logger.warning("LLM review failed in advisory mode: %s", e)
             return True
+
+        signal.metadata["llm_review_id"] = decision.review_id
 
         if signal.quantity > 1 and decision.risk_adjustment < 1.0:
             adjusted_quantity = max(1, int(signal.quantity * decision.risk_adjustment))
@@ -1319,7 +1735,7 @@ class TradingBot:
                 "Trade REJECTED by LLM confidence gate: %.2f < %.2f | %s",
                 decision.confidence,
                 self.config.llm.min_confidence,
-                decision.reason,
+                decision.reasoning,
             )
             return False
 
@@ -1330,19 +1746,20 @@ class TradingBot:
                     signal.strategy,
                     signal.action,
                     signal.symbol,
-                    decision.reason,
+                    decision.reasoning,
                 )
                 return False
 
             logger.warning(
                 "LLM flagged trade but advisory mode allows execution: %s",
-                decision.reason,
+                decision.reasoning,
             )
         else:
             logger.info(
-                "LLM approved trade: %s (confidence %.2f)",
-                decision.reason,
-                decision.confidence,
+                "LLM %s trade: %s (confidence %.1f%%)",
+                decision.verdict,
+                decision.reasoning,
+                decision.confidence_pct,
             )
 
         return True
@@ -1355,29 +1772,49 @@ class TradingBot:
     ) -> bool:
         """Execute a real trade via Schwab API."""
         analysis = signal.analysis
+        if analysis is None:
+            return False
         quantity = signal.quantity
 
         try:
+            order_factory = None
+            spread_proxy = max(0.05, float(analysis.credit) * 0.20)
             if signal.strategy == "bull_put_spread":
-                order = self.schwab.build_bull_put_spread(
+                spread_proxy = max(
+                    0.05,
+                    abs(float(analysis.short_strike) - float(analysis.long_strike)) * 0.10,
+                )
+                order_factory = lambda price: self.schwab.build_bull_put_spread(
                     symbol=signal.symbol,
                     expiration=analysis.expiration,
                     short_strike=analysis.short_strike,
                     long_strike=analysis.long_strike,
                     quantity=quantity,
-                    price=analysis.credit,
+                    price=price,
                 )
             elif signal.strategy == "bear_call_spread":
-                order = self.schwab.build_bear_call_spread(
+                spread_proxy = max(
+                    0.05,
+                    abs(float(analysis.short_strike) - float(analysis.long_strike)) * 0.10,
+                )
+                order_factory = lambda price: self.schwab.build_bear_call_spread(
                     symbol=signal.symbol,
                     expiration=analysis.expiration,
                     short_strike=analysis.short_strike,
                     long_strike=analysis.long_strike,
                     quantity=quantity,
-                    price=analysis.credit,
+                    price=price,
                 )
             elif signal.strategy == "iron_condor":
-                order = self.schwab.build_iron_condor(
+                spread_proxy = max(
+                    0.05,
+                    max(
+                        abs(float(analysis.put_short_strike) - float(analysis.put_long_strike)),
+                        abs(float(analysis.call_long_strike) - float(analysis.call_short_strike)),
+                    )
+                    * 0.10,
+                )
+                order_factory = lambda price: self.schwab.build_iron_condor(
                     symbol=signal.symbol,
                     expiration=analysis.expiration,
                     put_long_strike=analysis.put_long_strike,
@@ -1385,7 +1822,7 @@ class TradingBot:
                     call_short_strike=analysis.call_short_strike,
                     call_long_strike=analysis.call_long_strike,
                     quantity=quantity,
-                    price=analysis.credit,
+                    price=price,
                 )
             elif signal.strategy == "covered_call":
                 if signal.analysis is None:
@@ -1403,23 +1840,44 @@ class TradingBot:
                     )
                     return False
 
-                order = self.schwab.build_covered_call_open(
+                order_factory = lambda price: self.schwab.build_covered_call_open(
                     symbol=signal.symbol,
                     expiration=analysis.expiration,
                     short_strike=analysis.short_strike,
                     quantity=quantity,
-                    price=analysis.credit,
+                    price=price,
                 )
             else:
                 logger.warning("Live execution not implemented for: %s", signal.strategy)
                 return False
 
-            result = self.schwab.place_order(order)
+            result = self.schwab.place_order_with_ladder(
+                order_factory=order_factory,
+                midpoint_price=float(analysis.credit),
+                spread_width=spread_proxy,
+                side="credit",
+                step_timeout_seconds=self.config.execution.entry_step_timeout_seconds,
+                max_attempts=self.config.execution.max_ladder_attempts,
+                shifts=list(self.config.execution.entry_ladder_shifts),
+                total_timeout_seconds=300,
+            )
             logger.info("LIVE order placed: %s", result)
+            status = str(result.get("status", "")).upper()
+            if status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                return False
+
+            self._record_execution_quality(
+                symbol=signal.symbol,
+                strategy=signal.strategy,
+                side="entry",
+                midpoint=float(result.get("midpoint_price", analysis.credit)),
+                fill_price=float(result.get("fill_price", result.get("requested_price", analysis.credit))),
+                status=status,
+            )
             if self.live_ledger and analysis is not None:
                 order_id = str(result.get("order_id", "")).strip()
                 if order_id:
-                    self.live_ledger.register_entry_order(
+                    live_position_id = self.live_ledger.register_entry_order(
                         strategy=signal.strategy,
                         symbol=signal.symbol,
                         quantity=quantity,
@@ -1429,11 +1887,12 @@ class TradingBot:
                         entry_order_id=order_id,
                         entry_order_status=str(result.get("status", "PLACED")),
                     )
+                    signal.metadata["live_position_id"] = live_position_id
                 else:
                     logger.warning(
                         "Live order missing broker order_id; recording as immediately open."
                     )
-                    self.live_ledger.register_entry_order(
+                    live_position_id = self.live_ledger.register_entry_order(
                         strategy=signal.strategy,
                         symbol=signal.symbol,
                         quantity=quantity,
@@ -1444,6 +1903,7 @@ class TradingBot:
                         entry_order_status="FILLED",
                         opened_at=self._now_eastern().isoformat(),
                     )
+                    signal.metadata["live_position_id"] = live_position_id
             return True
 
         except Exception as e:
@@ -1468,8 +1928,14 @@ class TradingBot:
             result = self.paper_trader.execute_close(
                 position_id=signal.position_id,
                 reason=signal.reason,
+                quantity=signal.quantity,
             )
             logger.info("Paper close result: %s", result)
+            if self.llm_advisor and result.get("status") == "FILLED":
+                self.llm_advisor.record_outcome(
+                    str(signal.position_id),
+                    float(result.get("pnl", 0.0) or 0.0),
+                )
         else:
             closed = self._execute_live_exit(signal)
             if not closed:
@@ -1477,6 +1943,52 @@ class TradingBot:
                     "Failed to submit live close order for %s.",
                     signal.position_id,
                 )
+
+    def _execute_roll(self, signal: TradeSignal) -> None:
+        """Handle a roll action as close-then-open with same strategy family."""
+        if not signal.position_id:
+            return
+
+        logger.info("ROLLING POSITION: %s | %s", signal.position_id, signal.reason)
+        close_signal = TradeSignal(
+            action="close",
+            strategy=signal.strategy,
+            symbol=signal.symbol,
+            position_id=signal.position_id,
+            reason=signal.reason,
+            quantity=signal.quantity,
+        )
+        self._execute_exit(close_signal)
+
+        chain_data, underlying_price = self._get_chain_data(signal.symbol)
+        if not chain_data or underlying_price <= 0:
+            return
+
+        technical_context = None
+        try:
+            technical_context = self.technicals.get_context(signal.symbol, self.schwab)
+        except Exception:
+            technical_context = None
+
+        candidate_signals: list[TradeSignal] = []
+        for strategy in self.strategies:
+            strategy_signals = strategy.scan_for_entries(
+                signal.symbol,
+                chain_data,
+                underlying_price,
+                technical_context=technical_context,
+                market_context={"roll_context": True},
+            )
+            for candidate in strategy_signals:
+                if candidate.strategy == signal.strategy and candidate.analysis and candidate.analysis.dte >= 20:
+                    candidate_signals.append(candidate)
+
+        candidate_signals.sort(
+            key=lambda item: item.analysis.score if item.analysis else 0.0,
+            reverse=True,
+        )
+        if candidate_signals:
+            self._try_execute_entry(candidate_signals[0])
 
     def _execute_live_exit(self, signal: TradeSignal) -> bool:
         """Execute a live exit order for a tracked strategy position."""
@@ -1505,39 +2017,43 @@ class TradingBot:
             return False
 
         quantity = max(1, int(tracked.get("quantity", 1)))
+        if signal.quantity > 0:
+            quantity = max(1, min(quantity, int(signal.quantity)))
         strategy = tracked.get("strategy", "")
         symbol = tracked.get("symbol", signal.symbol)
         debit_limit = self._resolve_live_close_debit(tracked)
 
         try:
+            order_factory = None
+            spread_proxy = max(0.05, debit_limit * 0.20)
             if strategy == "bull_put_spread":
-                order = self.schwab.build_bull_put_spread_close(
+                order_factory = lambda price: self.schwab.build_bull_put_spread_close(
                     symbol=symbol,
                     expiration=expiration,
                     short_strike=float(details.get("short_strike", 0.0)),
                     long_strike=float(details.get("long_strike", 0.0)),
                     quantity=quantity,
-                    price=debit_limit,
+                    price=price,
                 )
             elif strategy == "bear_call_spread":
-                order = self.schwab.build_bear_call_spread_close(
+                order_factory = lambda price: self.schwab.build_bear_call_spread_close(
                     symbol=symbol,
                     expiration=expiration,
                     short_strike=float(details.get("short_strike", 0.0)),
                     long_strike=float(details.get("long_strike", 0.0)),
                     quantity=quantity,
-                    price=debit_limit,
+                    price=price,
                 )
             elif strategy == "covered_call":
-                order = self.schwab.build_covered_call_close(
+                order_factory = lambda price: self.schwab.build_covered_call_close(
                     symbol=symbol,
                     expiration=expiration,
                     short_strike=float(details.get("short_strike", 0.0)),
                     quantity=quantity,
-                    price=debit_limit,
+                    price=price,
                 )
             elif strategy == "iron_condor":
-                order = self.schwab.build_iron_condor_close(
+                order_factory = lambda price: self.schwab.build_iron_condor_close(
                     symbol=symbol,
                     expiration=expiration,
                     put_long_strike=float(details.get("put_long_strike", 0.0)),
@@ -1545,14 +2061,35 @@ class TradingBot:
                     call_short_strike=float(details.get("call_short_strike", 0.0)),
                     call_long_strike=float(details.get("call_long_strike", 0.0)),
                     quantity=quantity,
-                    price=debit_limit,
+                    price=price,
                 )
             else:
                 logger.warning("Live exit not implemented for strategy: %s", strategy)
                 return False
 
-            result = self.schwab.place_order(order)
+            result = self.schwab.place_order_with_ladder(
+                order_factory=order_factory,
+                midpoint_price=debit_limit,
+                spread_width=spread_proxy,
+                side="debit",
+                step_timeout_seconds=self.config.execution.exit_step_timeout_seconds,
+                max_attempts=self.config.execution.max_ladder_attempts,
+                shifts=list(self.config.execution.exit_ladder_shifts),
+                total_timeout_seconds=180,
+            )
             logger.info("LIVE exit order placed: %s", result)
+            status = str(result.get("status", "")).upper()
+            if status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                return False
+
+            self._record_execution_quality(
+                symbol=symbol,
+                strategy=strategy,
+                side="exit",
+                midpoint=float(result.get("midpoint_price", debit_limit)),
+                fill_price=float(result.get("fill_price", result.get("requested_price", debit_limit))),
+                status=status,
+            )
 
             order_id = str(result.get("order_id", "")).strip()
             if not order_id:
@@ -1562,11 +2099,20 @@ class TradingBot:
                 )
                 return False
 
-            self.live_ledger.register_exit_order(
-                position_id=signal.position_id,
-                exit_order_id=order_id,
-                reason=signal.reason,
-            )
+            tracked_quantity = max(1, int(tracked.get("quantity", 1)))
+            if quantity < tracked_quantity:
+                self.live_ledger.register_exit_order(
+                    position_id=signal.position_id,
+                    exit_order_id=order_id,
+                    reason=signal.reason,
+                    quantity=quantity,
+                )
+            else:
+                self.live_ledger.register_exit_order(
+                    position_id=signal.position_id,
+                    exit_order_id=order_id,
+                    reason=signal.reason,
+                )
             return True
         except Exception as exc:
             logger.error("Failed to place live close order: %s", exc)
@@ -1578,6 +2124,55 @@ class TradingBot:
                 context={"strategy": strategy, "symbol": symbol, "position_id": signal.position_id},
             )
             return False
+
+    def _sector_performance_context(self, symbol: str) -> dict:
+        """Compute symbol/sector/SPY relative-strength context for LLM decisions."""
+        symbol_key = str(symbol or "").upper().strip()
+        if not symbol_key:
+            return {}
+
+        sector_etf = self._sector_etf_for_symbol(symbol_key)
+        symbol_return = self._one_month_return(symbol_key)
+        sector_return = self._one_month_return(sector_etf)
+        spy_return = self._one_month_return("SPY")
+
+        return {
+            "symbol": symbol_key,
+            "sector_etf": sector_etf,
+            "symbol_1m_return": round(symbol_return, 6),
+            "sector_1m_return": round(sector_return, 6),
+            "spy_1m_return": round(spy_return, 6),
+            "sector_vs_spy": round(sector_return - spy_return, 6),
+            "symbol_vs_sector": round(symbol_return - sector_return, 6),
+        }
+
+    def _one_month_return(self, symbol: str) -> float:
+        """Approximate one-month return from daily closes."""
+        try:
+            bars = self.schwab.get_price_history(symbol, days=40)
+        except Exception:
+            return 0.0
+        if not isinstance(bars, list):
+            return 0.0
+
+        closes = [
+            safe_float(row.get("close", 0.0), 0.0)
+            for row in bars
+            if isinstance(row, dict)
+        ]
+        closes = [value for value in closes if value > 0]
+        if len(closes) < 2:
+            return 0.0
+
+        return (closes[-1] / closes[0]) - 1.0
+
+    @staticmethod
+    def _sector_etf_for_symbol(symbol: str) -> str:
+        symbol_key = str(symbol).upper().strip()
+        for etf, members in SECTOR_ETF_BY_SYMBOL.items():
+            if symbol_key in members:
+                return etf
+        return "SPY"
 
     @staticmethod
     def _resolve_live_close_debit(position: dict) -> float:
@@ -1591,6 +2186,74 @@ class TradingBot:
             return round(max(0.01, entry_credit), 2)
 
         return 0.05
+
+    def _record_execution_quality(
+        self,
+        *,
+        symbol: str,
+        strategy: str,
+        side: str,
+        midpoint: float,
+        fill_price: float,
+        status: str,
+    ) -> None:
+        """Persist per-trade execution quality/slippage stats."""
+        path = Path("bot/data/execution_quality.json")
+        payload = load_json(path, {"fills": [], "meta": {}})
+        if not isinstance(payload, dict):
+            payload = {"fills": [], "meta": {}}
+        fills = payload.get("fills")
+        if not isinstance(fills, list):
+            fills = []
+            payload["fills"] = fills
+
+        midpoint_value = float(midpoint or 0.0)
+        fill_value = float(fill_price or midpoint_value)
+        if side == "entry":
+            slippage = midpoint_value - fill_value
+        else:
+            slippage = fill_value - midpoint_value
+
+        fills.append(
+            {
+                "timestamp": self._now_eastern().isoformat(),
+                "symbol": symbol,
+                "strategy": strategy,
+                "side": side,
+                "midpoint": round(midpoint_value, 4),
+                "fill_price": round(fill_value, 4),
+                "slippage": round(slippage, 4),
+                "status": status,
+            }
+        )
+        payload["fills"] = fills[-5000:]
+
+        week_key = self._now_eastern().strftime("%Y-W%W")
+        week_fills = []
+        for item in payload["fills"]:
+            ts_raw = str(item.get("timestamp", ""))
+            try:
+                ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.strftime("%Y-W%W") == week_key:
+                week_fills.append(item)
+        if week_fills:
+            avg = sum(float(item.get("slippage", 0.0) or 0.0) for item in week_fills) / len(week_fills)
+            meta = payload.get("meta")
+            if not isinstance(meta, dict):
+                meta = {}
+                payload["meta"] = meta
+            if meta.get("last_logged_week") != week_key:
+                logger.info(
+                    "Weekly average slippage: %.4f across %d fills",
+                    avg,
+                    len(week_fills),
+                )
+                meta["last_logged_week"] = week_key
+                meta["last_week_avg_slippage"] = round(avg, 4)
+
+        dump_json(path, payload)
 
     # ── Data Fetching ────────────────────────────────────────────────
 
@@ -2022,6 +2685,8 @@ class TradingBot:
             chain_data = chain_cache.get(symbol, {})
             if not chain_data:
                 continue
+            underlying_price = float(chain_data.get("underlying_price", 0.0) or 0.0)
+            position["underlying_price"] = underlying_price
 
             mark = self._estimate_paper_position_value(position, chain_data)
             dte_remaining = position.get("dte_remaining")
@@ -2043,6 +2708,7 @@ class TradingBot:
                 position_id,
                 current_value=mark,
                 dte_remaining=dte_remaining if isinstance(dte_remaining, int) else None,
+                underlying_price=underlying_price,
             )
 
     def _resolve_external_close_metadata(self, position: dict, symbols: set[str]) -> dict:
@@ -2174,6 +2840,8 @@ class TradingBot:
         # Daily performance report
         schedule.every().day.at("16:05", tz="America/New_York").do(self._daily_report)
         logger.info("Scheduled daily report at 16:05 ET")
+        schedule.every().day.at("16:10", tz="America/New_York").do(self._scheduled_dashboard)
+        logger.info("Scheduled dashboard generation at 16:10 ET")
 
     def _scheduled_scan(self) -> None:
         """Scan wrapper that checks market hours."""
@@ -2219,6 +2887,8 @@ class TradingBot:
             logger.info("Return: %.2f%%", summary.get("return_pct", 0))
             logger.info("Open positions: %d", summary["open_positions"])
             logger.info("=" * 60)
+            if self.llm_advisor:
+                self.llm_advisor.log_weekly_hit_rate()
             return
 
         ledger_summary = (
@@ -2249,6 +2919,123 @@ class TradingBot:
             f"{self._compute_live_daily_pnl():,.2f}",
         )
         logger.info("=" * 60)
+        if self.llm_advisor:
+            self.llm_advisor.log_weekly_hit_rate()
+
+    def _scheduled_dashboard(self) -> None:
+        """Scheduled dashboard generation wrapper."""
+        try:
+            self.generate_dashboard()
+        except Exception as exc:
+            logger.error("Dashboard generation failed: %s", exc)
+
+    def generate_dashboard(self) -> str:
+        """Generate dashboard HTML from current paper/live state."""
+        closed_trades = self._recent_closed_trades()
+        strategy_breakdown: dict[str, dict] = {}
+        monthly: dict[str, float] = {}
+        winners: list[dict] = []
+        losers: list[dict] = []
+
+        source_positions = []
+        if self.is_paper and self.paper_trader:
+            source_positions = self.paper_trader.get_positions()
+            closed_source = self.paper_trader.closed_trades
+        else:
+            source_positions = self.live_ledger.list_positions(statuses={"open", "opening", "closing"}) if self.live_ledger else []
+            closed_source = self.live_ledger.list_positions(statuses={"closed", "closed_external"}) if self.live_ledger else []
+
+        for trade in closed_source:
+            pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
+            strategy = str(trade.get("strategy", "unknown"))
+            close_date = str(trade.get("close_date", ""))
+            month = close_date[:7] if len(close_date) >= 7 else "unknown"
+            monthly[month] = monthly.get(month, 0.0) + pnl
+
+            entry = strategy_breakdown.setdefault(strategy, {"wins": 0, "count": 0, "total_pnl": 0.0})
+            entry["count"] += 1
+            if pnl > 0:
+                entry["wins"] += 1
+            entry["total_pnl"] += pnl
+
+            row = {"symbol": trade.get("symbol", ""), "pnl": pnl}
+            (winners if pnl >= 0 else losers).append(row)
+
+        strategy_view = {}
+        for strategy, stats in strategy_breakdown.items():
+            count = max(1, int(stats["count"]))
+            strategy_view[strategy] = {
+                "win_rate": (stats["wins"] / count) * 100.0,
+                "avg_pnl": stats["total_pnl"] / count,
+                "total_pnl": stats["total_pnl"],
+            }
+
+        risk_metrics = self._compute_equity_risk_metrics(self._equity_history)
+        sector_total = sum(self.risk_manager.portfolio.sector_risk.values()) or 1.0
+        sector_exposure = {
+            sector: round(value / sector_total * 100.0, 2)
+            for sector, value in self.risk_manager.portfolio.sector_risk.items()
+        }
+
+        payload = {
+            "equity_curve": self._equity_history,
+            "monthly_pnl": monthly,
+            "strategy_breakdown": strategy_view,
+            "top_winners": sorted(winners, key=lambda row: row["pnl"], reverse=True)[:5],
+            "top_losers": sorted(losers, key=lambda row: row["pnl"])[:5],
+            "risk_metrics": risk_metrics,
+            "portfolio_greeks": self.risk_manager.get_portfolio_greeks(),
+            "sector_exposure": sector_exposure,
+            "circuit_breakers": self.circuit_state,
+            "closed_trades": len(closed_trades),
+            "open_positions": len(source_positions),
+        }
+        return generate_dashboard(payload)
+
+    @staticmethod
+    def _compute_equity_risk_metrics(equity_history: list[dict]) -> dict:
+        if not equity_history:
+            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0}
+
+        values = [float(point.get("equity", 0.0) or 0.0) for point in equity_history if point.get("equity") is not None]
+        if len(values) < 2:
+            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0}
+
+        returns = []
+        for prev, current in zip(values[:-1], values[1:]):
+            if prev > 0:
+                returns.append((current / prev) - 1.0)
+        if not returns:
+            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0}
+
+        mean_ret = sum(returns) / len(returns)
+        variance = sum((value - mean_ret) ** 2 for value in returns) / max(1, (len(returns) - 1))
+        std = variance ** 0.5
+        downside = [value for value in returns if value < 0]
+        downside_std = (
+            (sum(value ** 2 for value in downside) / max(1, len(downside))) ** 0.5
+            if downside
+            else 0.0
+        )
+
+        peak = values[0]
+        max_drawdown = 0.0
+        for value in values:
+            peak = max(peak, value)
+            if peak > 0:
+                max_drawdown = min(max_drawdown, (value - peak) / peak)
+        current_drawdown = 0.0
+        if peak > 0:
+            current_drawdown = (values[-1] - peak) / peak
+
+        sharpe = (mean_ret / std * (252 ** 0.5)) if std > 0 else 0.0
+        sortino = (mean_ret / downside_std * (252 ** 0.5)) if downside_std > 0 else 0.0
+        return {
+            "sharpe": round(sharpe, 4),
+            "sortino": round(sortino, 4),
+            "max_drawdown": abs(round(max_drawdown, 6)),
+            "current_drawdown": abs(round(current_drawdown, 6)),
+        }
 
     def run(self) -> None:
         """Start the fully automated trading loop.

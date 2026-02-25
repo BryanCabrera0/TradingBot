@@ -108,11 +108,13 @@ class LiveTradeLedger:
             "exit_order_id": "",
             "exit_order_status": "",
             "exit_reason": "",
+            "exit_order_quantity": 0,
             "exit_filled_quantity": 0.0,
             "close_date": "",
             "close_value": 0.0,
             "realized_pnl": 0.0,
             "last_reconciled": now_iso,
+            "partial_closed": False,
         }
 
         self.positions.append(record)
@@ -125,6 +127,7 @@ class LiveTradeLedger:
         position_id: str,
         exit_order_id: str,
         reason: str,
+        quantity: Optional[int] = None,
     ) -> bool:
         """Attach an exit order to an open position."""
         position = self.get_position(position_id)
@@ -135,6 +138,8 @@ class LiveTradeLedger:
         position["exit_order_id"] = exit_order_id
         position["exit_order_status"] = "PLACED"
         position["exit_reason"] = reason
+        if quantity is not None:
+            position["exit_order_quantity"] = max(1, safe_int(quantity, 1))
         position["last_reconciled"] = datetime.now().isoformat()
         self._save_state()
         return True
@@ -173,6 +178,7 @@ class LiveTradeLedger:
         *,
         current_value: Optional[float] = None,
         dte_remaining: Optional[int] = None,
+        underlying_price: Optional[float] = None,
     ) -> None:
         """Update mark and DTE for a tracked position."""
         position = self.get_position(position_id)
@@ -183,6 +189,8 @@ class LiveTradeLedger:
             position["current_value"] = round(max(0.0, safe_float(current_value, 0.0)), 2)
         if dte_remaining is not None:
             position["dte_remaining"] = safe_int(dte_remaining, 0)
+        if underlying_price is not None:
+            position["underlying_price"] = round(max(0.0, safe_float(underlying_price, 0.0)), 4)
         position["last_reconciled"] = datetime.now().isoformat()
         self._save_state()
 
@@ -273,18 +281,39 @@ class LiveTradeLedger:
 
             if normalized == "FILLED":
                 quantity = max(1, safe_int(position.get("quantity", 1), 1))
+                close_quantity = max(
+                    1,
+                    min(
+                        quantity,
+                        safe_int(position.get("exit_order_quantity", quantity), quantity),
+                    ),
+                )
                 entry_credit = safe_float(position.get("entry_credit", 0.0), 0.0)
                 debit = safe_float(close_value, safe_float(position.get("current_value", 0.0), 0.0))
                 position["close_value"] = round(max(0.0, debit), 2)
-                position["realized_pnl"] = round((entry_credit - debit) * quantity * 100, 2)
-                position["status"] = "closed"
-                position["close_date"] = filled_at or datetime.now().isoformat()
-                position["exit_filled_quantity"] = float(quantity)
+                realized = (entry_credit - debit) * close_quantity * 100
+                position["realized_pnl"] = round(
+                    safe_float(position.get("realized_pnl", 0.0), 0.0) + realized,
+                    2,
+                )
+                position["exit_filled_quantity"] = float(close_quantity)
+                if close_quantity >= quantity:
+                    position["status"] = "closed"
+                    position["close_date"] = filled_at or datetime.now().isoformat()
+                else:
+                    position["quantity"] = quantity - close_quantity
+                    position["status"] = "open"
+                    position["partial_closed"] = True
+                    position["exit_order_id"] = ""
+                    position["exit_order_status"] = ""
+                    position["exit_reason"] = ""
+                    position["exit_order_quantity"] = 0
             elif normalized in {"CANCELED", "REJECTED", "EXPIRED"}:
                 position["status"] = "open"
                 position["exit_order_id"] = ""
                 position["exit_order_status"] = normalized
                 position["exit_reason"] = ""
+                position["exit_order_quantity"] = 0
 
             changed = True
 

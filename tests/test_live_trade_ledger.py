@@ -110,6 +110,38 @@ class LiveTradeLedgerTests(unittest.TestCase):
             self.assertEqual(closed["status"], "closed_external")
             self.assertEqual(closed["realized_pnl"], 100.0)
 
+    def test_partial_exit_fill_keeps_position_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger = LiveTradeLedger(state_file=str(Path(tmp_dir) / "live_ledger.json"))
+            position_id = ledger.register_entry_order(
+                strategy="bull_put_spread",
+                symbol="SPY",
+                quantity=3,
+                max_loss=4.0,
+                entry_credit=1.2,
+                details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95},
+                entry_order_id="",
+                entry_order_status="FILLED",
+                opened_at="2026-02-23T09:45:00-05:00",
+            )
+            ledger.register_exit_order(
+                position_id=position_id,
+                exit_order_id="exit-partial",
+                reason="scale out",
+                quantity=1,
+            )
+
+            ledger.reconcile_exit_order(
+                "exit-partial",
+                status="FILLED",
+                filled_at="2026-02-23T10:30:00-05:00",
+                close_value=0.6,
+            )
+            updated = ledger.get_position(position_id)
+            self.assertEqual(updated["status"], "open")
+            self.assertEqual(updated["quantity"], 2)
+            self.assertTrue(updated["partial_closed"])
+
 
 if __name__ == "__main__":
     unittest.main()

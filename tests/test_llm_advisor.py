@@ -141,6 +141,31 @@ class LLMAdvisorTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("missing", message.lower())
 
+    def test_retry_when_initial_response_is_not_json(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
+        advisor._query_model = mock.Mock(
+            side_effect=[
+                "bad response",
+                '{"verdict":"approve","confidence":85,"reasoning":"ok","suggested_adjustment":null}',
+            ]
+        )
+
+        decision = advisor.review_trade(make_signal(), {})
+
+        self.assertTrue(decision.approve)
+        self.assertEqual(advisor._query_model.call_count, 2)
+
+    def test_parse_new_verdict_schema(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
+        advisor._query_model = mock.Mock(
+            return_value='{"verdict":"reduce_size","confidence":75,"reasoning":"event risk","suggested_adjustment":"reduce 40%"}'
+        )
+
+        decision = advisor.review_trade(make_signal(), {})
+
+        self.assertEqual(decision.verdict, "reduce_size")
+        self.assertLess(decision.risk_adjustment, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

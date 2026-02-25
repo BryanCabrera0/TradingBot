@@ -8,13 +8,13 @@ from bot.orchestrator import TradingBot
 from bot.strategies.base import TradeSignal
 
 
-def make_signal() -> TradeSignal:
+def make_signal(symbol: str = "SPY") -> TradeSignal:
     return TradeSignal(
         action="open",
         strategy="bull_put_spread",
-        symbol="SPY",
+        symbol=symbol,
         analysis=SpreadAnalysis(
-            symbol="SPY",
+            symbol=symbol,
             strategy="bull_put_spread",
             expiration="2026-03-20",
             dte=30,
@@ -101,6 +101,37 @@ class OrchestratorLLMTests(unittest.TestCase):
             bot.risk_manager.portfolio.total_risk_deployed,
             signal.analysis.max_loss * 100,
         )
+
+    def test_llm_context_includes_sector_relative_strength(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.risk_manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        bot.llm_advisor = mock.Mock()
+        bot.llm_advisor.review_trade.return_value = LLMDecision(
+            approve=True,
+            confidence=0.9,
+            risk_adjustment=1.0,
+            reason="ok",
+        )
+
+        prices = {
+            "AAPL": [{"close": 100.0}, {"close": 110.0}],
+            "XLK": [{"close": 50.0}, {"close": 52.0}],
+            "SPY": [{"close": 400.0}, {"close": 404.0}],
+        }
+        bot.schwab.get_price_history = mock.Mock(
+            side_effect=lambda symbol, days=40: prices.get(symbol, [])
+        )
+
+        allowed = bot._review_entry_with_llm(make_signal("AAPL"))
+
+        self.assertTrue(allowed)
+        _, context = bot.llm_advisor.review_trade.call_args.args
+        sector = context["sector_performance"]
+        self.assertEqual(sector["sector_etf"], "XLK")
+        self.assertGreater(sector["sector_vs_spy"], 0.0)
+        self.assertGreater(sector["symbol_vs_sector"], 0.0)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,13 @@ SECRET_PLACEHOLDER_MARKERS = ("your_", "_here", "changeme")
 
 
 @dataclass
+class SchwabAccountConfig:
+    name: str = ""
+    hash: str = ""
+    risk_profile: str = "moderate"
+
+
+@dataclass
 class SchwabConfig:
     app_key: str = ""
     app_secret: str = ""
@@ -21,6 +28,7 @@ class SchwabConfig:
     token_path: str = "./token.json"
     account_hash: str = ""
     account_index: int = -1
+    accounts: list[SchwabAccountConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -79,6 +87,16 @@ class ScannerConfig:
     max_consecutive_errors: int = 20
     # Optional hard cap on scanned universe size (0 = disabled)
     max_symbols_per_scan: int = 0
+    # Optional symbol blacklist never scanned/traded
+    blacklist: list = field(default_factory=list)
+    # Relative contribution of movers API ranking boost
+    movers_weight: float = 0.15
+    # Relative contribution of sector-rotation boost
+    sector_rotation_weight: float = 0.15
+    # Relative contribution of relative-strength boost
+    relative_strength_weight: float = 0.20
+    # Relative contribution of option-liquidity boost
+    options_liquidity_weight: float = 0.15
 
 
 @dataclass
@@ -90,6 +108,12 @@ class RiskConfig:
     min_account_balance: float = 5000.0
     max_daily_loss_pct: float = 3.0
     covered_call_notional_risk_pct: float = 20.0
+    # Portfolio greek/correlation risk controls
+    max_portfolio_delta_abs: float = 50.0
+    max_portfolio_vega_pct_of_account: float = 0.5
+    max_sector_risk_pct: float = 40.0
+    correlation_lookback_days: int = 60
+    correlation_threshold: float = 0.8
 
 
 @dataclass
@@ -108,6 +132,11 @@ class ExecutionConfig:
     cancel_stale_orders: bool = True
     stale_order_minutes: int = 20
     include_partials_in_ledger: bool = True
+    entry_step_timeout_seconds: int = 90
+    exit_step_timeout_seconds: int = 60
+    max_ladder_attempts: int = 3
+    entry_ladder_shifts: list = field(default_factory=lambda: [0.0, 0.25, 0.50])
+    exit_ladder_shifts: list = field(default_factory=lambda: [0.0, 0.25, 0.50])
 
 
 @dataclass
@@ -122,6 +151,7 @@ class LLMConfig:
     timeout_seconds: int = 20
     temperature: float = 0.1
     min_confidence: float = 0.55
+    track_record_file: str = "bot/data/llm_track_record.json"
 
 
 @dataclass
@@ -134,6 +164,9 @@ class NewsConfig:
     max_market_headlines: int = 15
     include_symbol_news: bool = True
     include_market_news: bool = True
+    finnhub_api_key: str = ""
+    llm_sentiment_enabled: bool = True
+    llm_sentiment_cache_seconds: int = 1800
     market_queries: list = field(
         default_factory=lambda: [
             "stock market",
@@ -224,6 +257,10 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.llm.min_confidence = _env_float(
         "LLM_MIN_CONFIDENCE", cfg.llm.min_confidence, minimum=0.0, maximum=1.0
     )
+    cfg.llm.track_record_file = os.getenv(
+        "LLM_TRACK_RECORD_FILE",
+        cfg.llm.track_record_file,
+    )
     cfg.news.enabled = _env_bool("NEWS_ENABLED", cfg.news.enabled)
     cfg.news.cache_seconds = _env_int(
         "NEWS_CACHE_SECONDS", cfg.news.cache_seconds, minimum=0
@@ -242,6 +279,19 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     )
     cfg.news.include_market_news = _env_bool(
         "NEWS_INCLUDE_MARKET_NEWS", cfg.news.include_market_news
+    )
+    cfg.news.finnhub_api_key = os.getenv(
+        "FINNHUB_API_KEY",
+        cfg.news.finnhub_api_key,
+    )
+    cfg.news.llm_sentiment_enabled = _env_bool(
+        "NEWS_LLM_SENTIMENT_ENABLED",
+        cfg.news.llm_sentiment_enabled,
+    )
+    cfg.news.llm_sentiment_cache_seconds = _env_int(
+        "NEWS_LLM_SENTIMENT_CACHE_SECONDS",
+        cfg.news.llm_sentiment_cache_seconds,
+        minimum=0,
     )
     cfg.execution.cancel_stale_orders = _env_bool(
         "EXECUTION_CANCEL_STALE_ORDERS", cfg.execution.cancel_stale_orders
@@ -276,6 +326,28 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
     """Apply raw YAML dict onto the BotConfig."""
     cfg.trading_mode = raw.get("trading_mode", cfg.trading_mode)
     cfg.watchlist = raw.get("watchlist", cfg.watchlist)
+
+    schwab = raw.get("schwab", {})
+    if schwab:
+        for key, val in schwab.items():
+            if hasattr(cfg.schwab, key):
+                setattr(cfg.schwab, key, val)
+
+    accounts = raw.get("accounts", [])
+    if isinstance(accounts, list):
+        normalized_accounts: list[SchwabAccountConfig] = []
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            normalized_accounts.append(
+                SchwabAccountConfig(
+                    name=str(account.get("name", "")).strip(),
+                    hash=str(account.get("hash", "")).strip(),
+                    risk_profile=str(account.get("risk_profile", "moderate")).strip(),
+                )
+            )
+        if normalized_accounts:
+            cfg.schwab.accounts = normalized_accounts
 
     strats = raw.get("strategies", {})
 
@@ -424,7 +496,7 @@ def _normalize_config(cfg: BotConfig) -> None:
 
     cfg.llm.provider = _normalize_choice(
         cfg.llm.provider,
-        allowed={"ollama", "openai"},
+        allowed={"ollama", "openai", "anthropic"},
         default="ollama",
         field_name="llm.provider",
     )
@@ -466,9 +538,18 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.scanner.max_retry_attempts = max(0, int(cfg.scanner.max_retry_attempts))
     cfg.scanner.max_consecutive_errors = max(1, int(cfg.scanner.max_consecutive_errors))
     cfg.scanner.max_symbols_per_scan = max(0, int(cfg.scanner.max_symbols_per_scan))
+    cfg.scanner.blacklist = _normalize_symbol_list(cfg.scanner.blacklist, default=[])
+    cfg.scanner.movers_weight = max(0.0, min(1.0, float(cfg.scanner.movers_weight)))
+    cfg.scanner.sector_rotation_weight = max(0.0, min(1.0, float(cfg.scanner.sector_rotation_weight)))
+    cfg.scanner.relative_strength_weight = max(0.0, min(1.0, float(cfg.scanner.relative_strength_weight)))
+    cfg.scanner.options_liquidity_weight = max(0.0, min(1.0, float(cfg.scanner.options_liquidity_weight)))
     cfg.llm.timeout_seconds = max(1, int(cfg.llm.timeout_seconds))
     cfg.llm.temperature = max(0.0, min(2.0, float(cfg.llm.temperature)))
     cfg.llm.min_confidence = max(0.0, min(1.0, float(cfg.llm.min_confidence)))
+    cfg.llm.track_record_file = str(cfg.llm.track_record_file or "bot/data/llm_track_record.json")
+    if cfg.llm.provider == "anthropic":
+        if not str(cfg.llm.model).strip() or str(cfg.llm.model).strip().lower().startswith("gpt-"):
+            cfg.llm.model = "claude-sonnet-4-20250514"
 
     cfg.news.provider = _normalize_choice(
         cfg.news.provider,
@@ -482,6 +563,11 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.news.max_market_headlines = max(1, int(cfg.news.max_market_headlines))
     cfg.news.include_symbol_news = bool(cfg.news.include_symbol_news)
     cfg.news.include_market_news = bool(cfg.news.include_market_news)
+    cfg.news.finnhub_api_key = _sanitize_secret(
+        cfg.news.finnhub_api_key, field_name="FINNHUB_API_KEY"
+    )
+    cfg.news.llm_sentiment_enabled = bool(cfg.news.llm_sentiment_enabled)
+    cfg.news.llm_sentiment_cache_seconds = max(0, int(cfg.news.llm_sentiment_cache_seconds))
     cfg.news.market_queries = _normalize_string_list(
         cfg.news.market_queries,
         default=[
@@ -503,6 +589,23 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.alerts.require_in_live = bool(cfg.alerts.require_in_live)
     cfg.log_max_bytes = max(1024, int(cfg.log_max_bytes))
     cfg.log_backup_count = max(1, int(cfg.log_backup_count))
+    cfg.execution.entry_step_timeout_seconds = max(10, int(cfg.execution.entry_step_timeout_seconds))
+    cfg.execution.exit_step_timeout_seconds = max(10, int(cfg.execution.exit_step_timeout_seconds))
+    cfg.execution.max_ladder_attempts = max(1, int(cfg.execution.max_ladder_attempts))
+    cfg.execution.entry_ladder_shifts = _normalize_float_list(
+        cfg.execution.entry_ladder_shifts,
+        default=[0.0, 0.25, 0.50],
+    )
+    cfg.execution.exit_ladder_shifts = _normalize_float_list(
+        cfg.execution.exit_ladder_shifts,
+        default=[0.0, 0.25, 0.50],
+    )
+    cfg.risk.max_portfolio_delta_abs = max(0.0, float(cfg.risk.max_portfolio_delta_abs))
+    cfg.risk.max_portfolio_vega_pct_of_account = max(0.0, float(cfg.risk.max_portfolio_vega_pct_of_account))
+    cfg.risk.max_sector_risk_pct = max(0.0, min(100.0, float(cfg.risk.max_sector_risk_pct)))
+    cfg.risk.correlation_lookback_days = max(20, int(cfg.risk.correlation_lookback_days))
+    cfg.risk.correlation_threshold = max(0.0, min(1.0, float(cfg.risk.correlation_threshold)))
+    cfg.schwab.accounts = _normalize_accounts(cfg.schwab.accounts)
 
 
 def _normalize_choice(
@@ -577,6 +680,61 @@ def _normalize_string_list(value: object, default: list[str]) -> list[str]:
         normalized.append(text)
 
     return normalized or default
+
+
+def _normalize_float_list(value: object, default: list[float]) -> list[float]:
+    """Normalize a small list of bounded float values."""
+    if not isinstance(value, list):
+        return list(default)
+
+    normalized: list[float] = []
+    for raw in value:
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            continue
+        normalized.append(max(0.0, min(1.0, parsed)))
+
+    return normalized or list(default)
+
+
+def _normalize_accounts(value: object) -> list[SchwabAccountConfig]:
+    """Normalize configured multi-account definitions."""
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[SchwabAccountConfig] = []
+    seen_hashes: set[str] = set()
+    for raw in value:
+        if isinstance(raw, SchwabAccountConfig):
+            account = raw
+        elif isinstance(raw, dict):
+            account = SchwabAccountConfig(
+                name=str(raw.get("name", "")).strip(),
+                hash=str(raw.get("hash", "")).strip(),
+                risk_profile=str(raw.get("risk_profile", "moderate")).strip(),
+            )
+        else:
+            continue
+
+        account_hash = _sanitize_secret(account.hash, field_name="accounts.hash")
+        if not account_hash or account_hash in seen_hashes:
+            continue
+        seen_hashes.add(account_hash)
+        normalized.append(
+            SchwabAccountConfig(
+                name=account.name or account_hash[-4:],
+                hash=account_hash,
+                risk_profile=_normalize_choice(
+                    account.risk_profile,
+                    allowed={"conservative", "moderate", "aggressive"},
+                    default="moderate",
+                    field_name=f"accounts[{account.name or account_hash[-4:]}].risk_profile",
+                ),
+            )
+        )
+
+    return normalized
 
 
 def _sanitize_secret(value: object, field_name: str) -> str:

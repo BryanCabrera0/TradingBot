@@ -1,0 +1,158 @@
+{
+  "fills": [
+    {
+      "timestamp": "2026-02-25T15:05:37.087697-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "entry",
+      "midpoint": 1.4,
+      "fill_price": 1.4,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:05:37.088654-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "exit",
+      "midpoint": 0.55,
+      "fill_price": 0.55,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:05:37.089539-05:00",
+      "symbol": "SPY",
+      "strategy": "iron_condor",
+      "side": "entry",
+      "midpoint": 1.1,
+      "fill_price": 1.1,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:17:17.525719-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "entry",
+      "midpoint": 1.4,
+      "fill_price": 1.4,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:17:17.526735-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "exit",
+      "midpoint": 0.55,
+      "fill_price": 0.55,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:17:17.527749-05:00",
+      "symbol": "SPY",
+      "strategy": "iron_condor",
+      "side": "entry",
+      "midpoint": 1.1,
+      "fill_price": 1.1,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:18:05.133270-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "entry",
+      "midpoint": 1.4,
+      "fill_price": 1.4,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:18:05.134296-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "exit",
+      "midpoint": 0.55,
+      "fill_price": 0.55,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:18:05.135233-05:00",
+      "symbol": "SPY",
+      "strategy": "iron_condor",
+      "side": "entry",
+      "midpoint": 1.1,
+      "fill_price": 1.1,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:24:10.280893-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "entry",
+      "midpoint": 1.4,
+      "fill_price": 1.4,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:24:10.282008-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "exit",
+      "midpoint": 0.55,
+      "fill_price": 0.55,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:24:10.282995-05:00",
+      "symbol": "SPY",
+      "strategy": "iron_condor",
+      "side": "entry",
+      "midpoint": 1.1,
+      "fill_price": 1.1,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:41:45.545406-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "entry",
+      "midpoint": 1.4,
+      "fill_price": 1.4,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:41:45.546579-05:00",
+      "symbol": "SPY",
+      "strategy": "bull_put_spread",
+      "side": "exit",
+      "midpoint": 0.55,
+      "fill_price": 0.55,
+      "slippage": 0.0,
+      "status": "PLACED"
+    },
+    {
+      "timestamp": "2026-02-25T15:41:45.547642-05:00",
+      "symbol": "SPY",
+      "strategy": "iron_condor",
+      "side": "entry",
+      "midpoint": 1.1,
+      "fill_price": 1.1,
+      "slippage": 0.0,
+      "status": "PLACED"
+    }
+  ],
+  "meta": {
+    "last_logged_week": "2026-W08",
+    "last_week_avg_slippage": 0.0
+  }
+}

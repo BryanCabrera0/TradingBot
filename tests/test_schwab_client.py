@@ -5,7 +5,12 @@ from pathlib import Path
 from unittest import mock
 
 from bot.config import SchwabConfig
-from bot.schwab_client import SchwabClient, _make_option_symbol, _market_open_from_hours_payload
+from bot.schwab_client import (
+    SchwabClient,
+    _ladder_price,
+    _make_option_symbol,
+    _market_open_from_hours_payload,
+)
 
 
 class SchwabClientParserTests(unittest.TestCase):
@@ -191,6 +196,48 @@ class SchwabClientParserTests(unittest.TestCase):
         self.assertEqual(close_order["complexOrderStrategyType"], "IRON_CONDOR")
         self.assertEqual(len(open_order["orderLegCollection"]), 4)
         self.assertEqual(len(close_order["orderLegCollection"]), 4)
+
+    def test_ladder_price_moves_credit_and_debit_sides_correctly(self) -> None:
+        self.assertEqual(_ladder_price(midpoint=1.0, spread=0.4, shift=0.25, side="credit"), 0.9)
+        self.assertEqual(_ladder_price(midpoint=1.0, spread=0.4, shift=0.25, side="debit"), 1.1)
+
+    def test_ladder_respects_total_timeout_budget(self) -> None:
+        client = SchwabClient(SchwabConfig())
+        client.place_order = mock.Mock(
+            side_effect=[
+                {"order_id": "A1", "status": "PLACED"},
+                {"order_id": "A2", "status": "PLACED"},
+                {"order_id": "A3", "status": "PLACED"},
+            ]
+        )
+        timeouts = []
+
+        def _fake_wait(order_id: str, timeout_seconds: int) -> dict:
+            timeouts.append(timeout_seconds)
+            return {"status": "WORKING"}
+
+        client._wait_for_terminal_status = mock.Mock(side_effect=_fake_wait)
+        client.cancel_order = mock.Mock()
+        order_factory = mock.Mock(return_value={"type": "LIMIT"})
+
+        with mock.patch(
+            "bot.schwab_client.time.time",
+            side_effect=[0.0, 0.0, 90.0, 180.0],
+        ):
+            result = client.place_order_with_ladder(
+                order_factory=order_factory,
+                midpoint_price=1.0,
+                spread_width=0.4,
+                side="credit",
+                step_timeout_seconds=90,
+                max_attempts=3,
+                shifts=[0.0, 0.25, 0.5],
+                total_timeout_seconds=300,
+            )
+
+        self.assertEqual(timeouts, [90, 90, 120])
+        self.assertEqual(result["status"], "CANCELED")
+        self.assertEqual(client.cancel_order.call_count, 3)
 
 
 if __name__ == "__main__":

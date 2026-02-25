@@ -1,6 +1,7 @@
 """Schwab API client wrapper for authentication, market data, and order execution."""
 
 import logging
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,7 @@ class SchwabClient:
         self.config = config
         self._client = None
         self._account_hash = config.account_hash
+        self._configured_accounts = list(config.accounts or [])
 
     def connect(self) -> None:
         """Authenticate and create the API client."""
@@ -93,6 +95,17 @@ class SchwabClient:
         if self._account_hash:
             return self._account_hash
 
+        if self._configured_accounts:
+            preferred = self._configured_accounts[0]
+            candidate = str(getattr(preferred, "hash", "")).strip()
+            if candidate:
+                self._account_hash = candidate
+                logger.info(
+                    "Using configured Schwab account hash: %s",
+                    _mask_hash(self._account_hash),
+                )
+                return self._account_hash
+
         account_hashes = self._fetch_account_hashes()
         if not account_hashes:
             if require_unique:
@@ -132,6 +145,26 @@ class SchwabClient:
             )
 
         return None
+
+    def configured_accounts(self) -> list[dict]:
+        """Return configured account metadata from config.yaml."""
+        out = []
+        for account in self._configured_accounts:
+            out.append(
+                {
+                    "name": str(getattr(account, "name", "")).strip(),
+                    "hash": str(getattr(account, "hash", "")).strip(),
+                    "risk_profile": str(getattr(account, "risk_profile", "moderate")).strip(),
+                }
+            )
+        return out
+
+    def select_account(self, account_hash: str) -> None:
+        """Switch the active account hash used for all account/order endpoints."""
+        account_hash = str(account_hash).strip()
+        if not account_hash:
+            raise ValueError("account_hash is required")
+        self._account_hash = account_hash
 
     def _require_account_hash(self) -> str:
         account_hash = self.resolve_account_hash(require_unique=True)
@@ -186,6 +219,53 @@ class SchwabClient:
         quote = self.get_quote(symbol)
         ref = quote.get("quote", quote)
         return safe_float(ref.get("lastPrice", ref.get("mark", 0.0)))
+
+    def get_price_history(self, symbol: str, days: int = 120) -> list[dict]:
+        """Get daily OHLCV bars for the given symbol."""
+        lookback_days = max(30, int(days))
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=lookback_days * 2)
+
+        response = None
+        if hasattr(self.client, "get_price_history_every_day"):
+            response = self.client.get_price_history_every_day(
+                symbol,
+                start_datetime=start_dt,
+                end_datetime=end_dt,
+                need_extended_hours_data=False,
+                need_previous_close=True,
+            )
+        elif hasattr(self.client, "get_price_history"):
+            response = self.client.get_price_history(
+                symbol,
+                period_type=self.client.PriceHistory.PeriodType.YEAR,
+                period=self.client.PriceHistory.Period.ONE_YEAR,
+                frequency_type=self.client.PriceHistory.FrequencyType.DAILY,
+                frequency=self.client.PriceHistory.Frequency.DAILY,
+                need_extended_hours_data=False,
+                need_previous_close=True,
+            )
+        else:
+            raise RuntimeError("Schwab client does not expose a price-history endpoint.")
+
+        response.raise_for_status()
+        payload = response.json()
+        candles = payload.get("candles", [])
+        out: list[dict] = []
+        for candle in candles[-lookback_days:]:
+            if not isinstance(candle, dict):
+                continue
+            out.append(
+                {
+                    "datetime": candle.get("datetime"),
+                    "open": safe_float(candle.get("open", 0.0)),
+                    "high": safe_float(candle.get("high", 0.0)),
+                    "low": safe_float(candle.get("low", 0.0)),
+                    "close": safe_float(candle.get("close", 0.0)),
+                    "volume": safe_int(candle.get("volume", 0)),
+                }
+            )
+        return out
 
     def get_option_chain(
         self,
@@ -287,6 +367,133 @@ class SchwabClient:
             order_id = location.split("/")[-1]
         logger.info("Order placed. Order ID: %s", order_id)
         return {"order_id": order_id, "status": "PLACED"}
+
+    def place_order_with_ladder(
+        self,
+        *,
+        order_factory,
+        midpoint_price: float,
+        spread_width: float,
+        side: str,
+        step_timeout_seconds: int,
+        max_attempts: int = 3,
+        shifts: Optional[list[float]] = None,
+        total_timeout_seconds: Optional[int] = None,
+    ) -> dict:
+        """Place an order with a midpoint-to-natural price ladder."""
+        if shifts is None or not shifts:
+            shifts = [0.0, 0.25, 0.50]
+        shifts = shifts[:max_attempts]
+        if not shifts:
+            shifts = [0.0]
+
+        midpoint = max(0.01, float(midpoint_price))
+        spread = max(0.01, float(spread_width))
+        last_result = {"status": "REJECTED"}
+        last_price = midpoint
+        total_timeout = (
+            max(5, int(total_timeout_seconds))
+            if total_timeout_seconds is not None
+            else None
+        )
+        start_clock = time.time()
+
+        for attempt_index, shift in enumerate(shifts, start=1):
+            if total_timeout is not None:
+                elapsed = max(0.0, time.time() - start_clock)
+                remaining_total = total_timeout - elapsed
+                if remaining_total <= 0:
+                    break
+                if attempt_index < len(shifts):
+                    wait_timeout = min(
+                        max(5, int(step_timeout_seconds)),
+                        max(5, int(remaining_total)),
+                    )
+                else:
+                    # Final attempt receives remaining time budget.
+                    wait_timeout = max(5, int(remaining_total))
+            else:
+                wait_timeout = max(5, int(step_timeout_seconds))
+
+            candidate_price = _ladder_price(
+                midpoint=midpoint,
+                spread=spread,
+                shift=float(shift),
+                side=side,
+            )
+            if attempt_index > 1:
+                previous_order_id = str(last_result.get("order_id", "unknown"))
+                logger.info(
+                    "Order %s price improved from %.2f to %.2f, attempt %d/%d",
+                    previous_order_id,
+                    last_price,
+                    candidate_price,
+                    attempt_index,
+                    len(shifts),
+                )
+            last_price = candidate_price
+
+            order_spec = order_factory(candidate_price)
+            placed = self.place_order(order_spec)
+            order_id = str(placed.get("order_id", "")).strip()
+            last_result = {
+                **placed,
+                "attempt": attempt_index,
+                "requested_price": candidate_price,
+                "midpoint_price": midpoint,
+            }
+
+            if not order_id:
+                return last_result
+
+            terminal = self._wait_for_terminal_status(
+                order_id,
+                timeout_seconds=wait_timeout,
+            )
+            if terminal.get("poll_error"):
+                return last_result
+            status = str(terminal.get("status", "")).upper()
+            if status == "FILLED":
+                last_result.update(
+                    {
+                        "status": "FILLED",
+                        "fill_price": _extract_fill_price(terminal) or candidate_price,
+                        "order_id": order_id,
+                    }
+                )
+                return last_result
+
+            if status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                last_result.update({"status": status or "CANCELED", "order_id": order_id})
+                continue
+
+            try:
+                self.cancel_order(order_id)
+                last_result.update({"status": "CANCELED", "order_id": order_id})
+            except Exception:
+                pass
+
+        return last_result
+
+    def _wait_for_terminal_status(self, order_id: str, timeout_seconds: int) -> dict:
+        """Poll order status until terminal status or timeout."""
+        timeout_seconds = max(5, int(timeout_seconds))
+        start = time.time()
+        latest = {"status": "UNKNOWN"}
+
+        while (time.time() - start) < timeout_seconds:
+            try:
+                latest = self.get_order(order_id)
+            except Exception:
+                latest["poll_error"] = True
+                return latest
+
+            status = str(latest.get("status", "")).upper()
+            if status in {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}:
+                return latest
+            time.sleep(5)
+
+        return latest
 
     def get_order(self, order_id: str) -> dict:
         """Get the status of an order."""
@@ -665,3 +872,34 @@ def _parse_market_time(raw_time: object) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=EASTERN_TZ)
     return parsed
+
+
+def _ladder_price(*, midpoint: float, spread: float, shift: float, side: str) -> float:
+    """Shift midpoint toward natural price depending on credit/debit side."""
+    side_key = str(side).lower().strip()
+    if side_key == "credit":
+        value = midpoint - (shift * spread)
+    else:
+        value = midpoint + (shift * spread)
+    return round(max(0.01, value), 2)
+
+
+def _extract_fill_price(order: dict) -> Optional[float]:
+    """Best-effort per-contract fill price extraction from order payload."""
+    activities = order.get("orderActivityCollection", [])
+    if not isinstance(activities, list):
+        return None
+    prices: list[float] = []
+    for activity in activities:
+        if not isinstance(activity, dict):
+            continue
+        for leg in activity.get("executionLegs", []) or []:
+            if not isinstance(leg, dict):
+                continue
+            price = safe_float(leg.get("price"), 0.0)
+            if price > 0:
+                prices.append(price)
+    if not prices:
+        direct = safe_float(order.get("price"), 0.0)
+        return direct if direct > 0 else None
+    return round(float(sum(prices) / len(prices)), 4)

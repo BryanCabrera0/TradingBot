@@ -1,5 +1,7 @@
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
+import tempfile
 from unittest import mock
 
 from bot.config import ScannerConfig
@@ -77,6 +79,29 @@ class MarketScannerTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(scanner._score_ticker.call_count, 2)
+
+    def test_build_universe_applies_blacklist(self) -> None:
+        scanner = MarketScanner(
+            schwab_client=object(),
+            config=ScannerConfig(include_movers=False, blacklist=["SPY"]),
+        )
+
+        universe = scanner._build_universe()
+
+        self.assertNotIn("SPY", universe)
+
+    def test_scan_persists_history(self) -> None:
+        scanner = MarketScanner(
+            schwab_client=object(),
+            config=ScannerConfig(request_pause_seconds=0.0),
+        )
+        scanner._build_universe = mock.Mock(return_value=["SPY"])
+        scanner._score_ticker = mock.Mock(return_value=TickerScore(symbol="SPY", score=80.0))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch("bot.market_scanner.SCANNER_HISTORY_PATH", Path(tmp_dir) / "scanner_history.json"):
+                scanner.scan()
+                self.assertTrue((Path(tmp_dir) / "scanner_history.json").exists())
 
 
 if __name__ == "__main__":

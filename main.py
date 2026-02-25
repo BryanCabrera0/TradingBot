@@ -42,9 +42,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from bot.config import load_config
+from bot.data_fetcher import HistoricalDataFetcher
+from bot.backtester import Backtester
+from bot.dashboard import generate_dashboard
 from bot.live_setup import run_live_setup
 from bot.orchestrator import TradingBot
 from bot.paper_trader import PaperTrader
+from bot.live_trade_ledger import LiveTradeLedger
+from bot.schwab_client import SchwabClient
 
 
 def setup_logging(
@@ -140,6 +145,26 @@ def main() -> None:
         help="Show paper trading performance report and exit",
     )
     parser.add_argument(
+        "--dashboard", action="store_true",
+        help="Generate HTML dashboard and exit",
+    )
+    parser.add_argument(
+        "--backtest", action="store_true",
+        help="Run historical backtest and exit",
+    )
+    parser.add_argument(
+        "--fetch-data", action="store_true",
+        help="Fetch historical option-chain snapshots and exit",
+    )
+    parser.add_argument(
+        "--start", default="",
+        help="Start date for backtest/fetch in YYYY-MM-DD",
+    )
+    parser.add_argument(
+        "--end", default="",
+        help="End date for backtest/fetch in YYYY-MM-DD",
+    )
+    parser.add_argument(
         "--preflight-only", action="store_true",
         help="Run startup checks and exit without starting the bot",
     )
@@ -204,6 +229,106 @@ def main() -> None:
 
     # Load config
     config = load_config(args.config)
+
+    if args.fetch_data:
+        if not args.start or not args.end:
+            print("--fetch-data requires --start and --end in YYYY-MM-DD format.")
+            sys.exit(2)
+        try:
+            schwab = SchwabClient(config.schwab)
+            schwab.connect()
+            symbols = list(dict.fromkeys(config.watchlist + list(config.covered_calls.tickers or [])))
+            fetcher = HistoricalDataFetcher(schwab)
+            results = fetcher.fetch_range(start=args.start, end=args.end, symbols=symbols)
+            created = sum(1 for row in results if not row.skipped)
+            skipped = sum(1 for row in results if row.skipped)
+            print(f"Fetch complete: {created} snapshots created, {skipped} skipped.")
+        except Exception as exc:
+            print(f"Data fetch failed: {exc}")
+            sys.exit(1)
+        return
+
+    if args.backtest:
+        if not args.start or not args.end:
+            print("--backtest requires --start and --end in YYYY-MM-DD format.")
+            sys.exit(2)
+        try:
+            backtester = Backtester(config)
+            result = backtester.run(start=args.start, end=args.end)
+            print(f"Backtest complete. Report: {result.report_path}")
+        except Exception as exc:
+            print(f"Backtest failed: {exc}")
+            sys.exit(1)
+        return
+
+    if args.dashboard:
+        try:
+            if config.trading_mode == "paper":
+                paper = PaperTrader()
+                closed = list(paper.closed_trades)
+                open_positions = paper.get_positions()
+                balance = paper.get_account_balance()
+            else:
+                ledger = LiveTradeLedger()
+                closed = ledger.list_positions(statuses={"closed", "closed_external"})
+                open_positions = ledger.list_positions(statuses={"open", "opening", "closing"})
+                try:
+                    schwab = SchwabClient(config.schwab)
+                    schwab.connect()
+                    balance = schwab.get_account_balance()
+                except Exception:
+                    balance = 0.0
+
+            monthly: dict[str, float] = {}
+            by_strategy: dict[str, dict] = {}
+            winners, losers = [], []
+            for trade in closed:
+                pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
+                close_date = str(trade.get("close_date", ""))
+                month = close_date[:7] if len(close_date) >= 7 else "unknown"
+                monthly[month] = monthly.get(month, 0.0) + pnl
+                strategy = str(trade.get("strategy", "unknown"))
+                stats = by_strategy.setdefault(strategy, {"wins": 0, "count": 0, "total_pnl": 0.0})
+                stats["count"] += 1
+                if pnl > 0:
+                    stats["wins"] += 1
+                stats["total_pnl"] += pnl
+                row = {"symbol": trade.get("symbol", ""), "pnl": pnl}
+                (winners if pnl >= 0 else losers).append(row)
+
+            strategy_breakdown = {}
+            for name, stats in by_strategy.items():
+                count = max(1, stats["count"])
+                strategy_breakdown[name] = {
+                    "win_rate": (stats["wins"] / count) * 100.0,
+                    "avg_pnl": stats["total_pnl"] / count,
+                    "total_pnl": stats["total_pnl"],
+                }
+
+            payload = {
+                "equity_curve": [],
+                "monthly_pnl": monthly,
+                "strategy_breakdown": strategy_breakdown,
+                "top_winners": sorted(winners, key=lambda x: x["pnl"], reverse=True)[:5],
+                "top_losers": sorted(losers, key=lambda x: x["pnl"])[:5],
+                "risk_metrics": {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0},
+                "portfolio_greeks": {"delta": 0.0, "theta": 0.0, "gamma": 0.0, "vega": 0.0},
+                "sector_exposure": {},
+                "circuit_breakers": {
+                    "regime": "n/a",
+                    "halt_entries": False,
+                    "consecutive_loss_pause_until": "-",
+                    "weekly_loss_pause_until": "-",
+                },
+                "balance": balance,
+                "open_positions": len(open_positions),
+            }
+            output = generate_dashboard(payload)
+            print(f"Dashboard generated: {output}")
+        except Exception as exc:
+            print(f"Dashboard generation failed: {exc}")
+            sys.exit(1)
+        return
 
     if args.live:
         config.trading_mode = "live"

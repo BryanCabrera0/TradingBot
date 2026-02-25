@@ -2,7 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from bot.analysis import SpreadAnalysis
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TradeSignal:
     """A signal to open or close a trade."""
-    action: str  # "open" or "close"
+    action: str  # "open", "close", or "roll"
     strategy: str
     symbol: str
     analysis: Optional[SpreadAnalysis] = None
@@ -23,6 +23,8 @@ class TradeSignal:
     # Order details — set by strategy
     order_spec: object = None
     quantity: int = 1
+    size_multiplier: float = 1.0
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseStrategy(ABC):
@@ -35,7 +37,12 @@ class BaseStrategy(ABC):
 
     @abstractmethod
     def scan_for_entries(
-        self, symbol: str, chain_data: dict, underlying_price: float
+        self,
+        symbol: str,
+        chain_data: dict,
+        underlying_price: float,
+        technical_context=None,
+        market_context: Optional[dict] = None,
     ) -> list[TradeSignal]:
         """Scan an options chain for new entry opportunities.
 

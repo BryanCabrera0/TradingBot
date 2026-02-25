@@ -15,12 +15,15 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from bot.config import ScannerConfig
+from bot.data_store import dump_json, load_json
 from bot.number_utils import safe_float, safe_int
 
 logger = logging.getLogger(__name__)
+SCANNER_HISTORY_PATH = Path("bot/data/scanner_history.json")
 
 
 # ── Large universe of highly-traded options tickers ──────────────────
@@ -70,6 +73,16 @@ OPTIONS_UNIVERSE = {
     ],
 }
 
+SECTOR_ETF_BY_SYMBOL = {
+    "XLF": {"JPM", "BAC", "GS", "MS", "WFC", "C", "V", "MA", "AXP", "SCHW", "BLK", "COF", "PYPL", "SOFI"},
+    "XLK": {"AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA", "AMD", "INTC", "AVGO", "CRM", "ORCL", "ADBE", "NFLX", "QCOM", "ARM", "SMCI", "DELL", "PANW", "PLTR", "SNOW", "NET", "MU"},
+    "XLV": {"UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "BMY", "AMGN", "GILD", "MRNA", "BNTX", "XBI"},
+    "XLY": {"HD", "NKE", "SBUX", "MCD", "DIS", "TGT", "LOW", "LULU", "CMG", "WMT", "COST"},
+    "XLE": {"XOM", "CVX", "OXY", "SLB", "HAL", "USO"},
+    "XLI": {"BA", "CAT", "DE", "GE", "RTX", "LMT", "F", "GM", "RIVN", "LCID"},
+    "XLC": {"ROKU", "SNAP", "PINS"},
+}
+
 
 def get_full_universe() -> list[str]:
     """Return the complete de-duplicated ticker universe."""
@@ -93,6 +106,10 @@ class TickerScore:
     underlying_price: float = 0.0
     avg_option_spread_pct: float = 0.0  # Average bid-ask spread as % of mid
     num_expirations: int = 0
+    sector_rotation_rel: float = 0.0
+    relative_strength_rel: float = 0.0
+    movers_boost: float = 0.0
+    option_liquidity_score: float = 0.0
     # Composite score
     score: float = 0.0
 
@@ -105,6 +122,8 @@ class MarketScanner:
         self.config = config
         self._last_scan_results: list[TickerScore] = []
         self._last_scan_time: Optional[datetime] = None
+        self._latest_movers: set[str] = set()
+        self._return_cache: dict[str, float] = {}
 
     def scan(self) -> list[str]:
         """Run a full market scan and return the top tickers ranked by quality.
@@ -124,6 +143,7 @@ class MarketScanner:
         scored: list[TickerScore] = []
         pause_seconds = max(0.0, float(self.config.request_pause_seconds))
         consecutive_errors = 0
+        self._return_cache.clear()
 
         for i, symbol in enumerate(universe):
             try:
@@ -171,6 +191,8 @@ class MarketScanner:
             )
         logger.info("=" * 60)
 
+        self._persist_history(top_tickers)
+
         return [ts.symbol for ts in top_tickers]
 
     def get_cached_results(self) -> list[str]:
@@ -196,20 +218,23 @@ class MarketScanner:
         with Schwab's movers API for trending stocks.
         """
         universe = get_full_universe()
+        blacklist = {str(sym).upper() for sym in (self.config.blacklist or [])}
 
         # Try to add today's market movers from Schwab
         if self.config.include_movers and self.schwab is not None:
             try:
                 movers = self._fetch_movers()
+                self._latest_movers = set(movers)
                 for ticker in movers:
                     if ticker not in universe:
                         universe.append(ticker)
                 logger.info("Added %d movers to universe.", len(movers))
             except Exception as e:
                 logger.debug("Could not fetch movers: %s", e)
+        else:
+            self._latest_movers = set()
 
-        # Filter by price range if configured
-        return universe
+        return [symbol for symbol in universe if symbol.upper() not in blacklist]
 
     def _fetch_movers(self) -> list[str]:
         """Fetch today's top movers from Schwab API."""
@@ -331,6 +356,15 @@ class MarketScanner:
             sum(spread_ratios) / len(spread_ratios) if spread_ratios else 1.0
         )
         ts.num_expirations = num_expirations
+        ts.option_liquidity_score = min(ts.options_volume / 80_000, 1.0) * 0.6 + min(ts.options_open_interest / 400_000, 1.0) * 0.4
+
+        sector_etf = self._sector_etf_for_symbol(symbol)
+        spy_return = self._one_month_return("SPY")
+        sector_return = self._one_month_return(sector_etf)
+        symbol_return = self._one_month_return(symbol)
+        ts.sector_rotation_rel = sector_return - spy_return
+        ts.relative_strength_rel = symbol_return - sector_return
+        ts.movers_boost = 1.0 if symbol in self._latest_movers else 0.0
 
         # ── Compute composite score ──────────────────────────────
         ts.score = self._compute_score(ts)
@@ -389,7 +423,75 @@ class MarketScanner:
         exp_score = min(ts.num_expirations / 6, 1.0)
         score += exp_score * 5
 
-        return round(score, 1)
+        # ── Sector rotation (configurable weight) ────────────────
+        # Positive when sector ETF outperforms SPY over 1 month.
+        rotation_component = max(0.0, min(1.0, 0.5 + ts.sector_rotation_rel / 0.20))
+        score += rotation_component * 100.0 * float(self.config.sector_rotation_weight)
+
+        # ── Relative strength vs sector (configurable weight) ────
+        rs_component = max(0.0, min(1.0, 0.5 + ts.relative_strength_rel / 0.20))
+        score += rs_component * 100.0 * float(self.config.relative_strength_weight)
+
+        # ── Movers boost (configurable weight) ───────────────────
+        score += ts.movers_boost * 100.0 * float(self.config.movers_weight)
+
+        # ── Option liquidity overlay (configurable weight) ───────
+        score += ts.option_liquidity_score * 100.0 * float(self.config.options_liquidity_weight)
+
+        return round(min(score, 100.0), 1)
+
+    @staticmethod
+    def _sector_etf_for_symbol(symbol: str) -> str:
+        symbol_key = symbol.upper()
+        for etf, members in SECTOR_ETF_BY_SYMBOL.items():
+            if symbol_key in members:
+                return etf
+        return "SPY"
+
+    def _one_month_return(self, symbol: str) -> float:
+        symbol_key = symbol.upper()
+        if symbol_key in self._return_cache:
+            return self._return_cache[symbol_key]
+        if self.schwab is None or not hasattr(self.schwab, "get_price_history"):
+            self._return_cache[symbol_key] = 0.0
+            return 0.0
+        try:
+            bars = self.schwab.get_price_history(symbol_key, days=40)
+        except Exception:
+            self._return_cache[symbol_key] = 0.0
+            return 0.0
+        if not isinstance(bars, list):
+            self._return_cache[symbol_key] = 0.0
+            return 0.0
+        closes = [
+            safe_float(item.get("close", 0.0))
+            for item in bars
+            if isinstance(item, dict) and safe_float(item.get("close", 0.0)) > 0
+        ]
+        if len(closes) < 2:
+            self._return_cache[symbol_key] = 0.0
+            return 0.0
+        value = (closes[-1] / closes[0]) - 1.0
+        self._return_cache[symbol_key] = value
+        return value
+
+    def _persist_history(self, top_tickers: list[TickerScore]) -> None:
+        payload = load_json(SCANNER_HISTORY_PATH, {"history": []})
+        if not isinstance(payload, dict):
+            payload = {"history": []}
+        history = payload.get("history")
+        if not isinstance(history, list):
+            history = []
+            payload["history"] = history
+
+        history.append(
+            {
+                "date": datetime.now().date().isoformat(),
+                "top_20": [ticker.symbol for ticker in top_tickers[:20]],
+            }
+        )
+        payload["history"] = history[-365:]
+        dump_json(SCANNER_HISTORY_PATH, payload)
 
     def _call_with_retries(self, fn, *args, operation: str, **kwargs):
         """Call an API function with retry/backoff for transient failures."""

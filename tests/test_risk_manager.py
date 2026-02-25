@@ -73,6 +73,74 @@ class RiskManagerTests(unittest.TestCase):
 
         self.assertEqual(loss, 39.0)
 
+    def test_approve_trade_blocks_earnings_in_window(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.earnings_calendar = unittest.mock.Mock(
+            earnings_within_window=unittest.mock.Mock(return_value=(True, "2026-03-10"))
+        )
+        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="AAPL",
+            quantity=1,
+            analysis=SpreadAnalysis(
+                symbol="AAPL",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=95,
+                long_strike=90,
+                credit=1.2,
+                max_loss=3.8,
+                probability_of_profit=0.7,
+                score=60,
+                net_delta=5.0,
+                net_vega=0.5,
+            ),
+        )
+
+        approved, reason = manager.approve_trade(signal)
+
+        self.assertFalse(approved)
+        self.assertIn("Earnings", reason)
+
+    def test_approve_trade_blocks_excess_delta_direction(self) -> None:
+        manager = RiskManager(RiskConfig(max_portfolio_delta_abs=50.0))
+        manager.earnings_calendar = unittest.mock.Mock(
+            earnings_within_window=unittest.mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 52.0}}],
+            daily_pnl=0.0,
+        )
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="QQQ",
+            quantity=1,
+            analysis=SpreadAnalysis(
+                symbol="QQQ",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=30,
+                short_strike=95,
+                long_strike=90,
+                credit=1.0,
+                max_loss=4.0,
+                probability_of_profit=0.65,
+                score=58,
+                net_delta=6.0,
+                net_vega=0.1,
+            ),
+        )
+
+        approved, reason = manager.approve_trade(signal)
+
+        self.assertFalse(approved)
+        self.assertIn("delta limit", reason.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,16 @@ class NewsScannerTests(unittest.TestCase):
         # Second call should be fully cached.
         self.assertEqual(get.call_count, 3)
 
+    def test_trade_direction_policy_blocks_bull_put_on_bearish_signal(self) -> None:
+        scanner = NewsScanner(NewsConfig(enabled=True))
+        policy = scanner.trade_direction_policy(
+            "AAPL",
+            sentiment={"sentiment": "bearish", "confidence": 88, "key_event": None},
+        )
+
+        self.assertFalse(policy["allow_bull_put"])
+        self.assertTrue(policy["allow_bear_call"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -62,6 +62,7 @@ class SpreadAnalysis:
     # Greeks
     net_delta: float = 0.0
     net_theta: float = 0.0
+    net_gamma: float = 0.0
     net_vega: float = 0.0
     # Quality score (0-100)
     score: float = 0.0
@@ -209,6 +210,10 @@ def analyze_credit_spread(
         # Position greeks for a credit spread are long-leg minus short-leg.
         net_delta=round(long_option["delta"] - short_option["delta"], 4),
         net_theta=round(long_option["theta"] - short_option["theta"], 4),
+        net_gamma=round(
+            float(long_option.get("gamma", 0.0)) - float(short_option.get("gamma", 0.0)),
+            4,
+        ),
         net_vega=round(long_option["vega"] - short_option["vega"], 4),
         score=score,
     )
@@ -259,6 +264,13 @@ def analyze_iron_condor(
     net_theta = round(
         -put_short["theta"] + put_long["theta"] - call_short["theta"] + call_long["theta"], 4
     )
+    net_gamma = round(
+        -float(put_short.get("gamma", 0.0))
+        + float(put_long.get("gamma", 0.0))
+        - float(call_short.get("gamma", 0.0))
+        + float(call_long.get("gamma", 0.0)),
+        4,
+    )
     net_vega = round(
         -put_short["vega"] + put_long["vega"] - call_short["vega"] + call_long["vega"], 4
     )
@@ -285,6 +297,7 @@ def analyze_iron_condor(
         expected_value=ev,
         net_delta=net_delta,
         net_theta=net_theta,
+        net_gamma=net_gamma,
         net_vega=net_vega,
         score=score,
     )
