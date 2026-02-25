@@ -15,6 +15,7 @@ import requests
 
 from bot.config import LLMConfig
 from bot.data_store import dump_json, load_json
+from bot.openai_compat import extract_responses_output_text, request_openai_json
 from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -276,54 +277,29 @@ class LLMAdvisor:
         if not _is_configured_secret(api_key):
             raise RuntimeError("OPENAI_API_KEY is missing")
 
-        payload = {
-            "model": self.config.model,
-            "temperature": self.config.temperature,
-            "instructions": self._system_prompt(),
-            "input": prompt,
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "trade_review",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "verdict": {
-                                "type": "string",
-                                "enum": ["approve", "reject", "reduce_size"],
-                            },
-                            "confidence": {"type": "number", "minimum": 0, "maximum": 100},
-                            "reasoning": {"type": "string", "maxLength": 280},
-                            "suggested_adjustment": {"type": ["string", "null"], "maxLength": 120},
-                        },
-                        "required": ["verdict", "confidence", "reasoning", "suggested_adjustment"],
-                        "additionalProperties": False,
+        return request_openai_json(
+            api_key=api_key,
+            model=self.config.model,
+            system_prompt=self._system_prompt(),
+            user_prompt=prompt,
+            timeout_seconds=self.config.timeout_seconds,
+            temperature=self.config.temperature,
+            schema_name="trade_review",
+            schema={
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["approve", "reject", "reduce_size"],
                     },
-                }
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+                    "reasoning": {"type": "string", "maxLength": 280},
+                    "suggested_adjustment": {"type": ["string", "null"], "maxLength": 120},
+                },
+                "required": ["verdict", "confidence", "reasoning", "suggested_adjustment"],
+                "additionalProperties": False,
             },
-        }
-
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=self.config.timeout_seconds,
         )
-        response.raise_for_status()
-        data = response.json()
-        output_text = data.get("output_text")
-        if isinstance(output_text, str) and output_text.strip():
-            return output_text.strip()
-
-        extracted = self._extract_response_text(data)
-        if extracted:
-            return extracted
-
-        raise RuntimeError("OpenAI returned no text output")
 
     def _query_anthropic(self, prompt: str) -> str:
         api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -353,23 +329,7 @@ class LLMAdvisor:
     @staticmethod
     def _extract_response_text(data: dict) -> str:
         """Best-effort extraction of text from Responses API payloads."""
-        output = data.get("output", [])
-        if not isinstance(output, list):
-            return ""
-
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content", [])
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                text = part.get("text")
-                if isinstance(text, str) and text.strip():
-                    return text.strip()
-        return ""
+        return extract_responses_output_text(data)
 
     def _system_prompt(self) -> str:
         examples = json.dumps(FEW_SHOT_EXAMPLES, separators=(",", ":"))

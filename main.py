@@ -353,7 +353,10 @@ def main() -> None:
 
     mode_str = "LIVE" if config.trading_mode == "live" else "PAPER"
     print(f"  Mode:       {mode_str}")
-    print(f"  Strategies: {sum(1 for s in [config.credit_spreads, config.iron_condors, config.covered_calls] if getattr(s, 'enabled', False))} enabled")
+    print(
+        "  Strategies: "
+        f"{sum(1 for s in [config.credit_spreads, config.iron_condors, config.covered_calls, config.naked_puts, config.calendar_spreads] if getattr(s, 'enabled', False))} enabled"
+    )
     if config.scanner.enabled:
         print(f"  Scanner:    ON — dynamically finds best options stocks from 150+ tickers")
     else:

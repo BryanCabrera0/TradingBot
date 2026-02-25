@@ -70,6 +70,10 @@ class LiveTradeLedger:
             label="live trade ledger file",
         )
 
+    def save(self) -> None:
+        """Public persistence hook used by shutdown handlers/tests."""
+        self._save_state()
+
     # ── Position Lifecycle ─────────────────────────────────────────
 
     def register_entry_order(

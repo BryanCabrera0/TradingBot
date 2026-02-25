@@ -40,7 +40,9 @@ def enrich_dashboard_payload(payload: dict) -> dict:
         judged = [
             item
             for item in trades
-            if isinstance(item, dict) and "verdict" in item and "outcome" in item
+            if isinstance(item, dict)
+            and "verdict" in item
+            and _coerce_outcome(item.get("outcome")) is not None
         ]
         hits = sum(1 for item in judged if _is_llm_hit(item))
         accuracy = hits / len(judged) if judged else 0.0
@@ -226,7 +228,9 @@ def _render_html(payload: dict) -> str:
 
 def _is_llm_hit(item: dict) -> bool:
     verdict = str(item.get("verdict", "")).lower()
-    outcome = float(item.get("outcome", 0.0))
+    outcome = _coerce_outcome(item.get("outcome"))
+    if outcome is None:
+        return False
     if verdict == "approve":
         return outcome > 0
     if verdict == "reject":
@@ -234,3 +238,12 @@ def _is_llm_hit(item: dict) -> bool:
     if verdict == "reduce_size":
         return True
     return False
+
+
+def _coerce_outcome(value: object) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None

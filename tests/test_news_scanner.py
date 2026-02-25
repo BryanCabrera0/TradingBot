@@ -1,5 +1,6 @@
 import unittest
 from unittest import mock
+import os
 
 from bot.config import NewsConfig
 from bot.news_scanner import NewsScanner, _parse_rss_items
@@ -69,6 +70,87 @@ class NewsScannerTests(unittest.TestCase):
 
         self.assertFalse(policy["allow_bull_put"])
         self.assertTrue(policy["allow_bear_call"])
+
+    def test_bearish_sentiment_blocks_bull_puts(self) -> None:
+        scanner = NewsScanner(NewsConfig(enabled=True))
+        policy = scanner.trade_direction_policy(
+            "AAPL",
+            sentiment={"sentiment": "bearish", "confidence": 80, "key_event": None},
+        )
+        self.assertFalse(policy["allow_bull_put"])
+        self.assertTrue(policy["allow_bear_call"])
+
+    def test_bullish_sentiment_blocks_bear_calls(self) -> None:
+        scanner = NewsScanner(NewsConfig(enabled=True))
+        policy = scanner.trade_direction_policy(
+            "AAPL",
+            sentiment={"sentiment": "bullish", "confidence": 80, "key_event": None},
+        )
+        self.assertTrue(policy["allow_bull_put"])
+        self.assertFalse(policy["allow_bear_call"])
+
+    def test_binary_event_blocks_all_entries(self) -> None:
+        scanner = NewsScanner(NewsConfig(enabled=True))
+        policy = scanner.trade_direction_policy(
+            "AAPL",
+            sentiment={"sentiment": "bullish", "confidence": 75, "key_event": "FDA approval"},
+        )
+        self.assertTrue(policy["block_all"])
+        self.assertFalse(policy["allow_bull_put"])
+        self.assertFalse(policy["allow_bear_call"])
+
+    def test_finnhub_news_parsing(self) -> None:
+        scanner = NewsScanner(
+            NewsConfig(enabled=True, finnhub_api_key="test-key", request_timeout_seconds=5)
+        )
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = [
+            {"headline": "AAPL wins major contract", "url": "https://example.com/1", "source": "Finnhub", "datetime": 1760000000},
+            {"headline": "AAPL faces lawsuit risk", "url": "https://example.com/2", "source": "Finnhub", "datetime": 1760000500},
+            {"headline": "AAPL guidance unchanged", "url": "https://example.com/3", "source": "Finnhub", "datetime": 1760001000},
+        ]
+
+        with mock.patch("bot.news_scanner.requests.get", return_value=response):
+            items = scanner._fetch_finnhub_news("AAPL", limit=3)
+
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0].source, "Finnhub")
+        self.assertTrue(items[0].link.startswith("https://example.com/"))
+
+    def test_llm_sentiment_uses_chat_completion_fallback(self) -> None:
+        scanner = NewsScanner(
+            NewsConfig(
+                enabled=True,
+                llm_sentiment_enabled=True,
+                llm_sentiment_cache_seconds=0,
+            )
+        )
+        responses_404 = mock.Mock(status_code=404)
+        responses_404.raise_for_status.side_effect = Exception("not used")
+        chat_resp = mock.Mock()
+        chat_resp.raise_for_status.return_value = None
+        chat_resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"sentiment":"bullish","confidence":78,"key_event":null}'
+                    }
+                }
+            ]
+        }
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with mock.patch(
+                "bot.openai_compat.requests.post",
+                side_effect=[responses_404, chat_resp],
+            ):
+                sentiment = scanner.get_symbol_sentiment(
+                    "AAPL",
+                    headlines=[mock.Mock(title="AAPL jumps on guidance raise")],
+                )
+
+        self.assertEqual(sentiment["sentiment"], "bullish")
 
 
 if __name__ == "__main__":

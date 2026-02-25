@@ -44,6 +44,23 @@ strategies:
     # Only sell calls on these tickers (must own shares)
     tickers: []
 
+  naked_puts:
+    enabled: false
+    min_dte: 25
+    max_dte: 45
+    short_delta: 0.22
+    profit_target_pct: 0.50
+    exit_dte: 21
+
+  calendar_spreads:
+    enabled: false
+    front_min_dte: 20
+    front_max_dte: 30
+    back_min_dte: 50
+    back_max_dte: 60
+    profit_target_pct: 0.25
+    exit_dte: 7
+
 # Market Scanner — dynamically finds the best stocks for options trading
 # When enabled, the bot scans 150+ tickers across all sectors and ranks them
 # by options volume, implied volatility, bid-ask tightness, and liquidity.
@@ -69,6 +86,13 @@ scanner:
   max_consecutive_errors: 20
   # Optional cap on number of symbols scanned each cycle (0 = disabled)
   max_symbols_per_scan: 0
+  # Never trade these symbols even if ranked highly
+  blacklist: []
+  # Ranking component weights
+  movers_weight: 0.15
+  sector_rotation_weight: 0.15
+  relative_strength_weight: 0.20
+  options_liquidity_weight: 0.15
 
 # Fallback watchlist — only used if scanner is disabled
 watchlist:
@@ -99,6 +123,32 @@ risk:
   max_daily_loss_pct: 3.0
   # Proxy downside risk used for covered-call risk budgeting
   covered_call_notional_risk_pct: 20.0
+  # Max absolute net portfolio delta
+  max_portfolio_delta_abs: 50.0
+  # Max absolute net portfolio vega as % of account value
+  max_portfolio_vega_pct_of_account: 0.5
+  # Max share of total deployed risk in one GICS sector
+  max_sector_risk_pct: 40.0
+  # Correlation guard lookback and threshold
+  correlation_lookback_days: 60
+  correlation_threshold: 0.8
+
+risk_profiles:
+  conservative:
+    max_portfolio_risk_pct: 3.0
+    max_position_risk_pct: 1.0
+    max_open_positions: 5
+    max_daily_loss_pct: 2.0
+  moderate:
+    max_portfolio_risk_pct: 5.0
+    max_position_risk_pct: 2.0
+    max_open_positions: 10
+    max_daily_loss_pct: 3.0
+  aggressive:
+    max_portfolio_risk_pct: 8.0
+    max_position_risk_pct: 3.0
+    max_open_positions: 15
+    max_daily_loss_pct: 5.0
 
 # Scheduling
 schedule:
@@ -124,19 +174,26 @@ execution:
   stale_order_minutes: 20
   # Capture partial-fill quantities/prices into live ledger state
   include_partials_in_ledger: true
+  # Smart execution ladder controls
+  entry_step_timeout_seconds: 90
+  exit_step_timeout_seconds: 60
+  max_ladder_attempts: 3
+  entry_ladder_shifts: [0.0, 0.25, 0.50]
+  exit_ladder_shifts: [0.0, 0.25, 0.50]
 
 # Optional LLM advisor
 # Use provider "ollama" for local models on your Mac, or "openai" for cloud.
 llm:
   enabled: true
   provider: openai
-  model: gpt-5.2-pro
+  model: gpt-4.1
   base_url: http://127.0.0.1:11434
   mode: advisory   # advisory | blocking
   risk_style: moderate   # conservative | moderate | aggressive
   timeout_seconds: 20
   temperature: 0.1
   min_confidence: 0.55
+  track_record_file: bot/data/llm_track_record.json
 
 # News intelligence layer
 # Pulls stock-specific and market-level headlines and includes them in LLM review context.
@@ -149,12 +206,26 @@ news:
   max_market_headlines: 15
   include_symbol_news: true
   include_market_news: true
+  finnhub_api_key: ""
+  llm_sentiment_enabled: true
+  llm_sentiment_cache_seconds: 1800
   market_queries:
     - "stock market"
     - "federal reserve interest rates"
     - "inflation report"
     - "earnings season"
     - "options market volatility"
+
+# Optional multi-account configuration
+# First matching account hash is selected, and risk_profile maps into risk_profiles above.
+#schwab:
+#  accounts:
+#    - name: aggressive
+#      hash: abc123
+#      risk_profile: aggressive
+#    - name: conservative
+#      hash: def456
+#      risk_profile: conservative
 
 # Optional alerting webhook (Slack/Teams/Discord-compatible JSON webhook)
 alerts:

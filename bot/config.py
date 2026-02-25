@@ -66,6 +66,27 @@ class CoveredCallConfig:
 
 
 @dataclass
+class NakedPutConfig:
+    enabled: bool = False
+    min_dte: int = 25
+    max_dte: int = 45
+    short_delta: float = 0.22
+    profit_target_pct: float = 0.50
+    exit_dte: int = 21
+
+
+@dataclass
+class CalendarSpreadConfig:
+    enabled: bool = False
+    front_min_dte: int = 20
+    front_max_dte: int = 30
+    back_min_dte: int = 50
+    back_max_dte: int = 60
+    profit_target_pct: float = 0.25
+    exit_dte: int = 7
+
+
+@dataclass
 class ScannerConfig:
     enabled: bool = True
     # Max number of tickers to trade from scan results
@@ -144,7 +165,7 @@ class LLMConfig:
     enabled: bool = False
     # "ollama" for local models, "openai" for cloud models
     provider: str = "openai"
-    model: str = "gpt-5.2-pro"
+    model: str = "gpt-4.1"
     base_url: str = "http://127.0.0.1:11434"
     mode: str = "advisory"  # "advisory" or "blocking"
     risk_style: str = "moderate"  # "conservative" | "moderate" | "aggressive"
@@ -187,6 +208,30 @@ class AlertsConfig:
     require_in_live: bool = True
 
 
+def _default_risk_profiles() -> dict[str, RiskConfig]:
+    """Default named risk profiles used for multi-account and runtime overlays."""
+    return {
+        "conservative": RiskConfig(
+            max_portfolio_risk_pct=3.0,
+            max_position_risk_pct=1.0,
+            max_open_positions=5,
+            max_daily_loss_pct=2.0,
+        ),
+        "moderate": RiskConfig(
+            max_portfolio_risk_pct=5.0,
+            max_position_risk_pct=2.0,
+            max_open_positions=10,
+            max_daily_loss_pct=3.0,
+        ),
+        "aggressive": RiskConfig(
+            max_portfolio_risk_pct=8.0,
+            max_position_risk_pct=3.0,
+            max_open_positions=15,
+            max_daily_loss_pct=5.0,
+        ),
+    }
+
+
 @dataclass
 class BotConfig:
     trading_mode: str = "paper"
@@ -194,6 +239,8 @@ class BotConfig:
     credit_spreads: CreditSpreadConfig = field(default_factory=CreditSpreadConfig)
     iron_condors: IronCondorConfig = field(default_factory=IronCondorConfig)
     covered_calls: CoveredCallConfig = field(default_factory=CoveredCallConfig)
+    naked_puts: NakedPutConfig = field(default_factory=NakedPutConfig)
+    calendar_spreads: CalendarSpreadConfig = field(default_factory=CalendarSpreadConfig)
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
     watchlist: list = field(
         default_factory=lambda: ["SPY", "QQQ", "IWM", "AAPL", "MSFT"]
@@ -204,6 +251,7 @@ class BotConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    risk_profiles: dict[str, RiskConfig] = field(default_factory=_default_risk_profiles)
     log_level: str = "INFO"
     log_file: str = "logs/tradingbot.log"
     log_max_bytes: int = 10_485_760
@@ -369,6 +417,18 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
             if hasattr(cfg.covered_calls, key):
                 setattr(cfg.covered_calls, key, val)
 
+    np = strats.get("naked_puts", {})
+    if np:
+        for key, val in np.items():
+            if hasattr(cfg.naked_puts, key):
+                setattr(cfg.naked_puts, key, val)
+
+    cal = strats.get("calendar_spreads", {})
+    if cal:
+        for key, val in cal.items():
+            if hasattr(cfg.calendar_spreads, key):
+                setattr(cfg.calendar_spreads, key, val)
+
     scanner = raw.get("scanner", {})
     if scanner:
         for key, val in scanner.items():
@@ -410,6 +470,20 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in alerts.items():
             if hasattr(cfg.alerts, key):
                 setattr(cfg.alerts, key, val)
+
+    risk_profiles = raw.get("risk_profiles", {})
+    if isinstance(risk_profiles, dict) and risk_profiles:
+        normalized: dict[str, RiskConfig] = {}
+        for name, values in risk_profiles.items():
+            if not isinstance(values, dict):
+                continue
+            base = RiskConfig()
+            for key, val in values.items():
+                if hasattr(base, key):
+                    setattr(base, key, val)
+            normalized[str(name).strip().lower()] = base
+        if normalized:
+            cfg.risk_profiles = normalized
 
     log_cfg = raw.get("logging", {})
     if log_cfg:
@@ -525,9 +599,6 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.covered_calls.tickers = _normalize_symbol_list(
         cfg.covered_calls.tickers, default=[]
     )
-    cfg.risk.covered_call_notional_risk_pct = max(
-        0.0, min(100.0, float(cfg.risk.covered_call_notional_risk_pct))
-    )
 
     cfg.schedule.trading_days = _normalize_trading_days(cfg.schedule.trading_days)
     cfg.execution.stale_order_minutes = max(1, int(cfg.execution.stale_order_minutes))
@@ -600,11 +671,8 @@ def _normalize_config(cfg: BotConfig) -> None:
         cfg.execution.exit_ladder_shifts,
         default=[0.0, 0.25, 0.50],
     )
-    cfg.risk.max_portfolio_delta_abs = max(0.0, float(cfg.risk.max_portfolio_delta_abs))
-    cfg.risk.max_portfolio_vega_pct_of_account = max(0.0, float(cfg.risk.max_portfolio_vega_pct_of_account))
-    cfg.risk.max_sector_risk_pct = max(0.0, min(100.0, float(cfg.risk.max_sector_risk_pct)))
-    cfg.risk.correlation_lookback_days = max(20, int(cfg.risk.correlation_lookback_days))
-    cfg.risk.correlation_threshold = max(0.0, min(1.0, float(cfg.risk.correlation_threshold)))
+    cfg.risk = _normalize_risk_config(cfg.risk)
+    cfg.risk_profiles = _normalize_risk_profiles(cfg.risk_profiles)
     cfg.schwab.accounts = _normalize_accounts(cfg.schwab.accounts)
 
 
@@ -734,6 +802,55 @@ def _normalize_accounts(value: object) -> list[SchwabAccountConfig]:
             )
         )
 
+    return normalized
+
+
+def _normalize_risk_config(risk_cfg: RiskConfig) -> RiskConfig:
+    """Clamp and sanitize risk configuration values."""
+    if not isinstance(risk_cfg, RiskConfig):
+        risk_cfg = RiskConfig()
+    risk_cfg.max_portfolio_risk_pct = max(0.0, float(risk_cfg.max_portfolio_risk_pct))
+    risk_cfg.max_position_risk_pct = max(0.0, float(risk_cfg.max_position_risk_pct))
+    risk_cfg.max_open_positions = max(1, int(risk_cfg.max_open_positions))
+    risk_cfg.max_positions_per_symbol = max(1, int(risk_cfg.max_positions_per_symbol))
+    risk_cfg.min_account_balance = max(0.0, float(risk_cfg.min_account_balance))
+    risk_cfg.max_daily_loss_pct = max(0.0, float(risk_cfg.max_daily_loss_pct))
+    risk_cfg.covered_call_notional_risk_pct = max(
+        0.0, min(100.0, float(risk_cfg.covered_call_notional_risk_pct))
+    )
+    risk_cfg.max_portfolio_delta_abs = max(0.0, float(risk_cfg.max_portfolio_delta_abs))
+    risk_cfg.max_portfolio_vega_pct_of_account = max(
+        0.0, float(risk_cfg.max_portfolio_vega_pct_of_account)
+    )
+    risk_cfg.max_sector_risk_pct = max(0.0, min(100.0, float(risk_cfg.max_sector_risk_pct)))
+    risk_cfg.correlation_lookback_days = max(20, int(risk_cfg.correlation_lookback_days))
+    risk_cfg.correlation_threshold = max(0.0, min(1.0, float(risk_cfg.correlation_threshold)))
+    return risk_cfg
+
+
+def _normalize_risk_profiles(value: object) -> dict[str, RiskConfig]:
+    """Normalize optional named risk profiles."""
+    if not isinstance(value, dict):
+        return _default_risk_profiles()
+
+    normalized: dict[str, RiskConfig] = {}
+    for raw_name, raw_cfg in value.items():
+        name = str(raw_name).strip().lower()
+        if not name:
+            continue
+        if isinstance(raw_cfg, RiskConfig):
+            normalized[name] = _normalize_risk_config(raw_cfg)
+            continue
+        if not isinstance(raw_cfg, dict):
+            continue
+        candidate = RiskConfig()
+        for key, val in raw_cfg.items():
+            if hasattr(candidate, key):
+                setattr(candidate, key, val)
+        normalized[name] = _normalize_risk_config(candidate)
+
+    if not normalized:
+        return _default_risk_profiles()
     return normalized
 
 

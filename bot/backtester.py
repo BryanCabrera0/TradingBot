@@ -17,9 +17,11 @@ from bot.config import BotConfig, load_config
 from bot.data_store import dump_json, ensure_data_dir
 from bot.risk_manager import RiskManager
 from bot.strategies.base import TradeSignal
+from bot.strategies.calendar_spreads import CalendarSpreadStrategy
 from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
+from bot.strategies.naked_puts import NakedPutStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,10 @@ class Backtester:
             strategies.append(IronCondorStrategy(vars(self.config.iron_condors)))
         if self.config.covered_calls.enabled:
             strategies.append(CoveredCallStrategy(vars(self.config.covered_calls)))
+        if self.config.naked_puts.enabled:
+            strategies.append(NakedPutStrategy(vars(self.config.naked_puts)))
+        if self.config.calendar_spreads.enabled:
+            strategies.append(CalendarSpreadStrategy(vars(self.config.calendar_spreads)))
         return strategies
 
     def _run_day(self, trading_day: date) -> None:

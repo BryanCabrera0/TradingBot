@@ -1,8 +1,10 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from bot.dashboard import generate_dashboard
+from bot.dashboard import enrich_dashboard_payload, generate_dashboard
 
 
 class DashboardTests(unittest.TestCase):
@@ -28,6 +30,69 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("TradingBot Dashboard", html)
             self.assertIn("Equity Curve", html)
             self.assertIn("Technology", html)
+
+    def test_llm_accuracy_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            llm_path = Path(tmp_dir) / "llm_track.json"
+            trades = []
+            for idx in range(55):
+                verdict = "approve" if idx % 2 == 0 else "reject"
+                outcome = 10.0 if verdict == "approve" else -5.0
+                trades.append({"verdict": verdict, "outcome": outcome})
+            llm_path.write_text(json.dumps({"trades": trades}), encoding="utf-8")
+
+            with mock.patch("bot.dashboard.LLM_TRACK_RECORD_PATH", llm_path):
+                enriched = enrich_dashboard_payload({})
+
+            self.assertIn("llm_accuracy", enriched)
+            self.assertEqual(enriched["llm_accuracy"]["trades"], 55)
+            self.assertAlmostEqual(enriched["llm_accuracy"]["hit_rate"], 1.0, places=4)
+
+    def test_execution_quality_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            execution_path = Path(tmp_dir) / "execution_quality.json"
+            execution_path.write_text(
+                json.dumps(
+                    {
+                        "fills": [
+                            {"slippage": 0.10},
+                            {"slippage": -0.20},
+                            {"slippage": 0.30},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("bot.dashboard.EXECUTION_QUALITY_PATH", execution_path):
+                enriched = enrich_dashboard_payload({})
+
+            self.assertIn("execution_quality", enriched)
+            self.assertAlmostEqual(enriched["execution_quality"]["avg_slippage"], 0.0667, places=4)
+            self.assertEqual(enriched["execution_quality"]["samples"], 3)
+
+    def test_html_contains_sections(self) -> None:
+        payload = {
+            "equity_curve": [{"date": "2026-02-20", "equity": 100000}, {"date": "2026-02-21", "equity": 100500}],
+            "monthly_pnl": {"2026-02": 500.0},
+            "strategy_breakdown": {
+                "bull_put_spread": {"win_rate": 60.0, "avg_pnl": 50.0, "total_pnl": 500.0}
+            },
+            "top_winners": [{"symbol": "SPY", "pnl": 200.0}],
+            "top_losers": [{"symbol": "QQQ", "pnl": -100.0}],
+            "risk_metrics": {"sharpe": 1.1, "sortino": 1.4, "max_drawdown": 0.05, "current_drawdown": 0.01},
+            "portfolio_greeks": {"delta": 10.0, "theta": 2.0, "gamma": 0.5, "vega": 15.0},
+            "sector_exposure": {"Information Technology": 40.0, "Financials": 20.0},
+            "circuit_breakers": {"regime": "normal", "halt_entries": False},
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output = generate_dashboard(payload, output_path=Path(tmp_dir) / "dashboard.html")
+            html = Path(output).read_text(encoding="utf-8")
+            self.assertIn("Equity Curve", html)
+            self.assertIn("Monthly P&amp;L", html)
+            self.assertIn("Strategy Breakdown", html)
+            self.assertIn("Risk Metrics", html)
+            self.assertIn("Circuit Breakers", html)
 
 
 if __name__ == "__main__":

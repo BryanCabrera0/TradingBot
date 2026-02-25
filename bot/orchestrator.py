@@ -11,9 +11,11 @@ This is the brain of the bot. It:
 
 from collections import defaultdict, deque
 import copy
+from dataclasses import fields, is_dataclass
 import logging
 from pathlib import Path
 import re
+import signal
 import time
 import traceback
 from datetime import date, datetime, timedelta
@@ -34,15 +36,24 @@ from bot.number_utils import safe_float, safe_int
 from bot.paper_trader import PaperTrader
 from bot.risk_manager import RiskManager
 from bot.market_scanner import MarketScanner, SECTOR_ETF_BY_SYMBOL
+from bot.iv_history import IVHistory
 from bot.technicals import TechnicalAnalyzer
+from bot.strategies.calendar_spreads import CalendarSpreadStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
+from bot.strategies.naked_puts import NakedPutStrategy
 from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
 
-LIVE_SUPPORTED_ENTRY_STRATEGIES = {"credit_spreads", "covered_calls", "iron_condors"}
+LIVE_SUPPORTED_ENTRY_STRATEGIES = {
+    "credit_spreads",
+    "covered_calls",
+    "iron_condors",
+    "naked_puts",
+    "calendar_spreads",
+}
 EASTERN_TZ = ZoneInfo("America/New_York")
 OPEN_LONG_INSTRUCTIONS = {"BUY_TO_OPEN"}
 OPEN_SHORT_INSTRUCTIONS = {"SELL_TO_OPEN", "SELL_SHORT"}
@@ -81,6 +92,12 @@ class TradingBot:
         self._base_risk_config = copy.deepcopy(self.config.risk)
         self._active_account: Optional[dict] = None
         self._equity_history: list[dict] = []
+        self._last_heartbeat_time: Optional[datetime] = None
+        self._dashboard_generated_date: Optional[str] = None
+        self._signal_handlers_ready = False
+        self.iv_history = IVHistory()
+
+        self._log_config_overrides()
 
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
@@ -118,6 +135,14 @@ class TradingBot:
         if self.config.covered_calls.enabled:
             self.strategies.append(
                 CoveredCallStrategy(vars(self.config.covered_calls))
+            )
+        if self.config.naked_puts.enabled:
+            self.strategies.append(
+                NakedPutStrategy(vars(self.config.naked_puts))
+            )
+        if self.config.calendar_spreads.enabled:
+            self.strategies.append(
+                CalendarSpreadStrategy(vars(self.config.calendar_spreads))
             )
 
         self._base_strategy_min_credit = {
@@ -160,12 +185,83 @@ class TradingBot:
                 self.config.news.max_market_headlines,
             )
 
+    def _log_config_overrides(self) -> None:
+        """Log user overrides relative to BotConfig defaults."""
+        try:
+            baseline = BotConfig()
+            diffs: list[str] = []
+            self._collect_config_diffs("", self.config, baseline, diffs)
+            if diffs:
+                logger.info("Config overrides: %s", ", ".join(diffs))
+        except Exception as exc:
+            logger.debug("Could not compute config override diff: %s", exc)
+
+    def _collect_config_diffs(self, path: str, current, default, diffs: list[str]) -> None:
+        """Recursively collect changed config leaf values."""
+        if is_dataclass(current) and is_dataclass(default):
+            for field in fields(current):
+                key = field.name
+                self._collect_config_diffs(
+                    f"{path}.{key}" if path else key,
+                    getattr(current, key),
+                    getattr(default, key),
+                    diffs,
+                )
+            return
+
+        if isinstance(current, dict) and isinstance(default, dict):
+            keys = sorted(set(current.keys()) | set(default.keys()))
+            for key in keys:
+                self._collect_config_diffs(
+                    f"{path}.{key}" if path else str(key),
+                    current.get(key),
+                    default.get(key),
+                    diffs,
+                )
+            return
+
+        if isinstance(current, list) and isinstance(default, list):
+            if current != default:
+                diffs.append(
+                    f"{path}={self._safe_config_value(current)} "
+                    f"(default: {self._safe_config_value(default)})"
+                )
+            return
+
+        if current != default:
+            diffs.append(
+                f"{path}={self._safe_config_value(current)} "
+                f"(default: {self._safe_config_value(default)})"
+            )
+
+    @staticmethod
+    def _safe_config_value(value):
+        text = str(value)
+        lowered = text.lower()
+        if any(token in lowered for token in ("secret", "token", "hash", "api_key", "webhook")):
+            return "<redacted>"
+        return value
+
     def _configure_active_account(self) -> None:
         """Select active account/profile for live mode from config accounts list."""
         if self.is_paper:
             return
 
-        configured = self.schwab.configured_accounts()
+        configured = [
+            {
+                "name": str(account.name).strip(),
+                "hash": str(account.hash).strip(),
+                "risk_profile": str(account.risk_profile).strip() or "moderate",
+            }
+            for account in (self.config.schwab.accounts or [])
+            if str(getattr(account, "hash", "")).strip()
+        ]
+        if not configured:
+            try:
+                configured = self.schwab.configured_accounts()
+            except Exception as exc:
+                logger.debug("Could not fetch configured accounts from Schwab client: %s", exc)
+                configured = []
         if not configured:
             return
 
@@ -194,6 +290,17 @@ class TradingBot:
     def _apply_risk_profile(self, profile: str) -> None:
         """Apply account risk-profile multipliers to runtime risk config."""
         self.risk_manager.config = copy.deepcopy(self._base_risk_config)
+        named_profiles = self.config.risk_profiles if isinstance(self.config.risk_profiles, dict) else {}
+        profile_key = str(profile or "").strip().lower()
+        preset = named_profiles.get(profile_key)
+        if preset:
+            self.risk_manager.config.max_portfolio_risk_pct = float(preset.max_portfolio_risk_pct)
+            self.risk_manager.config.max_position_risk_pct = float(preset.max_position_risk_pct)
+            self.risk_manager.config.max_open_positions = int(preset.max_open_positions)
+            self.risk_manager.config.max_daily_loss_pct = float(preset.max_daily_loss_pct)
+            return
+
+        # Backward-compatible fallback for unknown profile names.
         if profile == "aggressive":
             self.risk_manager.config.max_open_positions = max(
                 1, int(round(self.risk_manager.config.max_open_positions * 1.5))
@@ -427,6 +534,10 @@ class TradingBot:
             enabled.add("iron_condors")
         if self.config.covered_calls.enabled:
             enabled.add("covered_calls")
+        if self.config.naked_puts.enabled:
+            enabled.add("naked_puts")
+        if self.config.calendar_spreads.enabled:
+            enabled.add("calendar_spreads")
         return enabled
 
     def _entries_allowed(self) -> bool:
@@ -1332,18 +1443,21 @@ class TradingBot:
                     technical_context = self.technicals.get_context(symbol, self.schwab)
                 except Exception as exc:
                     logger.debug("Technical context unavailable for %s: %s", symbol, exc)
+                market_context = self._build_market_context(symbol, chain_data)
                 for strategy in self.strategies:
                     signals = strategy.scan_for_entries(
                         symbol,
                         chain_data,
                         underlying_price,
                         technical_context=technical_context,
-                        market_context={},
+                        market_context=market_context,
                     )
                     if technical_context is not None:
                         tech_payload = technical_context.to_dict()
                         for signal in signals:
                             signal.metadata["technical_context"] = tech_payload
+                    for signal in signals:
+                        signal.metadata.setdefault("iv_rank", market_context.get("iv_rank"))
                     all_signals.extend(signals)
 
                 if not all_signals:
@@ -1463,6 +1577,22 @@ class TradingBot:
         details = position.get("details", {})
         strategy = position.get("strategy", "")
 
+        if strategy == "calendar_spread":
+            strike = details.get("strike", details.get("short_strike"))
+            front_exp = self._extract_expiration_key(details.get("front_expiration", details.get("expiration", "")))
+            back_exp = self._extract_expiration_key(details.get("back_expiration", ""))
+            if not front_exp or not back_exp or strike is None:
+                return None
+
+            front_calls = chain_data.get("calls", {}).get(front_exp, [])
+            back_calls = chain_data.get("calls", {}).get(back_exp, [])
+            front_mid = self._find_option_mid(front_calls, strike)
+            back_mid = self._find_option_mid(back_calls, strike)
+            if front_mid is None or back_mid is None:
+                return None
+            # Mark represented as negative to align debit strategy cashflow accounting.
+            return round(-(back_mid - front_mid), 2)
+
         expiration = self._extract_expiration_key(
             details.get("expiration", position.get("expiration", ""))
         )
@@ -1497,6 +1627,12 @@ class TradingBot:
 
         if strategy == "covered_call":
             short_mid = self._find_option_mid(calls, details.get("short_strike"))
+            if short_mid is None:
+                return None
+            return round(max(short_mid, 0.0), 2)
+
+        if strategy == "naked_put":
+            short_mid = self._find_option_mid(puts, details.get("short_strike"))
             if short_mid is None:
                 return None
             return round(max(short_mid, 0.0), 2)
@@ -1570,6 +1706,9 @@ class TradingBot:
         )
 
         details = self._build_position_details(analysis)
+        extra_details = signal.metadata.get("position_details")
+        if isinstance(extra_details, dict):
+            details.update(extra_details)
 
         if self.is_paper:
             result = self.paper_trader.execute_open(
@@ -1971,13 +2110,15 @@ class TradingBot:
             technical_context = None
 
         candidate_signals: list[TradeSignal] = []
+        market_context = self._build_market_context(signal.symbol, chain_data)
+        market_context["roll_context"] = True
         for strategy in self.strategies:
             strategy_signals = strategy.scan_for_entries(
                 signal.symbol,
                 chain_data,
                 underlying_price,
                 technical_context=technical_context,
-                market_context={"roll_context": True},
+                market_context=market_context,
             )
             for candidate in strategy_signals:
                 if candidate.strategy == signal.strategy and candidate.analysis and candidate.analysis.dte >= 20:
@@ -2256,6 +2397,34 @@ class TradingBot:
         dump_json(path, payload)
 
     # ── Data Fetching ────────────────────────────────────────────────
+
+    def _build_market_context(self, symbol: str, chain_data: dict) -> dict:
+        """Build lightweight shared market context for strategy scans."""
+        iv = self._average_chain_iv(chain_data)
+        iv_rank = self.iv_history.update_and_rank(symbol, iv) if iv > 0 else 0.0
+        return {
+            "iv_rank": iv_rank,
+            "regime": self.circuit_state.get("regime", "normal"),
+            "vix": self.circuit_state.get("vix"),
+        }
+
+    @staticmethod
+    def _average_chain_iv(chain_data: dict) -> float:
+        values: list[float] = []
+        for side in ("calls", "puts"):
+            exp_map = chain_data.get(side, {})
+            if not isinstance(exp_map, dict):
+                continue
+            for options in exp_map.values():
+                for option in options or []:
+                    if not isinstance(option, dict):
+                        continue
+                    iv = safe_float(option.get("iv", 0.0), 0.0)
+                    if iv > 0:
+                        values.append(iv)
+        if not values:
+            return 0.0
+        return sum(values) / len(values)
 
     def _get_chain_data(self, symbol: str) -> tuple[dict, float]:
         """Fetch and parse options chain data for a symbol."""
@@ -2889,6 +3058,7 @@ class TradingBot:
             logger.info("=" * 60)
             if self.llm_advisor:
                 self.llm_advisor.log_weekly_hit_rate()
+            self._auto_generate_dashboard_if_due(force=True)
             return
 
         ledger_summary = (
@@ -2921,13 +3091,81 @@ class TradingBot:
         logger.info("=" * 60)
         if self.llm_advisor:
             self.llm_advisor.log_weekly_hit_rate()
+        self._auto_generate_dashboard_if_due(force=True)
 
     def _scheduled_dashboard(self) -> None:
         """Scheduled dashboard generation wrapper."""
+        self._auto_generate_dashboard_if_due(force=True)
+
+    def _auto_generate_dashboard_if_due(self, *, force: bool = False) -> None:
+        """Generate dashboard once per day after close or when explicitly forced."""
+        now_et = self._now_eastern()
+        today_iso = now_et.date().isoformat()
+        if self._dashboard_generated_date == today_iso:
+            return
+        if not force and now_et.hour < 16:
+            return
         try:
-            self.generate_dashboard()
+            output = self.generate_dashboard()
+            self._dashboard_generated_date = today_iso
+            logger.info("End-of-day dashboard generated: %s", output)
         except Exception as exc:
             logger.error("Dashboard generation failed: %s", exc)
+
+    def _setup_signal_handlers(self) -> None:
+        """Register SIGTERM/SIGINT handlers for graceful stop."""
+        if self._signal_handlers_ready:
+            return
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, self._handle_shutdown)
+            except Exception as exc:
+                logger.debug("Could not register signal handler for %s: %s", sig, exc)
+        self._signal_handlers_ready = True
+
+    def _handle_shutdown(self, signum, frame) -> None:  # pragma: no cover - invoked by OS signals
+        """Gracefully stop loop and cancel pending live orders."""
+        logger.info("Shutdown signal received: %s", signum)
+        self._running = False
+
+        if not self.is_paper and self.live_ledger:
+            order_ids = []
+            try:
+                order_ids.extend(self.live_ledger.pending_entry_order_ids())
+                order_ids.extend(self.live_ledger.pending_exit_order_ids())
+            except Exception as exc:
+                logger.warning("Failed to enumerate pending order IDs on shutdown: %s", exc)
+
+            for order_id in order_ids:
+                try:
+                    self.schwab.cancel_order(order_id)
+                except Exception as exc:
+                    logger.warning("Failed to cancel pending order %s during shutdown: %s", order_id, exc)
+
+            if hasattr(self.live_ledger, "save"):
+                try:
+                    self.live_ledger.save()
+                except Exception as exc:
+                    logger.warning("Failed to persist live ledger on shutdown: %s", exc)
+
+        logger.info("Shutdown complete")
+
+    def _maybe_log_heartbeat(self) -> None:
+        """Emit a periodic liveness heartbeat in long-running mode."""
+        now_et = self._now_eastern()
+        if self._last_heartbeat_time and (now_et - self._last_heartbeat_time) < timedelta(minutes=5):
+            return
+
+        positions = len(self.risk_manager.portfolio.open_positions)
+        balance = float(self.risk_manager.portfolio.account_balance or 0.0)
+        logger.info(
+            "Heartbeat: %d positions, balance=$%s, mode=%s, regime=%s",
+            positions,
+            f"{balance:,.2f}",
+            self.config.trading_mode,
+            self.circuit_state.get("regime", "normal"),
+        )
+        self._last_heartbeat_time = now_et
 
     def generate_dashboard(self) -> str:
         """Generate dashboard HTML from current paper/live state."""
@@ -3053,6 +3291,7 @@ class TradingBot:
             logger.info("Watchlist: %s", ", ".join(self.config.watchlist))
         logger.info("=" * 60)
 
+        self._setup_signal_handlers()
         self.connect()
         self._validate_llm_readiness()
         self.setup_schedule()
@@ -3070,6 +3309,8 @@ class TradingBot:
         try:
             while self._running:
                 schedule.run_pending()
+                self._maybe_log_heartbeat()
+                self._auto_generate_dashboard_if_due()
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")

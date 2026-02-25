@@ -15,6 +15,7 @@ import requests
 from defusedxml import ElementTree as DET
 
 from bot.config import NewsConfig
+from bot.openai_compat import request_openai_json
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ TRACKED_TOPICS = {
     "inflation", "federal reserve", "interest rates", "earnings", "ai",
     "tariffs", "recession", "unemployment", "geopolitics", "volatility",
 }
+SECRET_PLACEHOLDER_MARKERS = ("your_", "_here", "changeme")
 
 
 @dataclass
@@ -252,7 +254,7 @@ class NewsScanner:
 
     def _score_sentiment_with_llm(self, symbol: str, headlines: list[str]) -> dict:
         api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        if not _is_configured_secret(api_key):
             return self._fallback_sentiment(headlines)
 
         prompt = {
@@ -265,42 +267,26 @@ class NewsScanner:
                 "key_event": "string|null",
             },
         }
-        payload = {
-            "model": "gpt-5.2-mini",
-            "temperature": 0.0,
-            "instructions": "Respond ONLY with valid JSON.",
-            "input": json.dumps(prompt, separators=(",", ":")),
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "news_sentiment",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
-                            "confidence": {"type": "number", "minimum": 0, "maximum": 100},
-                            "key_event": {"type": ["string", "null"]},
-                        },
-                        "required": ["sentiment", "confidence", "key_event"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
-        }
-
         try:
-            response = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=self.config.request_timeout_seconds,
+            raw = request_openai_json(
+                api_key=api_key,
+                model="gpt-4.1",
+                system_prompt="You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
+                user_prompt=json.dumps(prompt, separators=(",", ":")),
+                timeout_seconds=self.config.request_timeout_seconds,
+                temperature=0.0,
+                schema_name="news_sentiment",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+                        "key_event": {"type": ["string", "null"]},
+                    },
+                    "required": ["sentiment", "confidence", "key_event"],
+                    "additionalProperties": False,
+                },
             )
-            response.raise_for_status()
-            data = response.json()
-            raw = data.get("output_text") or ""
-            if not raw:
-                raw = _extract_openai_output_text(data)
             parsed = json.loads(raw) if raw else {}
             return {
                 "sentiment": str(parsed.get("sentiment", "neutral")).lower(),
@@ -337,19 +323,6 @@ class NewsScanner:
             "confidence": round(confidence, 1),
             "key_event": key_event,
         }
-
-
-def _extract_openai_output_text(data: dict) -> str:
-    output = data.get("output", [])
-    if not isinstance(output, list):
-        return ""
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        for part in item.get("content", []) or []:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                return part["text"]
-    return ""
 
 
 def _parse_rss_items(xml_text: str, limit: int) -> list[NewsItem]:
@@ -435,3 +408,11 @@ def _dedupe_news(items: list[NewsItem]) -> list[NewsItem]:
 
 def date_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
+
+
+def _is_configured_secret(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return not any(marker in lowered for marker in SECRET_PLACEHOLDER_MARKERS)

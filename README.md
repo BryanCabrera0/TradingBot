@@ -3,7 +3,7 @@
 Automated options trading bot for Charles Schwab / ThinkorSwim with:
 - rule-based strategy scanning,
 - portfolio risk controls,
-- LLM trade review using OpenAI GPT (`gpt-5.2-pro`),
+- LLM trade review using OpenAI GPT (`gpt-4.1`),
 - symbol + macro news intelligence for trade context.
 
 ## Strategies
@@ -73,7 +73,7 @@ python3 main.py --live --yes
 ## LLM + News Intelligence
 
 - LLM provider: OpenAI Responses API
-- Default model: `gpt-5.2-pro`
+- Default model: `gpt-4.1`
 - Review mode: `advisory` or `blocking`
 - News scanner:
   - ticker-specific headlines (earnings, analysts, events),

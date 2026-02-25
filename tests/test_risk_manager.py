@@ -1,5 +1,6 @@
 import unittest
 from datetime import date, timedelta
+from unittest import mock
 
 from bot.analysis import SpreadAnalysis
 from bot.config import RiskConfig
@@ -8,6 +9,35 @@ from bot.strategies.base import TradeSignal
 
 
 class RiskManagerTests(unittest.TestCase):
+    @staticmethod
+    def _make_signal(
+        *,
+        symbol: str = "AAPL",
+        net_delta: float = 5.0,
+        net_vega: float = 0.2,
+        max_loss: float = 4.0,
+    ) -> TradeSignal:
+        return TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol=symbol,
+            quantity=1,
+            analysis=SpreadAnalysis(
+                symbol=symbol,
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=30,
+                short_strike=95,
+                long_strike=90,
+                credit=1.0,
+                max_loss=max_loss,
+                probability_of_profit=0.65,
+                score=60,
+                net_delta=net_delta,
+                net_vega=net_vega,
+            ),
+        )
+
     def test_update_portfolio_keeps_supplied_daily_pnl_on_new_day(self) -> None:
         manager = RiskManager(RiskConfig())
         manager.portfolio.daily_pnl_date = date.today() - timedelta(days=1)
@@ -75,30 +105,11 @@ class RiskManagerTests(unittest.TestCase):
 
     def test_approve_trade_blocks_earnings_in_window(self) -> None:
         manager = RiskManager(RiskConfig())
-        manager.earnings_calendar = unittest.mock.Mock(
-            earnings_within_window=unittest.mock.Mock(return_value=(True, "2026-03-10"))
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(True, "2026-03-10"))
         )
         manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
-        signal = TradeSignal(
-            action="open",
-            strategy="bull_put_spread",
-            symbol="AAPL",
-            quantity=1,
-            analysis=SpreadAnalysis(
-                symbol="AAPL",
-                strategy="bull_put_spread",
-                expiration="2026-03-20",
-                dte=25,
-                short_strike=95,
-                long_strike=90,
-                credit=1.2,
-                max_loss=3.8,
-                probability_of_profit=0.7,
-                score=60,
-                net_delta=5.0,
-                net_vega=0.5,
-            ),
-        )
+        signal = self._make_signal(symbol="AAPL", net_delta=5.0, net_vega=0.5, max_loss=3.8)
 
         approved, reason = manager.approve_trade(signal)
 
@@ -107,39 +118,137 @@ class RiskManagerTests(unittest.TestCase):
 
     def test_approve_trade_blocks_excess_delta_direction(self) -> None:
         manager = RiskManager(RiskConfig(max_portfolio_delta_abs=50.0))
-        manager.earnings_calendar = unittest.mock.Mock(
-            earnings_within_window=unittest.mock.Mock(return_value=(False, None))
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
         )
         manager.update_portfolio(
             account_balance=100_000,
             open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 52.0}}],
             daily_pnl=0.0,
         )
-        signal = TradeSignal(
-            action="open",
-            strategy="bull_put_spread",
-            symbol="QQQ",
-            quantity=1,
-            analysis=SpreadAnalysis(
-                symbol="QQQ",
-                strategy="bull_put_spread",
-                expiration="2026-03-20",
-                dte=30,
-                short_strike=95,
-                long_strike=90,
-                credit=1.0,
-                max_loss=4.0,
-                probability_of_profit=0.65,
-                score=58,
-                net_delta=6.0,
-                net_vega=0.1,
-            ),
-        )
+        signal = self._make_signal(symbol="QQQ", net_delta=6.0, net_vega=0.1, max_loss=4.0)
 
         approved, reason = manager.approve_trade(signal)
 
         self.assertFalse(approved)
         self.assertIn("delta limit", reason.lower())
+
+    def test_check9_earnings_blocks_trade(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(True, "2026-03-10"))
+        )
+        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+
+        approved, reason = manager.approve_trade(self._make_signal())
+
+        self.assertFalse(approved)
+        self.assertIn("Earnings", reason)
+
+    def test_check10_delta_guard(self) -> None:
+        manager = RiskManager(RiskConfig(max_portfolio_delta_abs=50.0))
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 48.0}}],
+            daily_pnl=0.0,
+        )
+
+        approved, reason = manager.approve_trade(self._make_signal(symbol="QQQ", net_delta=5.0))
+
+        self.assertFalse(approved)
+        self.assertIn("delta limit", reason.lower())
+
+    def test_check10_delta_opposite_direction_allowed(self) -> None:
+        manager = RiskManager(
+            RiskConfig(
+                max_portfolio_delta_abs=50.0,
+                max_sector_risk_pct=100.0,
+            )
+        )
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 48.0}}],
+            daily_pnl=0.0,
+        )
+
+        approved, _ = manager.approve_trade(self._make_signal(symbol="QQQ", net_delta=-5.0))
+
+        self.assertTrue(approved)
+
+    def test_check11_vega_guard(self) -> None:
+        manager = RiskManager(RiskConfig(max_portfolio_vega_pct_of_account=0.5))
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+
+        approved, reason = manager.approve_trade(self._make_signal(symbol="QQQ", net_vega=6.0))
+
+        self.assertFalse(approved)
+        self.assertIn("vega limit", reason.lower())
+
+    def test_check12_sector_concentration(self) -> None:
+        manager = RiskManager(
+            RiskConfig(
+                max_sector_risk_pct=40.0,
+                max_portfolio_risk_pct=20.0,
+            )
+        )
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[
+                {"symbol": "AAPL", "quantity": 1, "max_loss": 39.0, "details": {}},
+                {"symbol": "JPM", "quantity": 1, "max_loss": 61.0, "details": {}},
+            ],
+            daily_pnl=0.0,
+        )
+
+        approved, reason = manager.approve_trade(self._make_signal(symbol="MSFT", max_loss=3.0))
+
+        self.assertFalse(approved)
+        self.assertIn("Sector concentration", reason)
+
+    def test_correlation_guard(self) -> None:
+        manager = RiskManager(
+            RiskConfig(
+                max_positions_per_symbol=1,
+                max_sector_risk_pct=100.0,
+                correlation_threshold=0.8,
+            )
+        )
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[{"symbol": "AAPL", "quantity": 1, "max_loss": 2.0, "details": {}}],
+            daily_pnl=0.0,
+        )
+
+        base = [100 + i for i in range(70)]
+        highly_corr = [200 + (i * 2) for i in range(70)]
+
+        def provider(symbol: str, days: int):
+            if symbol == "AAPL":
+                return [{"close": value} for value in base]
+            if symbol == "MSFT":
+                return [{"close": value} for value in highly_corr]
+            return []
+
+        manager.set_price_history_provider(provider)
+        approved, reason = manager.approve_trade(self._make_signal(symbol="MSFT", max_loss=2.0))
+
+        self.assertFalse(approved)
+        self.assertIn("Correlation guard", reason)
 
 
 if __name__ == "__main__":

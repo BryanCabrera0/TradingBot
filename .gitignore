@@ -13,3 +13,5 @@ logs/
 paper_trades.json
 live_trades.json
 deploy/generated/
+bot/data/*
+!bot/data/sector_map.json

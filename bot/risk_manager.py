@@ -138,6 +138,11 @@ class RiskManager:
             return 0.0
 
         raw_max_loss = max(0.0, float(analysis.max_loss))
+        if signal.strategy == "naked_put":
+            strike = max(0.0, float(analysis.short_strike))
+            credit = max(0.0, float(analysis.credit))
+            return round(max(strike - credit, raw_max_loss), 2)
+
         if signal.strategy != "covered_call" or raw_max_loss > 0:
             return raw_max_loss
 

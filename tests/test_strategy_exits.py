@@ -96,6 +96,110 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(len(signals), 1)
         self.assertEqual(signals[0].position_id, "p3")
 
+    def test_adaptive_profit_target_under_14_dte(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p_under14",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "entry_credit": 1.0,
+                "current_value": 0.75,
+                "dte_remaining": 10,
+                "status": "open",
+                "details": {"short_strike": 95.0},
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].action, "close")
+
+    def test_adaptive_profit_target_over_30_dte(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p_over30",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "entry_credit": 1.0,
+                "current_value": 0.5,
+                "dte_remaining": 35,
+                "status": "open",
+                "details": {"short_strike": 95.0},
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(signals, [])
+
+    def test_partial_close_at_40pct(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p_partial",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "entry_credit": 1.0,
+                "current_value": 0.6,
+                "dte_remaining": 25,
+                "status": "open",
+                "quantity": 4,
+                "details": {"short_strike": 95.0},
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].quantity, 2)
+        self.assertEqual(signals[0].action, "close")
+
+    def test_roll_signal_at_21_dte(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p_roll",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "entry_credit": 1.0,
+                "current_value": 0.7,
+                "dte_remaining": 21,
+                "status": "open",
+                "quantity": 1,
+                "details": {"short_strike": 95.0},
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].action, "roll")
+
+    def test_defend_mode_tightens_stop(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p_defend",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "entry_credit": 1.0,
+                "current_value": 2.6,
+                "dte_remaining": 30,
+                "status": "open",
+                "quantity": 1,
+                "underlying_price": 99.5,
+                "details": {"short_strike": 100.0},
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(len(signals), 1)
+        self.assertIn("Stop loss", signals[0].reason)
+
 
 if __name__ == "__main__":
     unittest.main()

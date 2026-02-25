@@ -80,9 +80,10 @@ class LLMAdvisorTests(unittest.TestCase):
 
     def test_openai_uses_responses_api(self) -> None:
         advisor = LLMAdvisor(
-            LLMConfig(enabled=True, provider="openai", model="gpt-5.2-pro")
+            LLMConfig(enabled=True, provider="openai", model="gpt-4.1")
         )
         response = mock.Mock()
+        response.status_code = 200
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "output_text": (
@@ -92,20 +93,21 @@ class LLMAdvisorTests(unittest.TestCase):
         }
 
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.llm_advisor.requests.post", return_value=response) as post:
+            with mock.patch("bot.openai_compat.requests.post", return_value=response) as post:
                 raw = advisor._query_openai("{}")
 
         self.assertIn('"approve":true', raw.replace(" ", ""))
         args, kwargs = post.call_args
         self.assertEqual(args[0], "https://api.openai.com/v1/responses")
-        self.assertEqual(kwargs["json"]["model"], "gpt-5.2-pro")
+        self.assertEqual(kwargs["json"]["model"], "gpt-4.1")
         self.assertEqual(kwargs["json"]["text"]["format"]["type"], "json_schema")
 
     def test_openai_fallback_extracts_text_from_output_blocks(self) -> None:
         advisor = LLMAdvisor(
-            LLMConfig(enabled=True, provider="openai", model="gpt-5.2-pro")
+            LLMConfig(enabled=True, provider="openai", model="gpt-4.1")
         )
         response = mock.Mock()
+        response.status_code = 200
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "output_text": "",
@@ -125,10 +127,44 @@ class LLMAdvisorTests(unittest.TestCase):
         }
 
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.llm_advisor.requests.post", return_value=response):
+            with mock.patch("bot.openai_compat.requests.post", return_value=response):
                 raw = advisor._query_openai("{}")
 
         self.assertIn("headline risk", raw)
+
+    def test_openai_fallbacks_to_chat_completions_on_404(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(enabled=True, provider="openai", model="gpt-4.1")
+        )
+        responses_404 = mock.Mock()
+        responses_404.status_code = 404
+        responses_404.raise_for_status.side_effect = Exception("not used")
+
+        chat_response = mock.Mock()
+        chat_response.raise_for_status.return_value = None
+        chat_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"verdict":"approve","confidence":85,'
+                            '"reasoning":"ok","suggested_adjustment":null}'
+                        )
+                    }
+                }
+            ]
+        }
+
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with mock.patch(
+                "bot.openai_compat.requests.post",
+                side_effect=[responses_404, chat_response],
+            ) as post:
+                raw = advisor._query_openai("{}")
+
+        self.assertIn('"verdict":"approve"', raw.replace(" ", ""))
+        self.assertEqual(post.call_args_list[0].args[0], "https://api.openai.com/v1/responses")
+        self.assertEqual(post.call_args_list[1].args[0], "https://api.openai.com/v1/chat/completions")
 
     def test_openai_health_check_rejects_placeholder_key(self) -> None:
         advisor = LLMAdvisor(LLMConfig(enabled=True, provider="openai"))

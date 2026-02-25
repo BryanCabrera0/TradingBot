@@ -1,6 +1,7 @@
 """Schwab API client wrapper for authentication, market data, and order execution."""
 
 import logging
+import random
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -86,6 +87,56 @@ class SchwabClient:
         if self._client is None:
             raise RuntimeError("Client not connected. Call connect() first.")
         return self._client
+
+    def _retry_api_call(
+        self,
+        func,
+        *args,
+        max_retries: int = 3,
+        base_delay: float = 2.0,
+        **kwargs,
+    ):
+        """Retry Schwab API calls with exponential backoff and jitter."""
+        retries = max(0, int(max_retries))
+        delay_base = max(0.1, float(base_delay))
+        last_exc = None
+
+        for attempt in range(retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if status_code == 401:
+                    logger.warning("Schwab token may be expired — re-authentication needed")
+                    raise
+
+                if attempt >= retries:
+                    raise
+
+                delay = delay_base * (2 ** attempt) + random.uniform(0.0, 1.0)
+                logger.warning(
+                    "Schwab API call failed (%s) attempt %d/%d: %s. Retrying in %.2fs",
+                    getattr(func, "__name__", "api_call"),
+                    attempt + 1,
+                    retries + 1,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+
+        if last_exc is not None:
+            raise last_exc
+
+    def _request_with_status(self, func, *args, **kwargs):
+        """Execute request-like call and retry on failures until status is OK."""
+        def _call():
+            response = func(*args, **kwargs)
+            response.raise_for_status()
+            return response
+
+        return self._retry_api_call(_call)
 
     # ── Account Info ──────────────────────────────────────────────────
 
@@ -173,18 +224,17 @@ class SchwabClient:
 
     def _fetch_account_hashes(self) -> list[str]:
         """Fetch linked account hashes from Schwab."""
-        resp = self.client.get_account_numbers()
-        resp.raise_for_status()
+        resp = self._request_with_status(self.client.get_account_numbers)
         return _extract_account_hashes(resp.json())
 
     def get_account(self) -> dict:
         """Get account details including balances and positions."""
         account_hash = self._require_account_hash()
-        resp = self.client.get_account(
+        resp = self._request_with_status(
+            self.client.get_account,
             account_hash,
             fields=[schwab.client.Client.Account.Fields.POSITIONS],
         )
-        resp.raise_for_status()
         return resp.json()
 
     def get_account_balance(self) -> float:
@@ -208,8 +258,7 @@ class SchwabClient:
 
     def get_quote(self, symbol: str) -> dict:
         """Get a real-time quote for a symbol."""
-        resp = self.client.get_quote(symbol)
-        resp.raise_for_status()
+        resp = self._request_with_status(self.client.get_quote, symbol)
         data = resp.json()
         return data.get(symbol, data)
 
@@ -227,7 +276,8 @@ class SchwabClient:
 
         response = None
         if hasattr(self.client, "get_price_history_every_day"):
-            response = self.client.get_price_history_every_day(
+            response = self._request_with_status(
+                self.client.get_price_history_every_day,
                 symbol,
                 start_datetime=start_dt,
                 end_datetime=end_dt,
@@ -235,7 +285,8 @@ class SchwabClient:
                 need_previous_close=True,
             )
         elif hasattr(self.client, "get_price_history"):
-            response = self.client.get_price_history(
+            response = self._request_with_status(
+                self.client.get_price_history,
                 symbol,
                 period_type=self.client.PriceHistory.PeriodType.YEAR,
                 period=self.client.PriceHistory.Period.ONE_YEAR,
@@ -247,7 +298,6 @@ class SchwabClient:
         else:
             raise RuntimeError("Schwab client does not expose a price-history endpoint.")
 
-        response.raise_for_status()
         payload = response.json()
         candles = payload.get("candles", [])
         out: list[dict] = []
@@ -294,7 +344,8 @@ class SchwabClient:
         if to_date is None:
             to_date = datetime.now() + timedelta(days=60)
 
-        resp = self.client.get_option_chain(
+        resp = self._request_with_status(
+            self.client.get_option_chain,
             symbol,
             contract_type=ct_map.get(contract_type, ct_map["ALL"]),
             strike_count=strike_count,
@@ -302,7 +353,6 @@ class SchwabClient:
             to_date=to_date,
             include_underlying_quote=True,
         )
-        resp.raise_for_status()
         return resp.json()
 
     # ── Options Chain Parsing ─────────────────────────────────────────
@@ -357,8 +407,7 @@ class SchwabClient:
     def place_order(self, order_spec) -> dict:
         """Place an order and return the response."""
         account_hash = self._require_account_hash()
-        resp = self.client.place_order(account_hash, order_spec)
-        resp.raise_for_status()
+        resp = self._request_with_status(self.client.place_order, account_hash, order_spec)
         # Extract order ID from Location header
         order_id = None
         location = resp.headers.get("Location", "")
@@ -497,15 +546,13 @@ class SchwabClient:
     def get_order(self, order_id: str) -> dict:
         """Get the status of an order."""
         account_hash = self._require_account_hash()
-        resp = self.client.get_order(order_id, account_hash)
-        resp.raise_for_status()
+        resp = self._request_with_status(self.client.get_order, order_id, account_hash)
         return resp.json()
 
     def cancel_order(self, order_id: str) -> None:
         """Cancel an open order."""
         account_hash = self._require_account_hash()
-        resp = self.client.cancel_order(order_id, account_hash)
-        resp.raise_for_status()
+        self._request_with_status(self.client.cancel_order, order_id, account_hash)
         logger.info("Order %s cancelled.", order_id)
 
     def get_orders(self, days_back: int = 7) -> list:
@@ -513,12 +560,12 @@ class SchwabClient:
         account_hash = self._require_account_hash()
         from_time = datetime.now() - timedelta(days=days_back)
         to_time = datetime.now()
-        resp = self.client.get_orders_for_account(
+        resp = self._request_with_status(
+            self.client.get_orders_for_account,
             account_hash,
             from_entered_datetime=from_time,
             to_entered_datetime=to_time,
         )
-        resp.raise_for_status()
         return resp.json()
 
     def is_equity_market_open(self, now: Optional[datetime] = None) -> bool:
