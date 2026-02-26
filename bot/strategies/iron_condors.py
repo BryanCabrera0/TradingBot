@@ -48,6 +48,13 @@ class IronCondorStrategy(BaseStrategy):
             min_dte, max_dte = 35, 50
             spread_width = max(1.0, spread_width - 1.0)
 
+        vol_surface = (market_context or {}).get("vol_surface", {})
+        if isinstance(vol_surface, dict) and vol_surface:
+            vol_of_vol = float(vol_surface.get("vol_of_vol", 0.0) or 0.0)
+            max_vov = float(self.config.get("max_vol_of_vol", self.config.get("max_vol_of_vol_for_condors", 0.20)))
+            if vol_of_vol > max_vov:
+                return []
+
         # Iron condors prefer range-bound markets.
         if technical_context and not technical_context.between_bands:
             return []

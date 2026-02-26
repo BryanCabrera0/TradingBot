@@ -46,6 +46,8 @@ class CreditSpreadStrategy(BaseStrategy):
 
         min_dte, max_dte = base_min_dte, base_max_dte
         size_multiplier = 1.0
+        vol_surface = (market_context or {}).get("vol_surface", {})
+        flow_context = (market_context or {}).get("options_flow", {})
 
         if iv_rank > 70:
             spread_width += 1.0
@@ -55,6 +57,11 @@ class CreditSpreadStrategy(BaseStrategy):
             spread_width = max(1.0, spread_width - 1.0)
             min_dte, max_dte = 35, 50
             size_multiplier = 0.70
+
+        if isinstance(vol_surface, dict):
+            spread = float(vol_surface.get("realized_implied_spread", 0.0) or 0.0)
+            if spread < 0:
+                size_multiplier *= 0.60
 
         skew_bias = "neutral"
         if put_call_skew > 10:
@@ -82,6 +89,7 @@ class CreditSpreadStrategy(BaseStrategy):
                     mean_reversion_bias=mean_reversion_bias,
                     size_multiplier=size_multiplier,
                     technical_context=technical_context,
+                    flow_context=flow_context if isinstance(flow_context, dict) else {},
                 )
                 signals.extend(put_signals)
 
@@ -103,6 +111,7 @@ class CreditSpreadStrategy(BaseStrategy):
                     mean_reversion_bias=mean_reversion_bias,
                     size_multiplier=size_multiplier,
                     technical_context=technical_context,
+                    flow_context=flow_context if isinstance(flow_context, dict) else {},
                 )
                 signals.extend(call_signals)
 
@@ -127,6 +136,7 @@ class CreditSpreadStrategy(BaseStrategy):
         mean_reversion_bias: str,
         size_multiplier: float,
         technical_context: Optional[TechnicalContext],
+        flow_context: dict,
     ) -> list[TradeSignal]:
         """Find bull put spread opportunities."""
         signals: list[TradeSignal] = []
@@ -159,6 +169,13 @@ class CreditSpreadStrategy(BaseStrategy):
             analysis.score = max(0.0, analysis.score - 10.0)
         if mean_reversion_bias == "bull_put":
             analysis.score = min(100.0, analysis.score + 15.0)
+        flow_bias = str(flow_context.get("directional_bias", "neutral")).lower()
+        unusual = bool(flow_context.get("unusual_activity_flag", False))
+        inst_dir = str(flow_context.get("institutional_flow_direction", "neutral")).lower()
+        if flow_bias == "bearish":
+            analysis.score = max(0.0, analysis.score - 15.0)
+        if unusual and inst_dir in {"bearish", "down"}:
+            return signals
 
         div_risk = self.dividend_calendar.assess_trade_risk(
             symbol=symbol,
@@ -208,6 +225,7 @@ class CreditSpreadStrategy(BaseStrategy):
         mean_reversion_bias: str,
         size_multiplier: float,
         technical_context: Optional[TechnicalContext],
+        flow_context: dict,
     ) -> list[TradeSignal]:
         """Find bear call spread opportunities."""
         signals: list[TradeSignal] = []
@@ -240,6 +258,13 @@ class CreditSpreadStrategy(BaseStrategy):
             analysis.score = max(0.0, analysis.score - 10.0)
         if mean_reversion_bias == "bear_call":
             analysis.score = min(100.0, analysis.score + 15.0)
+        flow_bias = str(flow_context.get("directional_bias", "neutral")).lower()
+        unusual = bool(flow_context.get("unusual_activity_flag", False))
+        inst_dir = str(flow_context.get("institutional_flow_direction", "neutral")).lower()
+        if flow_bias == "bullish":
+            analysis.score = max(0.0, analysis.score - 15.0)
+        if unusual and inst_dir in {"bullish", "up"}:
+            return signals
 
         div_risk = self.dividend_calendar.assess_trade_risk(
             symbol=symbol,

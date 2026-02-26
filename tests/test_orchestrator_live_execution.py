@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 from unittest import mock
 
 from bot.analysis import SpreadAnalysis
@@ -17,6 +18,12 @@ def make_live_config() -> BotConfig:
     cfg.credit_spreads.enabled = True
     cfg.covered_calls.enabled = False
     cfg.iron_condors.enabled = False
+    return cfg
+
+
+def make_paper_config() -> BotConfig:
+    cfg = make_live_config()
+    cfg.trading_mode = "paper"
     return cfg
 
 
@@ -277,6 +284,226 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
         bot._execute_exit.assert_called_once()
         bot._try_execute_entry.assert_called_once()
+
+    def test_orchestrator_roll_execution_links_metadata(self) -> None:
+        bot = TradingBot(make_paper_config())
+        source_position = {
+            "position_id": "paper_src",
+            "status": "open",
+            "symbol": "SPY",
+            "strategy": "bull_put_spread",
+            "dte_remaining": 5,
+            "quantity": 1,
+            "entry_credit": 1.0,
+            "current_value": 0.45,
+            "details": {"roll_count": 0},
+        }
+        bot._get_tracked_positions = mock.Mock(return_value=[source_position])
+        bot.roll_manager.evaluate = mock.Mock(
+            return_value=SimpleNamespace(
+                should_roll=True,
+                reason="profit roll",
+                min_credit_required=0.1,
+                roll_type="profit",
+            )
+        )
+        bot.paper_trader.execute_close = mock.Mock(return_value={"status": "FILLED"})
+        bot.paper_trader.closed_trades = [
+            {"position_id": "paper_src", "status": "closed", "details": {}}
+        ]
+        bot.paper_trader._save_state = mock.Mock()
+
+        replacement = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-04-17",
+                dte=35,
+                short_strike=98,
+                long_strike=93,
+                credit=1.3,
+                max_loss=3.7,
+                probability_of_profit=0.66,
+                score=72,
+            ),
+            metadata={},
+        )
+        bot._find_roll_replacement_signal = mock.Mock(return_value=replacement)
+        bot._try_execute_entry = mock.Mock(
+            side_effect=lambda signal: signal.metadata.__setitem__("paper_position_id", "paper_new") or True
+        )
+
+        bot._execute_roll(
+            TradeSignal(
+                action="roll",
+                strategy="bull_put_spread",
+                symbol="SPY",
+                position_id="paper_src",
+                quantity=1,
+                reason="roll test",
+                metadata={},
+            )
+        )
+
+        bot.paper_trader.execute_close.assert_called_once()
+        bot._try_execute_entry.assert_called_once()
+        rolled = bot.paper_trader.closed_trades[0]
+        self.assertEqual(rolled["status"], "rolled")
+        self.assertEqual(rolled["rolled_to_position_id"], "paper_new")
+        self.assertEqual(rolled["details"].get("roll_status"), "rolled")
+
+    def test_orchestrator_adjustment_execution(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot._review_adjustment_with_llm = mock.Mock(return_value=True)
+        bot.paper_trader._save_state = mock.Mock()
+        bot.paper_trader.positions = [
+            {
+                "position_id": "pos_adj",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "status": "open",
+                "details": {
+                    "expiration": "2026-03-20",
+                    "short_strike": 100.0,
+                    "long_strike": 95.0,
+                    "adjustment_count": 0,
+                    "adjustment_cost": 0.0,
+                },
+            }
+        ]
+        position = dict(bot.paper_trader.positions[0])
+        position["underlying_price"] = 99.0
+        bot._get_chain_data = mock.Mock(
+            return_value=(
+                {
+                    "puts": {
+                        "2026-03-20": [
+                            {"strike": 90.0, "delta": -0.12, "mid": 0.22},
+                            {"strike": 88.0, "delta": -0.08, "mid": 0.14},
+                        ]
+                    },
+                    "calls": {},
+                },
+                99.0,
+            )
+        )
+
+        plan = SimpleNamespace(action="add_wing", reason="short strike tested")
+        bot._execute_adjustment_plan(position, plan)
+
+        self.assertTrue(any(order.get("type") == "adjustment" for order in bot.paper_trader.orders))
+        details = bot.paper_trader.positions[0]["details"]
+        self.assertEqual(details.get("adjustment_count"), 1)
+        self.assertGreater(float(details.get("adjustment_cost", 0.0)), 0.0)
+
+    def test_startup_reconciliation(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot.live_ledger = mock.Mock()
+        bot.live_ledger.close_missing_from_broker.return_value = 1
+        bot.live_ledger.list_positions.return_value = [
+            {
+                "position_id": "p1",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "details": {
+                    "expiration": "2026-03-20",
+                    "short_strike": 100.0,
+                    "long_strike": 95.0,
+                },
+            }
+        ]
+        bot._get_broker_positions = mock.Mock(
+            return_value=[
+                {
+                    "instrument": {"assetType": "OPTION", "symbol": "QQQ   260320P00100000"},
+                    "shortQuantity": 1.0,
+                    "longQuantity": 0.0,
+                }
+            ]
+        )
+
+        reconciled = bot._startup_reconcile_positions()
+
+        self.assertEqual(reconciled, 2)
+        bot.live_ledger.register_entry_order.assert_called_once()
+        kwargs = bot.live_ledger.register_entry_order.call_args.kwargs
+        self.assertEqual(kwargs["strategy"], "unknown_external")
+
+    def test_stream_quote_triggers_immediate_exit_check(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot._service_degradation["stream_down"] = False
+        bot.paper_trader.positions = [
+            {
+                "position_id": "stream_pos",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "status": "open",
+                "entry_credit": 1.0,
+                "current_value": 0.8,
+                "dte_remaining": 20,
+                "details": {"short_strike": 95.0},
+            }
+        ]
+        strategy = mock.Mock()
+        strategy.check_exits.return_value = [
+            TradeSignal(
+                action="close",
+                strategy="bull_put_spread",
+                symbol="SPY",
+                position_id="stream_pos",
+                reason="stream trigger",
+                quantity=1,
+            )
+        ]
+        bot.strategies = [strategy]
+        bot._get_chain_data = mock.Mock(return_value=({}, 0.0))
+        bot._execute_exit = mock.Mock()
+
+        bot._process_stream_exit_check({"symbol": "SPY", "lastPrice": 99.5})
+
+        bot._execute_exit.assert_called_once()
+
+    def test_daily_report_triggers_daily_and_weekly_alerts(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot.paper_trader.get_performance_summary = mock.Mock(
+            return_value={
+                "balance": 101000.0,
+                "total_trades": 12,
+                "win_rate": 58.0,
+                "total_pnl": 1000.0,
+                "return_pct": 1.0,
+                "open_positions": 2,
+            }
+        )
+        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-20T16:10:00-05:00"))
+        bot.alerts = mock.Mock()
+        bot._auto_generate_dashboard_if_due = mock.Mock()
+
+        bot._daily_report()
+
+        bot.alerts.daily_summary.assert_called_once()
+        bot.alerts.weekly_summary.assert_called_once()
+
+    def test_persist_runtime_exit_state_writes_trailing_fields_to_live_ledger(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot.live_ledger = mock.Mock()
+        positions = [
+            {
+                "position_id": "live_1",
+                "strategy": "short_strangle",
+                "status": "open",
+                "trailing_stop_high": 0.42,
+                "max_profit_pct_seen": 0.51,
+                "details": {"trailing_stop_high": 0.42},
+            }
+        ]
+
+        bot._persist_runtime_exit_state(positions)
+
+        bot.live_ledger.update_position_metadata.assert_called_once()
 
 
 if __name__ == "__main__":

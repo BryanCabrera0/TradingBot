@@ -33,6 +33,19 @@ class BrokenWingButterflyStrategy(BaseStrategy):
 
         regime = str((market_context or {}).get("regime", "")).upper()
         bullish = regime in {"BULL_TREND", "MEAN_REVERSION", "LOW_VOL_GRIND"}
+        flow = (market_context or {}).get("options_flow", {})
+        if isinstance(flow, dict):
+            flow_bias = str(flow.get("directional_bias", "neutral")).lower()
+            inst_flow = str(flow.get("institutional_flow_direction", "neutral")).lower()
+            if flow_bias == "bullish":
+                bullish = True
+            elif flow_bias == "bearish":
+                bullish = False
+            if bool(flow.get("unusual_activity_flag", False)):
+                if inst_flow in {"bullish", "up"}:
+                    bullish = True
+                elif inst_flow in {"bearish", "down"}:
+                    bullish = False
 
         min_dte = int(self.config.get("min_dte", 20))
         max_dte = int(self.config.get("max_dte", 45))
@@ -110,6 +123,10 @@ class BrokenWingButterflyStrategy(BaseStrategy):
 
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
         out: list[TradeSignal] = []
+        adaptive_targets = bool(self.config.get("adaptive_targets", True))
+        trailing_enabled = bool(self.config.get("trailing_stop_enabled", False))
+        trail_activation = float(self.config.get("trailing_stop_activation_pct", 0.25))
+        trail_floor = float(self.config.get("trailing_stop_floor_pct", 0.10))
         for pos in positions:
             if str(pos.get("status", "open")).lower() != "open":
                 continue
@@ -121,15 +138,43 @@ class BrokenWingButterflyStrategy(BaseStrategy):
             if entry_credit <= 0:
                 continue
             pnl_pct = (entry_credit - current_value) / entry_credit
-            if pnl_pct >= 0.40 or dte <= 7:
+            target_pct = self._profit_target_for_dte(dte) if adaptive_targets else 0.40
+            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
+            if trailing_enabled and pnl_pct >= trail_activation:
+                trailing_high = max(trailing_high, pnl_pct)
+                pos["trailing_stop_high"] = trailing_high
+                details["trailing_stop_high"] = trailing_high
+                pos["details"] = details
+
+            trailing_triggered = (
+                trailing_enabled
+                and trailing_high > 0
+                and pnl_pct <= max(0.0, trailing_high - trail_floor)
+            )
+            if pnl_pct >= target_pct or trailing_triggered or dte <= 7:
                 out.append(
                     TradeSignal(
                         action="close",
                         strategy="broken_wing_butterfly",
                         symbol=str(pos.get("symbol", "")),
                         position_id=pos.get("position_id"),
-                        reason="Profit target" if pnl_pct >= 0.40 else "DTE threshold",
+                        reason=(
+                            "Trailing stop"
+                            if trailing_triggered
+                            else ("Profit target" if pnl_pct >= target_pct else "DTE threshold")
+                        ),
                         quantity=max(1, int(pos.get("quantity", 1))),
                     )
                 )
         return out
+
+    @staticmethod
+    def _profit_target_for_dte(dte_remaining: int) -> float:
+        if dte_remaining < 10:
+            return 0.20
+        if dte_remaining <= 20:
+            return 0.30
+        if dte_remaining <= 30:
+            return 0.40
+        return 0.50

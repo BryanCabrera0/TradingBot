@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from bot.econ_calendar import EconomicCalendar
+from bot.econ_calendar import EconomicCalendar, refresh_static_calendar_file
+from bot.data_store import load_json
 from bot.strategies.base import TradeSignal
 
 
@@ -57,7 +58,28 @@ class EconCalendarTests(unittest.TestCase):
             self.assertIn("upcoming_macro_events", context)
             self.assertIn("horizon_days", context)
 
+    def test_refresh_static_calendar_file_writes_comprehensive_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "econ_events.json"
+            output = refresh_static_calendar_file(path)
+            self.assertEqual(str(path), output)
+            payload = path.read_text(encoding="utf-8")
+            self.assertIn("events", payload)
+            self.assertGreater(payload.count("event_date"), 60)
+
+    def test_policy_for_trade_uses_expanded_static_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "events.json"
+            refresh_static_calendar_file(path)
+            payload = load_json(path, {})
+            events = payload.get("events", []) if isinstance(payload, dict) else []
+            calendar = EconomicCalendar(
+                cache_path=Path(tmp_dir) / "econ.json",
+                static_events=events if isinstance(events, list) else None,
+            )
+            decision = calendar.policy_for_trade(expiration="2026-03-20", as_of=None)
+            self.assertIn("action", decision)
+
 
 if __name__ == "__main__":
     unittest.main()
-

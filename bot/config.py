@@ -239,6 +239,8 @@ class RegimeConfig:
     enabled: bool = False
     min_confidence: float = 0.55
     uncertain_size_scalar: float = 0.80
+    cache_seconds: int = 1800
+    history_file: str = "bot/data/regime_history.json"
 
 
 @dataclass
@@ -370,6 +372,7 @@ class EarningsVolCrushConfig:
     max_position_risk_pct: float = 0.5
     min_iv_rank: float = 75.0
     wing_width: float = 10.0
+    earnings_moves_file: str = "bot/data/earnings_moves.json"
 
 
 def _default_risk_profiles() -> dict[str, RiskConfig]:

@@ -6,8 +6,9 @@ import logging
 import math
 import random
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,7 @@ import pandas as pd
 
 from bot.config import BotConfig, load_config
 from bot.data_store import dump_json, ensure_data_dir
+from bot.regime_detector import LOW_VOL_GRIND, MarketRegimeDetector
 from bot.risk_manager import RiskManager
 from bot.strategies.base import TradeSignal
 from bot.strategies.calendar_spreads import CalendarSpreadStrategy
@@ -23,6 +25,7 @@ from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
 from bot.strategies.naked_puts import NakedPutStrategy
+from bot.vol_surface import VolSurfaceAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,11 @@ class Backtester:
 
         self.risk_manager = RiskManager(self.config.risk)
         self.strategies = self._build_strategies()
+        self.vol_surface_analyzer = VolSurfaceAnalyzer() if self.config.vol_surface.enabled else None
+        self.regime_detector = MarketRegimeDetector(config=vars(self.config.regime))
+        self._spy_history: list[float] = []
+        self._strategy_loss_streaks: dict[str, int] = defaultdict(int)
+        self._strategy_pause_until: dict[str, date] = {}
 
     def run(self, *, start: str, end: str) -> BacktestResult:
         start_date = datetime.strptime(start, "%Y-%m-%d").date()
@@ -93,6 +101,7 @@ class Backtester:
         snapshots = self._load_snapshots_for_day(trading_day)
         if not snapshots:
             return
+        regime_state = self._estimate_regime(trading_day, snapshots)
 
         self._mark_positions(trading_day, snapshots)
         self._process_exits(trading_day)
@@ -103,10 +112,10 @@ class Backtester:
             open_positions=self.positions,
             daily_pnl=daily_realized,
         )
-        self._process_entries(snapshots)
+        self._process_entries(snapshots, regime_state=regime_state, trading_day=trading_day)
         self._record_equity_point(trading_day)
 
-    def _process_entries(self, snapshots: dict[str, dict]) -> None:
+    def _process_entries(self, snapshots: dict[str, dict], *, regime_state, trading_day: date) -> None:
         for symbol, chain_data in snapshots.items():
             underlying = float(chain_data.get("underlying_price", 0.0))
             if underlying <= 0:
@@ -114,7 +123,34 @@ class Backtester:
 
             all_signals: list[TradeSignal] = []
             for strategy in self.strategies:
-                all_signals.extend(strategy.scan_for_entries(symbol, chain_data, underlying))
+                pause_until = self._strategy_pause_until.get(strategy.name)
+                if pause_until and trading_day <= pause_until:
+                    continue
+                weight = float(regime_state.recommended_strategy_weights.get(strategy.name, 1.0))
+                if weight <= 0:
+                    continue
+                market_context = {
+                    "regime": regime_state.regime,
+                    "regime_weights": regime_state.recommended_strategy_weights,
+                    "position_size_scalar": regime_state.recommended_position_size_scalar,
+                }
+                if self.vol_surface_analyzer:
+                    market_context["vol_surface"] = self.vol_surface_analyzer.analyze(
+                        symbol=symbol,
+                        chain_data=chain_data,
+                        price_history=[],
+                    ).to_dict()
+                signals = strategy.scan_for_entries(symbol, chain_data, underlying, market_context=market_context)
+                for signal in signals:
+                    if signal.analysis is None:
+                        continue
+                    signal.analysis.score = max(
+                        0.0,
+                        min(100.0, float(signal.analysis.score or 0.0) * weight),
+                    )
+                    signal.size_multiplier *= float(regime_state.recommended_position_size_scalar or 1.0)
+                    signal.metadata.setdefault("regime", regime_state.regime)
+                all_signals.extend(signals)
             all_signals.sort(
                 key=lambda signal: signal.analysis.score if signal.analysis else 0.0,
                 reverse=True,
@@ -237,6 +273,40 @@ class Backtester:
         self._daily_realized[trading_day.isoformat()] = (
             self._daily_realized.get(trading_day.isoformat(), 0.0) + pnl
         )
+        strategy_key = str(position.get("strategy", ""))
+        if pnl < 0:
+            self._strategy_loss_streaks[strategy_key] += 1
+            limit = max(2, int(getattr(self.config.circuit_breakers, "strategy_loss_streak_limit", 5)))
+            if self._strategy_loss_streaks[strategy_key] >= limit:
+                self._strategy_pause_until[strategy_key] = trading_day + timedelta(days=1)
+        else:
+            self._strategy_loss_streaks[strategy_key] = 0
+
+    def _estimate_regime(self, trading_day: date, snapshots: dict[str, dict]):
+        spy_snapshot = snapshots.get("SPY", {})
+        spy_price = float(spy_snapshot.get("underlying_price", 0.0) or 0.0)
+        if spy_price > 0:
+            self._spy_history.append(spy_price)
+        self._spy_history = self._spy_history[-260:]
+        trend = 0.0
+        if len(self._spy_history) >= 20:
+            short = float(np.mean(self._spy_history[-20:]))
+            long = float(np.mean(self._spy_history[-50:])) if len(self._spy_history) >= 50 else short
+            if long > 0:
+                trend = max(-1.0, min(1.0, (short - long) / long * 5.0))
+        vix_proxy = 20.0
+        inputs = {
+            "vix_level": vix_proxy,
+            "vix_term_ratio": 1.0,
+            "spy_trend_score": trend,
+            "breadth_above_50ma": 0.55 if trend >= 0 else 0.45,
+            "put_call_ratio": 1.0,
+            "vol_of_vol": 0.1,
+            "realized_vs_implied_spread": 1.0,
+        }
+        state = self.regime_detector.detect_from_inputs(inputs)
+        state.sub_signals["date"] = trading_day.isoformat()
+        return state
 
     def _mark_positions(self, trading_day: date, snapshots: dict[str, dict]) -> None:
         for position in self.positions:

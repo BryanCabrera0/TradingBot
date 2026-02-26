@@ -30,6 +30,11 @@ class CalendarSpreadStrategy(BaseStrategy):
         calls = chain_data.get("calls", {})
         if not calls or underlying_price <= 0:
             return []
+        vol_surface = (market_context or {}).get("vol_surface", {})
+        if isinstance(vol_surface, dict) and vol_surface:
+            regime = str(vol_surface.get("term_structure_regime", "")).lower()
+            if regime and regime != "backwardation":
+                return []
 
         front_min_dte = int(self.config.get("front_min_dte", 20))
         front_max_dte = int(self.config.get("front_max_dte", 30))

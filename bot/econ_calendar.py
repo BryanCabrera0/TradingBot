@@ -13,6 +13,7 @@ from bot.data_store import dump_json, load_json
 logger = logging.getLogger(__name__)
 
 ECON_CACHE_PATH = Path("bot/data/econ_calendar.json")
+ECON_STATIC_EVENTS_PATH = Path("bot/data/econ_events_2025_2026.json")
 
 HIGH_IMPACT = {"FOMC", "CPI", "NFP", "GDP", "PCE"}
 
@@ -59,6 +60,9 @@ class EconomicCalendar:
         if isinstance(payload, dict) and payload.get("as_of") == today:
             return self._parse_events(payload.get("events", []))
 
+        latest_static = _default_static_events()
+        if latest_static:
+            self.static_events = latest_static
         events = self._parse_events(self.static_events)
         out = {
             "as_of": today,
@@ -160,13 +164,148 @@ class EconomicCalendar:
 
 
 def _default_static_events() -> list[dict]:
-    # Lightweight seed events, refreshable by replacing cache file contents.
+    payload = load_json(ECON_STATIC_EVENTS_PATH, [])
+    rows = payload.get("events", []) if isinstance(payload, dict) else payload
+    if isinstance(rows, list) and rows:
+        return [row for row in rows if isinstance(row, dict)]
+    return _comprehensive_static_events()
+
+
+def refresh_static_calendar_file(path: Path | str = ECON_STATIC_EVENTS_PATH) -> str:
+    """Regenerate the bundled 2025-2026 static US macro calendar file."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "as_of": date.today().isoformat(),
+        "events": _comprehensive_static_events(),
+    }
+    dump_json(output_path, payload)
+    return str(output_path)
+
+
+def _comprehensive_static_events() -> list[dict]:
+    # Approximate schedule of high-impact US macro events for 2025-2026.
     return [
-        {"name": "FOMC", "event_date": "2026-03-18", "severity": "high", "country": "US", "impact": "macro"},
-        {"name": "CPI", "event_date": "2026-03-12", "severity": "high", "country": "US", "impact": "macro"},
-        {"name": "NFP", "event_date": "2026-03-06", "severity": "high", "country": "US", "impact": "macro"},
+        # 2025
+        {"name": "NFP", "event_date": "2025-01-10", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-01-15", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-01-16", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-01-31", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-02-07", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-02-12", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-02-13", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2025-02-27", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-02-28", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-03-07", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-03-12", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-03-13", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-03-19", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-03-28", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-04-04", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-04-10", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-04-11", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2025-04-30", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-04-30", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-05-02", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-05-14", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-05-15", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-05-07", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-05-30", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-06-06", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-06-11", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-06-12", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-06-18", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-06-27", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-07-03", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-07-15", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-07-16", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2025-07-30", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-07-30", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-07-31", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-08-01", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-08-13", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-08-14", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-08-29", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-09-05", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-09-11", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-09-12", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-09-17", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-09-26", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-10-03", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-10-15", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-10-16", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2025-10-30", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-10-31", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-11-07", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-11-06", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-11-13", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-11-14", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-11-26", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2025-12-05", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2025-12-11", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2025-12-12", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2025-12-17", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2025-12-24", "severity": "high", "country": "US", "impact": "macro"},
+        # 2026
+        {"name": "NFP", "event_date": "2026-01-09", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-01-14", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-01-15", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-01-30", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-02-06", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-02-11", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-02-12", "severity": "medium", "country": "US", "impact": "macro"},
         {"name": "GDP", "event_date": "2026-02-26", "severity": "medium", "country": "US", "impact": "macro"},
         {"name": "PCE", "event_date": "2026-02-27", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-03-06", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-03-12", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-03-13", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-03-18", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-03-27", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-04-03", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-04-10", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-04-13", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2026-04-30", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-04-30", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-05-01", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-05-13", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-05-14", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-05-06", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-05-29", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-06-05", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-06-11", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-06-12", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-06-17", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-06-26", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-07-02", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-07-15", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-07-16", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2026-07-30", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-07-29", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-07-31", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-08-07", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-08-12", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-08-13", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-08-28", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-09-04", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-09-10", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-09-11", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-09-16", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-09-25", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-10-02", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-10-14", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-10-15", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "GDP", "event_date": "2026-10-29", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-10-30", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-11-06", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-11-05", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-11-12", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-11-13", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-11-25", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "NFP", "event_date": "2026-12-04", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "CPI", "event_date": "2026-12-10", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PPI", "event_date": "2026-12-11", "severity": "medium", "country": "US", "impact": "macro"},
+        {"name": "FOMC", "event_date": "2026-12-16", "severity": "high", "country": "US", "impact": "macro"},
+        {"name": "PCE", "event_date": "2026-12-24", "severity": "high", "country": "US", "impact": "macro"},
     ]
 
 

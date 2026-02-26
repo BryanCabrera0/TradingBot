@@ -111,9 +111,9 @@ class VolSurfaceAnalyzer:
         front = points[0][1]
         back = points[-1][1]
         spread = front - back
-        if spread > 0.5:
+        if spread > 2.0:
             regime = "backwardation"
-        elif spread < -0.5:
+        elif spread < -2.0:
             regime = "contango"
         else:
             regime = "flat"
@@ -128,9 +128,9 @@ class VolSurfaceAnalyzer:
         call_iv = float(np.mean(call_ivs))
         put_iv = float(np.mean(put_ivs))
         spread = put_iv - call_iv
-        if spread > 1.0:
+        if spread > 3.0:
             regime = "put_skew_fear"
-        elif spread < -1.0:
+        elif spread < -3.0:
             regime = "call_skew_speculation"
         else:
             regime = "flat"
@@ -224,4 +224,3 @@ def _vol_of_vol(calls: dict, puts: dict) -> float:
     if not values:
         return 0.0
     return float(np.mean(values))
-

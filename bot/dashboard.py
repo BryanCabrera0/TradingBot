@@ -48,13 +48,16 @@ def enrich_dashboard_payload(payload: dict) -> dict:
         accuracy = hits / len(judged) if judged else 0.0
         approves = [item for item in judged if str(item.get("verdict", "")).lower() == "approve"]
         rejects = [item for item in judged if str(item.get("verdict", "")).lower() == "reject"]
+        reduces = [item for item in judged if str(item.get("verdict", "")).lower() == "reduce_size"]
         approve_hits = sum(1 for item in approves if _is_llm_hit(item))
         reject_hits = sum(1 for item in rejects if _is_llm_hit(item))
+        reduce_hits = sum(1 for item in reduces if _is_llm_hit(item))
         out["llm_accuracy"] = {
             "trades": len(judged),
             "hit_rate": round(accuracy, 4),
             "approve_accuracy": round((approve_hits / len(approves)) if approves else 0.0, 4),
             "reject_accuracy": round((reject_hits / len(rejects)) if rejects else 0.0, 4),
+            "reduce_size_accuracy": round((reduce_hits / len(reduces)) if reduces else 0.0, 4),
         }
 
     execution = load_json(EXECUTION_QUALITY_PATH, {"fills": []})
@@ -81,7 +84,9 @@ def _render_html(payload: dict) -> str:
     equity_labels = [point.get("date", "") for point in equity_curve]
     equity_values = [float(point.get("equity", 0.0)) for point in equity_curve]
     monthly = payload.get("monthly_pnl", {})
+    daily_calendar = payload.get("daily_pnl_calendar", {})
     strategy_stats = payload.get("strategy_breakdown", {})
+    regime_stats = payload.get("regime_performance", {})
     winners = payload.get("top_winners", [])
     losers = payload.get("top_losers", [])
     risk = payload.get("risk_metrics", {})
@@ -97,6 +102,7 @@ def _render_html(payload: dict) -> str:
     journal_entries = payload.get("trade_journal", [])
     service_degradation = payload.get("service_degradation", {})
     hedge_costs = payload.get("hedge_costs", {})
+    roll_metrics = payload.get("roll_metrics", {})
 
     monthly_rows = "".join(
         f"<tr><td>{month}</td><td>{value:.2f}</td></tr>"
@@ -107,12 +113,24 @@ def _render_html(payload: dict) -> str:
             "<tr>"
             f"<td>{strategy}</td>"
             f"<td>{stats.get('win_rate', 0):.1f}%</td>"
-            f"<td>{stats.get('avg_pnl', 0):.2f}</td>"
+            f"<td>{stats.get('avg_profit', 0):.2f}</td>"
+            f"<td>{stats.get('avg_loss', 0):.2f}</td>"
             f"<td>{stats.get('total_pnl', 0):.2f}</td>"
             "</tr>"
         )
         for strategy, stats in strategy_stats.items()
-    ) or "<tr><td colspan='4' class='muted'>No strategy data</td></tr>"
+    ) or "<tr><td colspan='5' class='muted'>No strategy data</td></tr>"
+    regime_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{regime}</td>"
+            f"<td>{stats.get('trades', 0)}</td>"
+            f"<td>{stats.get('win_rate', 0):.1f}%</td>"
+            f"<td>{stats.get('total_pnl', 0):.2f}</td>"
+            "</tr>"
+        )
+        for regime, stats in regime_stats.items()
+    ) or "<tr><td colspan='4' class='muted'>No regime data</td></tr>"
     winner_rows = "".join(
         f"<li>{item.get('symbol', '')} {item.get('pnl', 0):.2f}</li>" for item in winners[:5]
     ) or "<li class='muted'>No winners yet</li>"
@@ -156,6 +174,7 @@ def _render_html(payload: dict) -> str:
     strategy_bars = _render_strategy_bars(strategy_stats)
     sector_bars = _render_sector_bars(sector_exposure)
     greek_gauges = _render_greek_gauges(greeks)
+    month_calendar_html = _render_monthly_calendar(daily_calendar)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -242,6 +261,8 @@ def _render_html(payload: dict) -> str:
         <div>Execution avg slippage: {execution.get("avg_slippage", 0):.4f}</div>
         <div>Hedge cost (MTD): {float(hedge_costs.get("month_to_date", 0.0) or 0.0):.2f}</div>
         <div>Hedge cost (lifetime): {float(hedge_costs.get("lifetime", 0.0) or 0.0):.2f}</div>
+        <div>Rolled positions: {int(roll_metrics.get("rolled_count", 0) or 0)}</div>
+        <div>Avg roll credit captured: {float(roll_metrics.get("avg_roll_credit_captured", 0.0) or 0.0):.4f}</div>
       </div>
     </section>
     <section class="card">
@@ -257,6 +278,7 @@ def _render_html(payload: dict) -> str:
           <div>Hit rate: {llm_accuracy.get("hit_rate", 0):.2%}</div>
           <div>Approve accuracy: {llm_accuracy.get("approve_accuracy", 0):.2%}</div>
           <div>Reject accuracy: {llm_accuracy.get("reject_accuracy", 0):.2%}</div>
+          <div>Reduce-size accuracy: {llm_accuracy.get("reduce_size_accuracy", 0):.2%}</div>
         </div>
       </div>
     </section>
@@ -266,8 +288,12 @@ def _render_html(payload: dict) -> str:
     </section>
     <section class="card">
       <h2>Strategy Breakdown</h2>
-      <table><thead><tr><th>Strategy</th><th>Win Rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr></thead><tbody>{strategy_rows}</tbody></table>
+      <table><thead><tr><th>Strategy</th><th>Win Rate</th><th>Avg Profit</th><th>Avg Loss</th><th>Total P&amp;L</th></tr></thead><tbody>{strategy_rows}</tbody></table>
       <div style="margin-top:8px;">{strategy_bars}</div>
+    </section>
+    <section class="card">
+      <h2>Regime Performance</h2>
+      <table><thead><tr><th>Regime</th><th>Trades</th><th>Win Rate</th><th>Total P&amp;L</th></tr></thead><tbody>{regime_rows}</tbody></table>
     </section>
     <section class="card">
       <h2>Top Winners / Losers</h2>
@@ -279,6 +305,10 @@ def _render_html(payload: dict) -> str:
     <section class="card">
       <h2>Sector Exposure</h2>
       {sector_bars}
+    </section>
+    <section class="card">
+      <h2>Monthly P&amp;L Calendar</h2>
+      {month_calendar_html}
     </section>
     <section class="card">
       <h2>Circuit Breakers</h2>
@@ -393,6 +423,24 @@ def _render_greek_gauges(greeks: dict) -> str:
             f"<div class='bar'><span style='width:{pct:.1f}%; background:{color};'></span></div>"
         )
     return "".join(gauges)
+
+
+def _render_monthly_calendar(daily_pnl: dict) -> str:
+    if not isinstance(daily_pnl, dict) or not daily_pnl:
+        return "<div class='muted tiny'>No daily P&amp;L data</div>"
+    month_key = datetime.now().strftime("%Y-%m")
+    rows = []
+    for day, pnl in sorted(daily_pnl.items()):
+        if not str(day).startswith(month_key):
+            continue
+        value = float(pnl or 0.0)
+        color = "#1f9d55" if value >= 0 else "#cc3a3a"
+        rows.append(
+            f"<tr><td>{day}</td><td style='color:{color};'>{value:.2f}</td></tr>"
+        )
+    if not rows:
+        return "<div class='muted tiny'>No entries for current month</div>"
+    return "<table><thead><tr><th>Date</th><th>P&amp;L</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
 
 
 def _corr_color(value: float) -> str:

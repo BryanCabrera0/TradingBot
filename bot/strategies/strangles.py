@@ -37,6 +37,12 @@ class StranglesStrategy(BaseStrategy):
             return []
         if regime and regime not in ALLOWED_REGIMES:
             return []
+        vol_surface = (market_context or {}).get("vol_surface", {})
+        if isinstance(vol_surface, dict) and vol_surface:
+            vol_of_vol = float(vol_surface.get("vol_of_vol", 0.0) or 0.0)
+            max_vov = float(self.config.get("max_vol_of_vol", self.config.get("max_vol_of_vol_for_condors", 0.20)))
+            if vol_of_vol > max_vov:
+                return []
 
         account_balance = float((market_context or {}).get("account_balance", 0.0) or 0.0)
         min_account_balance = float(self.config.get("min_account_balance", 25_000.0))
@@ -160,7 +166,10 @@ class StranglesStrategy(BaseStrategy):
 
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
         out: list[TradeSignal] = []
-        profit_target = float(self.config.get("profit_target_pct", 0.50))
+        adaptive_targets = bool(self.config.get("adaptive_targets", True))
+        trailing_enabled = bool(self.config.get("trailing_stop_enabled", False))
+        trail_activation = float(self.config.get("trailing_stop_activation_pct", 0.25))
+        trail_floor = float(self.config.get("trailing_stop_floor_pct", 0.10))
         stop_multiple = float(self.config.get("stop_loss_multiple", 2.0))
         for pos in positions:
             if str(pos.get("status", "open")).lower() != "open":
@@ -169,11 +178,35 @@ class StranglesStrategy(BaseStrategy):
                 continue
             entry_credit = float(pos.get("entry_credit", 0.0) or 0.0)
             current_value = float(pos.get("current_value", 0.0) or 0.0)
+            dte_remaining = int(pos.get("dte_remaining", 999) or 999)
             if entry_credit <= 0:
                 continue
             pnl_pct = (entry_credit - current_value) / entry_credit
-            if pnl_pct >= profit_target or current_value >= entry_credit * stop_multiple:
-                reason = "Profit target" if pnl_pct >= profit_target else "Stop loss"
+            target = (
+                self._profit_target_for_dte(dte_remaining)
+                if adaptive_targets
+                else float(self.config.get("profit_target_pct", 0.50))
+            )
+            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
+            if trailing_enabled and pnl_pct >= trail_activation:
+                trailing_high = max(trailing_high, pnl_pct)
+                pos["trailing_stop_high"] = trailing_high
+                details["trailing_stop_high"] = trailing_high
+                pos["details"] = details
+
+            trailing_triggered = (
+                trailing_enabled
+                and trailing_high > 0
+                and pnl_pct <= max(0.0, trailing_high - trail_floor)
+            )
+            if pnl_pct >= target or trailing_triggered or current_value >= entry_credit * stop_multiple:
+                if trailing_triggered:
+                    reason = "Trailing stop"
+                elif pnl_pct >= target:
+                    reason = "Profit target"
+                else:
+                    reason = "Stop loss"
                 out.append(
                     TradeSignal(
                         action="close",
@@ -185,3 +218,13 @@ class StranglesStrategy(BaseStrategy):
                     )
                 )
         return out
+
+    @staticmethod
+    def _profit_target_for_dte(dte_remaining: int) -> float:
+        if dte_remaining < 10:
+            return 0.20
+        if dte_remaining <= 20:
+            return 0.30
+        if dte_remaining <= 30:
+            return 0.40
+        return 0.50

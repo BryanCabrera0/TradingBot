@@ -1,5 +1,7 @@
 import unittest
 from unittest import mock
+import tempfile
+from pathlib import Path
 
 from bot.strategies.earnings_vol_crush import EarningsVolCrushStrategy
 
@@ -53,7 +55,53 @@ class EarningsVolCrushStrategyTests(unittest.TestCase):
         signals = strategy.check_exits(positions, market_client=None)
         self.assertEqual(len(signals), 1)
 
+    def test_skips_symbol_when_historical_moves_exceed_implied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            moves = Path(tmp_dir) / "moves.json"
+            moves.write_text(
+                '{"TSLA":{"avg_earnings_move_pct":9.5,"implied_move_pct":8.5,"times_exceeded_implied":7,"total_events":10}}',
+                encoding="utf-8",
+            )
+            strategy = EarningsVolCrushStrategy({"min_iv_rank": 70.0, "wing_width": 10.0, "earnings_moves_file": str(moves)})
+            strategy.earnings_calendar = mock.Mock(earnings_within_window=mock.Mock(return_value=(True, "2026-03-04")))
+
+            signals = strategy.scan_for_entries(
+                "TSLA",
+                _chain(),
+                100.0,
+                market_context={"iv_rank": 80.0, "max_expiration": "2026-03-05"},
+            )
+
+            self.assertEqual(signals, [])
+
+    def test_boosts_score_when_historical_move_is_below_implied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            moves = Path(tmp_dir) / "moves.json"
+            moves.write_text(
+                '{"TSLA":{"avg_earnings_move_pct":4.0,"implied_move_pct":10.0,"times_exceeded_implied":2,"total_events":10}}',
+                encoding="utf-8",
+            )
+
+            boosted = EarningsVolCrushStrategy({"min_iv_rank": 70.0, "wing_width": 10.0, "earnings_moves_file": str(moves)})
+            boosted.earnings_calendar = mock.Mock(earnings_within_window=mock.Mock(return_value=(True, "2026-03-04")))
+            baseline = EarningsVolCrushStrategy({"min_iv_rank": 70.0, "wing_width": 10.0, "earnings_moves_file": str(Path(tmp_dir) / "empty.json")})
+            baseline.earnings_calendar = mock.Mock(earnings_within_window=mock.Mock(return_value=(True, "2026-03-04")))
+
+            boosted_signal = boosted.scan_for_entries(
+                "TSLA",
+                _chain(),
+                100.0,
+                market_context={"iv_rank": 80.0, "max_expiration": "2026-03-05"},
+            )[0]
+            baseline_signal = baseline.scan_for_entries(
+                "TSLA",
+                _chain(),
+                100.0,
+                market_context={"iv_rank": 80.0, "max_expiration": "2026-03-05"},
+            )[0]
+
+            self.assertGreater(boosted_signal.analysis.score, baseline_signal.analysis.score)
+
 
 if __name__ == "__main__":
     unittest.main()
-

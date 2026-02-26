@@ -15,3 +15,5 @@ live_trades.json
 deploy/generated/
 bot/data/*
 !bot/data/sector_map.json
+!bot/data/econ_events_2025_2026.json
+!bot/data/earnings_moves.json

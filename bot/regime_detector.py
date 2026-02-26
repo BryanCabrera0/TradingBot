@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
 
+from bot.data_store import dump_json, load_json
 from bot.number_utils import safe_float
 
 logger = logging.getLogger(__name__)
@@ -79,11 +81,33 @@ class MarketRegimeDetector:
         self.get_quote = get_quote
         self.get_option_chain = get_option_chain
         self.config = config or {}
+        self.cache_seconds = max(0, int(self.config.get("cache_seconds", 1800) or 1800))
+        self.history_path = Path(self.config.get("history_file", "bot/data/regime_history.json"))
+        self._cached_state: Optional[RegimeState] = None
+        self._cached_at: Optional[datetime] = None
+        self._last_regime: Optional[str] = None
 
     def detect(self) -> RegimeState:
         """Collect market proxies from data providers and classify regime."""
+        now = datetime.utcnow()
+        if (
+            self._cached_state is not None
+            and self._cached_at is not None
+            and self.cache_seconds > 0
+            and (now - self._cached_at) < timedelta(seconds=self.cache_seconds)
+        ):
+            return self._cached_state
+
         inputs = self._collect_inputs()
-        return self.detect_from_inputs(inputs)
+        state = self.detect_from_inputs(inputs)
+        state = self._apply_regime_momentum(state)
+        if self._last_regime and self._last_regime != state.regime:
+            state.sub_signals["transition_from"] = self._last_regime
+        self._last_regime = state.regime
+        self._persist_history(state)
+        self._cached_state = state
+        self._cached_at = now
+        return state
 
     def detect_from_inputs(self, inputs: dict) -> RegimeState:
         """Classify regime from normalized input readings."""
@@ -143,6 +167,60 @@ class MarketRegimeDetector:
             recommended_strategy_weights=weights,
             recommended_position_size_scalar=round(size_scalar, 4),
         )
+
+    def _apply_regime_momentum(self, state: RegimeState) -> RegimeState:
+        payload = load_json(self.history_path, {"entries": []})
+        entries = payload.get("entries", []) if isinstance(payload, dict) else []
+        if not isinstance(entries, list):
+            return state
+        streak = 0
+        for row in reversed(entries):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("regime", "")) != state.regime:
+                break
+            streak += 1
+            if streak >= 3:
+                break
+        if streak >= 3:
+            state.confidence = round(_clamp(state.confidence + 0.10, 0.05, 0.99), 4)
+            state.sub_signals["regime_momentum"] = streak
+        return state
+
+    def _persist_history(self, state: RegimeState) -> None:
+        payload = load_json(self.history_path, {"entries": []})
+        if not isinstance(payload, dict):
+            payload = {"entries": []}
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            entries = []
+            payload["entries"] = entries
+
+        now = datetime.now(timezone.utc)
+        entries.append(
+            {
+                "timestamp": now.isoformat().replace("+00:00", "Z"),
+                "regime": state.regime,
+                "confidence": state.confidence,
+                "sub_signals": dict(state.sub_signals),
+            }
+        )
+        cutoff = now - timedelta(days=30)
+        compact: list[dict] = []
+        for row in entries:
+            if not isinstance(row, dict):
+                continue
+            ts_raw = str(row.get("timestamp", "")).replace("Z", "+00:00")
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                compact.append(row)
+        payload["entries"] = compact[-5000:]
+        dump_json(self.history_path, payload)
 
     def _collect_inputs(self) -> dict:
         """Collect lightweight regime inputs from available providers."""

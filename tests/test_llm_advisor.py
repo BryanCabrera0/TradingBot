@@ -334,6 +334,42 @@ class LLMAdvisorTests(unittest.TestCase):
             payload = json.loads(prompt)
             self.assertTrue(payload["sections"]["recent_trade_journal"])
 
+    def test_model_weight_uses_accuracy_after_minimum_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            track = Path(tmp_dir) / "llm_track.json"
+            dump_json(
+                track,
+                {
+                    "trades": [],
+                    "meta": {
+                        "model_stats": {
+                            "openai:gpt-5.2-pro": {"trades": 20, "hits": 15, "accuracy": 0.75}
+                        }
+                    },
+                },
+            )
+            advisor = LLMAdvisor(
+                LLMConfig(enabled=True, provider="openai", model="gpt-5.2-pro", track_record_file=str(track))
+            )
+
+            weight = advisor._model_weight("openai:gpt-5.2-pro")
+
+            self.assertAlmostEqual(weight, 1.5, places=4)
+
+    def test_update_model_accuracy_tracks_model_id_votes(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
+        payload = {"trades": [], "meta": {}}
+        trade = {
+            "outcome": 120.0,
+            "model_votes": [{"model_id": "openai:gpt-5.2-pro", "verdict": "approve"}],
+        }
+
+        advisor._update_model_accuracy(payload, trade)
+
+        stats = payload["meta"]["model_stats"]["openai:gpt-5.2-pro"]
+        self.assertEqual(stats["trades"], 1)
+        self.assertEqual(stats["hits"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

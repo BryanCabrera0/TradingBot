@@ -2,7 +2,10 @@ import unittest
 
 from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
+from bot.strategies.earnings_vol_crush import EarningsVolCrushStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
+from bot.strategies.broken_wing_butterfly import BrokenWingButterflyStrategy
+from bot.strategies.strangles import StranglesStrategy
 
 
 class StrategyExitTests(unittest.TestCase):
@@ -200,6 +203,71 @@ class StrategyExitTests(unittest.TestCase):
 
         self.assertEqual(len(signals), 1)
         self.assertIn("Stop loss", signals[0].reason)
+
+    def test_strangles_trailing_stop_activation_and_trigger(self) -> None:
+        strategy = StranglesStrategy(
+            {
+                "adaptive_targets": True,
+                "trailing_stop_enabled": True,
+                "trailing_stop_activation_pct": 0.25,
+                "trailing_stop_floor_pct": 0.10,
+            }
+        )
+        position = {
+            "position_id": "str1",
+            "strategy": "short_strangle",
+            "symbol": "SPY",
+            "status": "open",
+            "entry_credit": 1.0,
+            "current_value": 0.6,  # 40% profit
+            "dte_remaining": 35,
+            "details": {},
+        }
+
+        first = strategy.check_exits([position], market_client=None)
+        self.assertEqual(first, [])
+        self.assertGreater(position.get("trailing_stop_high", 0.0), 0.0)
+
+        position["current_value"] = 0.72  # 28% profit: below high-water minus floor (30%)
+        second = strategy.check_exits([position], market_client=None)
+        self.assertEqual(len(second), 1)
+        self.assertIn("Trailing stop", second[0].reason)
+
+    def test_bwb_adaptive_target_respects_long_dte_threshold(self) -> None:
+        strategy = BrokenWingButterflyStrategy({"adaptive_targets": True})
+        positions = [
+            {
+                "position_id": "bwb1",
+                "strategy": "broken_wing_butterfly",
+                "symbol": "QQQ",
+                "status": "open",
+                "entry_credit": 1.0,
+                "current_value": 0.55,
+                "dte_remaining": 35,  # target 50%
+                "details": {},
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+        self.assertEqual(len(signals), 0)
+
+    def test_earnings_vol_crush_adaptive_target_short_dte(self) -> None:
+        strategy = EarningsVolCrushStrategy({"adaptive_targets": True})
+        positions = [
+            {
+                "position_id": "evc1",
+                "strategy": "earnings_vol_crush",
+                "symbol": "AAPL",
+                "status": "open",
+                "entry_credit": 1.0,
+                "current_value": 0.79,  # 21% profit
+                "dte_remaining": 5,     # target 20%
+                "details": {},
+            }
+        ]
+        signals = strategy.check_exits(positions, market_client=None)
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].action, "close")
 
 
 if __name__ == "__main__":

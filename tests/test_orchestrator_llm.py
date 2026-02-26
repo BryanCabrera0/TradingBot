@@ -228,6 +228,103 @@ class OrchestratorLLMTests(unittest.TestCase):
         symbols = bot.schwab.stream_option_level_one.call_args.args[0]
         self.assertEqual(set(symbols), {"SPY_041726C100", "SPY_041726P100"})
 
+    def test_portfolio_strategist_close_long_dte_directive_executes_closes(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_strategist = mock.Mock()
+        bot.llm_strategist.review_portfolio.return_value = [
+            SimpleNamespace(
+                action="close_long_dte",
+                reason="trim duration",
+                payload={"max_dte": 30},
+            )
+        ]
+        bot._get_tracked_positions = mock.Mock(
+            return_value=[
+                {
+                    "position_id": "long_dte",
+                    "status": "open",
+                    "symbol": "SPY",
+                    "strategy": "bull_put_spread",
+                    "dte_remaining": 45,
+                    "quantity": 1,
+                },
+                {
+                    "position_id": "short_dte",
+                    "status": "open",
+                    "symbol": "QQQ",
+                    "strategy": "bull_put_spread",
+                    "dte_remaining": 20,
+                    "quantity": 1,
+                },
+            ]
+        )
+        bot._execute_exit = mock.Mock()
+
+        bot._apply_portfolio_strategist()
+
+        bot._execute_exit.assert_called_once()
+        signal = bot._execute_exit.call_args.args[0]
+        self.assertEqual(signal.position_id, "long_dte")
+
+    def test_portfolio_strategist_scale_size_uses_factor_payload(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_strategist = mock.Mock()
+        bot.llm_strategist.review_portfolio.return_value = [
+            SimpleNamespace(
+                action="scale_size",
+                reason="risk-off",
+                payload={"factor": 0.7},
+            )
+        ]
+
+        bot._apply_portfolio_strategist()
+
+        self.assertAlmostEqual(bot._cycle_size_scalar, 0.7, places=4)
+
+    def test_scan_applies_regime_weight_and_size_scalar(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.config.watchlist = ["SPY"]
+        bot.risk_manager.can_open_more_positions = mock.Mock(return_value=True)
+        bot._get_chain_data = mock.Mock(
+            return_value=(
+                {"calls": {"2026-03-20": [{}]}, "puts": {"2026-03-20": [{}]}},
+                500.0,
+            )
+        )
+        bot._subscribe_option_stream_for_symbol = mock.Mock()
+        bot.technicals.get_context = mock.Mock(return_value=None)
+        bot._build_market_context = mock.Mock(
+            return_value={
+                "regime": "HIGH_VOL_CHOP",
+                "regime_weights": {"credit_spreads": 1.5, "iron_condors": 0.0},
+                "position_size_scalar": 0.8,
+            }
+        )
+        bot._filter_signals_by_context = mock.Mock(side_effect=lambda signals, _ctx: signals)
+        bot._try_execute_entry = mock.Mock(return_value=False)
+
+        sig = make_signal("SPY")
+        sig.analysis.score = 20.0
+        sig.size_multiplier = 1.0
+
+        strategy_a = SimpleNamespace(
+            name="credit_spreads",
+            scan_for_entries=mock.Mock(return_value=[sig]),
+        )
+        strategy_b = SimpleNamespace(
+            name="iron_condors",
+            scan_for_entries=mock.Mock(return_value=[make_signal("SPY")]),
+        )
+        bot.strategies = [strategy_a, strategy_b]
+
+        bot._scan_for_entries()
+
+        strategy_a.scan_for_entries.assert_called_once()
+        strategy_b.scan_for_entries.assert_not_called()
+        executed_signal = bot._try_execute_entry.call_args.args[0]
+        self.assertAlmostEqual(executed_signal.analysis.score, 30.0, places=4)
+        self.assertAlmostEqual(executed_signal.size_multiplier, 0.8, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -558,7 +558,7 @@ class LLMAdvisor:
         model_stats = stats.get(model_id, {}) if isinstance(stats, dict) else {}
         trades = int(model_stats.get("trades", 0) or 0)
         hits = int(model_stats.get("hits", 0) or 0)
-        if trades < 5:
+        if trades < 10:
             return 1.0
         accuracy = hits / max(1, trades)
         return max(0.5, min(2.0, 0.75 + accuracy))

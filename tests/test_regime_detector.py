@@ -1,5 +1,10 @@
 import unittest
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest import mock
 
+from bot.data_store import dump_json, load_json
 from bot.regime_detector import (
     BULL_TREND,
     CRASH_CRISIS,
@@ -70,7 +75,89 @@ class RegimeDetectorTests(unittest.TestCase):
         self.assertIn("sub_signals", payload)
         self.assertIn("vix_level", payload["sub_signals"])
 
+    def test_detect_uses_cache_within_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history = Path(tmp_dir) / "regime_history.json"
+            get_price_history = mock.Mock(return_value=[{"close": 400.0 + i * 0.2} for i in range(300)])
+            get_quote = mock.Mock(return_value={"quote": {"lastPrice": 18.0}})
+            get_chain = mock.Mock(return_value={"calls": {}, "puts": {}})
+            detector = MarketRegimeDetector(
+                get_price_history=get_price_history,
+                get_quote=get_quote,
+                get_option_chain=get_chain,
+                config={"cache_seconds": 3600, "history_file": str(history)},
+            )
+
+            first = detector.detect()
+            calls_after_first = get_price_history.call_count
+            second = detector.detect()
+
+            self.assertEqual(first.regime, second.regime)
+            self.assertEqual(get_price_history.call_count, calls_after_first)
+
+    def test_persist_history_and_momentum_boost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history = Path(tmp_dir) / "regime_history.json"
+            base_ts = datetime(2026, 2, 1, tzinfo=timezone.utc)
+            dump_json(
+                history,
+                {
+                    "entries": [
+                        {"timestamp": (base_ts).isoformat().replace("+00:00", "Z"), "regime": "BULL_TREND", "confidence": 0.6, "sub_signals": {}},
+                        {"timestamp": (base_ts).isoformat().replace("+00:00", "Z"), "regime": "BULL_TREND", "confidence": 0.6, "sub_signals": {}},
+                        {"timestamp": (base_ts).isoformat().replace("+00:00", "Z"), "regime": "BULL_TREND", "confidence": 0.6, "sub_signals": {}},
+                    ]
+                },
+            )
+            detector = MarketRegimeDetector(config={"cache_seconds": 0, "history_file": str(history)})
+            state = detector.detect_from_inputs(
+                {
+                    "vix_level": 16.0,
+                    "vix_term_ratio": 0.92,
+                    "spy_trend_score": 0.65,
+                    "breadth_above_50ma": 0.75,
+                    "put_call_ratio": 0.82,
+                    "vol_of_vol": 0.08,
+                }
+            )
+            boosted = detector._apply_regime_momentum(state)
+            detector._persist_history(boosted)
+
+            self.assertGreaterEqual(boosted.confidence, state.confidence)
+            self.assertIn("regime_momentum", boosted.sub_signals)
+            payload = load_json(history, {"entries": []})
+            self.assertGreaterEqual(len(payload.get("entries", [])), 1)
+
+    def test_transition_marker_added_on_regime_change(self) -> None:
+        detector = MarketRegimeDetector(config={"cache_seconds": 0})
+        first = detector.detect_from_inputs(
+            {
+                "vix_level": 16.0,
+                "vix_term_ratio": 0.92,
+                "spy_trend_score": 0.65,
+                "breadth_above_50ma": 0.75,
+                "put_call_ratio": 0.82,
+                "vol_of_vol": 0.08,
+            }
+        )
+        detector._last_regime = first.regime
+        second = detector.detect_from_inputs(
+            {
+                "vix_level": 39.0,
+                "vix_term_ratio": 1.10,
+                "spy_trend_score": -0.7,
+                "breadth_above_50ma": 0.25,
+                "put_call_ratio": 1.4,
+                "vol_of_vol": 0.30,
+            }
+        )
+        second = detector._apply_regime_momentum(second)
+        if detector._last_regime and detector._last_regime != second.regime:
+            second.sub_signals["transition_from"] = detector._last_regime
+
+        self.assertEqual(second.regime, CRASH_CRISIS)
+        self.assertEqual(second.sub_signals.get("transition_from"), BULL_TREND)
+
 
 if __name__ == "__main__":
     unittest.main()
-

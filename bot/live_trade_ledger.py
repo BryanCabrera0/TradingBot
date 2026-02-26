@@ -165,16 +165,26 @@ class LiveTradeLedger:
                 return position
         return None
 
-    def list_positions(self, statuses: Optional[set[str]] = None) -> list[dict]:
+    def list_positions(
+        self,
+        statuses: Optional[set[str]] = None,
+        *,
+        copy_items: bool = True,
+    ) -> list[dict]:
         """List tracked positions, optionally filtered by status."""
         if not statuses:
-            return [dict(p) for p in self.positions]
-        normalized = {s.lower() for s in statuses}
-        return [
-            dict(p)
-            for p in self.positions
-            if str(p.get("status", "")).lower() in normalized
-        ]
+            rows = self.positions
+        else:
+            normalized = {s.lower() for s in statuses}
+            rows = [
+                p
+                for p in self.positions
+                if str(p.get("status", "")).lower() in normalized
+            ]
+
+        if copy_items:
+            return [dict(p) for p in rows]
+        return list(rows)
 
     def update_position_quote(
         self,
@@ -197,6 +207,65 @@ class LiveTradeLedger:
             position["underlying_price"] = round(max(0.0, safe_float(underlying_price, 0.0)), 4)
         position["last_reconciled"] = datetime.now().isoformat()
         self._save_state()
+
+    def update_position_metadata(
+        self,
+        position_id: str,
+        *,
+        fields: Optional[dict] = None,
+        detail_fields: Optional[dict] = None,
+    ) -> bool:
+        """Patch arbitrary position/detail fields for runtime strategy state."""
+        position = self.get_position(position_id)
+        if not position:
+            return False
+
+        changed = False
+        if isinstance(fields, dict):
+            for key, value in fields.items():
+                position[key] = value
+                changed = True
+
+        if isinstance(detail_fields, dict):
+            details = position.get("details")
+            if not isinstance(details, dict):
+                details = {}
+                position["details"] = details
+            for key, value in detail_fields.items():
+                details[key] = value
+                changed = True
+
+        if not changed:
+            return False
+        position["last_reconciled"] = datetime.now().isoformat()
+        self._save_state()
+        return True
+
+    def mark_position_rolled(
+        self,
+        *,
+        source_position_id: str,
+        rolled_to_position_id: Optional[str] = None,
+    ) -> bool:
+        """Mark a closed position as rolled and link it to the replacement."""
+        position = self.get_position(source_position_id)
+        if not position:
+            return False
+
+        details = position.get("details")
+        if not isinstance(details, dict):
+            details = {}
+            position["details"] = details
+        details["roll_status"] = "rolled"
+        if rolled_to_position_id:
+            details["rolled_to"] = str(rolled_to_position_id)
+        position["status"] = "rolled"
+        if not str(position.get("close_date", "")).strip():
+            position["close_date"] = datetime.now().isoformat()
+        position["exit_reason"] = position.get("exit_reason") or "roll"
+        position["last_reconciled"] = datetime.now().isoformat()
+        self._save_state()
+        return True
 
     # ── Reconciliation ──────────────────────────────────────────────
 
@@ -448,6 +517,7 @@ class LiveTradeLedger:
             "closing": 0,
             "closed": 0,
             "closed_external": 0,
+            "rolled": 0,
             "closed_today": 0,
             "realized_pnl_today": 0.0,
         }

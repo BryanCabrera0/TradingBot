@@ -803,6 +803,66 @@ class SchwabClient:
         order.set_session(Session.NORMAL)
         return order
 
+    def build_long_option_open(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        contract_type: str,
+        strike: float,
+        quantity: int = 1,
+        price: Optional[float] = None,
+    ):
+        """Build a single-leg long-option open order (debit)."""
+        option_sym = _make_option_symbol(symbol, expiration, contract_type.upper(), strike)
+        order = (
+            OrderBuilder()
+            .set_order_strategy_type(OrderStrategyType.SINGLE)
+            .set_order_type(OrderType.MARKET if price is None or price <= 0 else OrderType.LIMIT)
+            .set_quantity(max(1, int(quantity)))
+            .add_option_leg(OptionInstruction.BUY_TO_OPEN, option_sym, max(1, int(quantity)))
+        )
+        if price is not None and price > 0:
+            order.set_price(price)
+        order.set_duration(Duration.DAY)
+        order.set_session(Session.NORMAL)
+        return order
+
+    def build_debit_spread_open(
+        self,
+        *,
+        symbol: str,
+        expiration: str,
+        contract_type: str,
+        long_strike: float,
+        short_strike: float,
+        quantity: int = 1,
+        price: Optional[float] = None,
+    ):
+        """Build a vertical debit spread order using generic legs."""
+        ctype = contract_type.upper()
+        if ctype not in {"P", "C"}:
+            raise ValueError("contract_type must be 'P' or 'C'")
+        if price is None or price <= 0:
+            raise ValueError("Debit spread open requires a positive net debit.")
+
+        long_sym = _make_option_symbol(symbol, expiration, ctype, long_strike)
+        short_sym = _make_option_symbol(symbol, expiration, ctype, short_strike)
+
+        order = (
+            OrderBuilder()
+            .set_order_type(OrderType.NET_DEBIT)
+            .set_order_strategy_type(OrderStrategyType.SINGLE)
+            .set_complex_order_strategy_type(ComplexOrderStrategyType.VERTICAL)
+            .set_quantity(max(1, int(quantity)))
+            .set_price(price)
+            .add_option_leg(OptionInstruction.BUY_TO_OPEN, long_sym, max(1, int(quantity)))
+            .add_option_leg(OptionInstruction.SELL_TO_OPEN, short_sym, max(1, int(quantity)))
+        )
+        order.set_duration(Duration.DAY)
+        order.set_session(Session.NORMAL)
+        return order
+
     def build_iron_condor(
         self,
         symbol: str,

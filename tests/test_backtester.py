@@ -229,6 +229,32 @@ class BacktesterTests(unittest.TestCase):
             self.assertEqual(result.report["open_positions"], 0)
             self.assertEqual(result.report["ending_equity"], 100_000.0)
 
+    def test_backtester_report_includes_regime_breakdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir)
+            _write_snapshot(data_dir / "SPY_2026-02-20.parquet.csv.gz", "2026-02-20", short_mid=1.2, long_mid=0.2)
+            _write_snapshot(data_dir / "SPY_2026-02-23.parquet.csv.gz", "2026-02-23", short_mid=0.4, long_mid=0.1)
+
+            cfg = BotConfig()
+            cfg.scanner.enabled = False
+            cfg.iron_condors.enabled = False
+            cfg.covered_calls.enabled = False
+            cfg.credit_spreads.enabled = True
+            cfg.credit_spreads.min_dte = 1
+            cfg.credit_spreads.max_dte = 45
+
+            backtester = Backtester(cfg, data_dir=data_dir, initial_balance=100_000.0)
+            backtester.risk_manager.earnings_calendar = mock.Mock(
+                earnings_within_window=mock.Mock(return_value=(False, None))
+            )
+
+            result = backtester.run(start="2026-02-20", end="2026-02-23")
+
+            self.assertIn("regime_performance", result.report)
+            self.assertIsInstance(result.report["regime_performance"], dict)
+            if backtester.closed_trades:
+                self.assertIn("regime", backtester.closed_trades[0])
+
 
 if __name__ == "__main__":
     unittest.main()

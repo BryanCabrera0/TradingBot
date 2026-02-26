@@ -75,7 +75,40 @@ class VolSurfaceTests(unittest.TestCase):
             self.assertGreaterEqual(context.iv_percentile, 0.0)
             self.assertLessEqual(context.iv_percentile, 100.0)
 
+    def test_term_structure_threshold_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history = IVHistory(Path(tmp_dir) / "iv_history.json")
+            analyzer = VolSurfaceAnalyzer(history)
+
+            backward = analyzer.analyze(symbol="SPY", chain_data=_chain(36.0, 33.0), price_history=[])
+            contango = analyzer.analyze(symbol="SPY", chain_data=_chain(28.0, 31.0), price_history=[])
+            flat = analyzer.analyze(symbol="SPY", chain_data=_chain(34.0, 32.0), price_history=[])
+
+            self.assertEqual(backward.term_structure_regime, "backwardation")
+            self.assertEqual(contango.term_structure_regime, "contango")
+            self.assertEqual(flat.term_structure_regime, "flat")
+
+    def test_skew_threshold_boundaries(self) -> None:
+        chain = {
+            "calls": {"2026-03-20": [{"dte": 30, "delta": 0.25, "iv": 20.0}]},
+            "puts": {"2026-03-20": [{"dte": 30, "delta": -0.25, "iv": 24.1}]},
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history = IVHistory(Path(tmp_dir) / "iv_history.json")
+            analyzer = VolSurfaceAnalyzer(history)
+            fear = analyzer.analyze(symbol="QQQ", chain_data=chain, price_history=[])
+            self.assertEqual(fear.skew_regime, "put_skew_fear")
+
+        chain = {
+            "calls": {"2026-03-20": [{"dte": 30, "delta": 0.25, "iv": 24.2}]},
+            "puts": {"2026-03-20": [{"dte": 30, "delta": -0.25, "iv": 20.0}]},
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history = IVHistory(Path(tmp_dir) / "iv_history.json")
+            analyzer = VolSurfaceAnalyzer(history)
+            spec = analyzer.analyze(symbol="QQQ", chain_data=chain, price_history=[])
+            self.assertEqual(spec.skew_regime, "call_skew_speculation")
+
 
 if __name__ == "__main__":
     unittest.main()
-

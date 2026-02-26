@@ -41,6 +41,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
@@ -50,6 +51,7 @@ from bot.config import load_config
 from bot.data_fetcher import HistoricalDataFetcher
 from bot.backtester import Backtester
 from bot.dashboard import generate_dashboard
+from bot.econ_calendar import refresh_static_calendar_file
 from bot.live_setup import run_live_setup
 from bot.orchestrator import TradingBot
 from bot.paper_trader import PaperTrader
@@ -162,6 +164,14 @@ def main() -> None:
         help="Fetch historical option-chain snapshots and exit",
     )
     parser.add_argument(
+        "--update-econ-calendar", action="store_true",
+        help="Refresh static 2025-2026 economic event calendar and exit",
+    )
+    parser.add_argument(
+        "--audit-trail", default="",
+        help="Print audit trail events for a symbol and exit (e.g. --audit-trail SPY)",
+    )
+    parser.add_argument(
         "--start", default="",
         help="Start date for backtest/fetch in YYYY-MM-DD",
     )
@@ -251,6 +261,40 @@ def main() -> None:
         except Exception as exc:
             print(f"Data fetch failed: {exc}")
             sys.exit(1)
+        return
+
+    if args.update_econ_calendar:
+        try:
+            output = refresh_static_calendar_file()
+            print(f"Economic calendar updated: {output}")
+        except Exception as exc:
+            print(f"Economic calendar update failed: {exc}")
+            sys.exit(1)
+        return
+
+    if args.audit_trail:
+        symbol = str(args.audit_trail).upper().strip()
+        path = Path("bot/data/audit_log.jsonl")
+        if not path.exists():
+            print("No audit trail file found.")
+            return
+        matched = 0
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except Exception:
+                continue
+            details = row.get("details", {}) if isinstance(row, dict) else {}
+            row_symbol = str(details.get("symbol", "")).upper()
+            if row_symbol != symbol:
+                continue
+            matched += 1
+            print(json.dumps(row, indent=2, default=str))
+        if matched == 0:
+            print(f"No audit events found for {symbol}.")
         return
 
     if args.backtest:

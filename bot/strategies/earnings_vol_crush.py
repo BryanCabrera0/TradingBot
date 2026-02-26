@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from bot.analysis import analyze_iron_condor, find_option_by_delta, find_spread_wing
+from bot.data_store import load_json
 from bot.earnings_calendar import EarningsCalendar
 from bot.number_utils import safe_int
 from bot.strategies.base import BaseStrategy, TradeSignal
@@ -17,6 +19,7 @@ class EarningsVolCrushStrategy(BaseStrategy):
     def __init__(self, config: dict):
         super().__init__("earnings_vol_crush", config)
         self.earnings_calendar = EarningsCalendar()
+        self.moves_path = Path(self.config.get("earnings_moves_file", "bot/data/earnings_moves.json"))
 
     def scan_for_entries(
         self,
@@ -38,6 +41,19 @@ class EarningsVolCrushStrategy(BaseStrategy):
         )
         if not has_earnings:
             return []
+
+        move_profile = self._earnings_move_profile(symbol)
+        boost_score = 0.0
+        if move_profile:
+            total_events = max(1, int(move_profile.get("total_events", 0) or 0))
+            times_exceeded = int(move_profile.get("times_exceeded_implied", 0) or 0)
+            exceeded_ratio = times_exceeded / total_events
+            if exceeded_ratio > 0.50:
+                return []
+            avg_move = float(move_profile.get("avg_earnings_move_pct", 0.0) or 0.0)
+            implied_move = float(move_profile.get("implied_move_pct", 0.0) or 0.0)
+            if implied_move > 0 and avg_move < (0.70 * implied_move):
+                boost_score = 8.0
 
         calls = chain_data.get("calls", {})
         puts = chain_data.get("puts", {})
@@ -77,7 +93,7 @@ class EarningsVolCrushStrategy(BaseStrategy):
             )
             analysis.symbol = symbol
             analysis.strategy = "earnings_vol_crush"
-            analysis.score = round(min(100.0, analysis.score + 8.0), 1)
+            analysis.score = round(min(100.0, analysis.score + 8.0 + boost_score), 1)
 
             signals.append(
                 TradeSignal(
@@ -89,6 +105,7 @@ class EarningsVolCrushStrategy(BaseStrategy):
                     metadata={
                         "iv_rank": iv_rank,
                         "earnings_date": earnings_date,
+                        "earnings_move_profile": move_profile,
                         "position_details": {
                             "expiration": exp,
                             "put_short_strike": analysis.put_short_strike,
@@ -102,8 +119,19 @@ class EarningsVolCrushStrategy(BaseStrategy):
         signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
         return signals
 
+    def _earnings_move_profile(self, symbol: str) -> dict:
+        payload = load_json(self.moves_path, {})
+        if not isinstance(payload, dict):
+            return {}
+        row = payload.get(str(symbol).upper(), {})
+        return row if isinstance(row, dict) else {}
+
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
         out: list[TradeSignal] = []
+        adaptive_targets = bool(self.config.get("adaptive_targets", True))
+        trailing_enabled = bool(self.config.get("trailing_stop_enabled", False))
+        trail_activation = float(self.config.get("trailing_stop_activation_pct", 0.25))
+        trail_floor = float(self.config.get("trailing_stop_floor_pct", 0.10))
         for pos in positions:
             if str(pos.get("status", "open")).lower() != "open":
                 continue
@@ -115,15 +143,43 @@ class EarningsVolCrushStrategy(BaseStrategy):
             if entry_credit <= 0:
                 continue
             pnl_pct = (entry_credit - current) / entry_credit
-            if pnl_pct >= 0.35 or dte <= 0:
+            target_pct = self._profit_target_for_dte(dte) if adaptive_targets else 0.35
+            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
+            if trailing_enabled and pnl_pct >= trail_activation:
+                trailing_high = max(trailing_high, pnl_pct)
+                pos["trailing_stop_high"] = trailing_high
+                details["trailing_stop_high"] = trailing_high
+                pos["details"] = details
+
+            trailing_triggered = (
+                trailing_enabled
+                and trailing_high > 0
+                and pnl_pct <= max(0.0, trailing_high - trail_floor)
+            )
+            if pnl_pct >= target_pct or trailing_triggered or dte <= 0:
                 out.append(
                     TradeSignal(
                         action="close",
                         strategy="earnings_vol_crush",
                         symbol=str(pos.get("symbol", "")),
                         position_id=pos.get("position_id"),
-                        reason="Post-earnings crush capture" if pnl_pct >= 0.35 else "Event complete",
+                        reason=(
+                            "Trailing stop"
+                            if trailing_triggered
+                            else ("Post-earnings crush capture" if pnl_pct >= target_pct else "Event complete")
+                        ),
                         quantity=max(1, int(pos.get("quantity", 1))),
                     )
                 )
         return out
+
+    @staticmethod
+    def _profit_target_for_dte(dte_remaining: int) -> float:
+        if dte_remaining < 10:
+            return 0.20
+        if dte_remaining <= 20:
+            return 0.30
+        if dte_remaining <= 30:
+            return 0.40
+        return 0.50

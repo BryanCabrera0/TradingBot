@@ -88,6 +88,7 @@ strategies:
     max_position_risk_pct: 0.5
     min_iv_rank: 75.0
     wing_width: 10.0
+    earnings_moves_file: bot/data/earnings_moves.json
 
 # Market Scanner — dynamically finds the best stocks for options trading
 # When enabled, the bot scans 150+ tickers across all sectors and ranks them
@@ -195,6 +196,8 @@ regime:
   enabled: false
   min_confidence: 0.55
   uncertain_size_scalar: 0.80
+  cache_seconds: 1800
+  history_file: bot/data/regime_history.json
 
 vol_surface:
   enabled: false

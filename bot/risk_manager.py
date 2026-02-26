@@ -186,6 +186,7 @@ class RiskManager:
         analysis = signal.analysis
         if analysis is None:
             return False, "No analysis data attached to signal"
+        is_hedge = bool((signal.metadata or {}).get("is_hedge"))
 
         balance = self.portfolio.account_balance
 
@@ -198,7 +199,7 @@ class RiskManager:
 
         # ── Check 2: Max open positions ───────────────────────────
         num_open = len(self.portfolio.open_positions)
-        if num_open >= self.config.max_open_positions:
+        if not is_hedge and num_open >= self.config.max_open_positions:
             return False, (
                 f"Max open positions reached: {num_open}/{self.config.max_open_positions}"
             )
@@ -207,7 +208,7 @@ class RiskManager:
         direct_symbol_count = sum(
             1 for p in self.portfolio.open_positions if p.get("symbol") == signal.symbol
         )
-        if direct_symbol_count >= self.config.max_positions_per_symbol:
+        if not is_hedge and direct_symbol_count >= self.config.max_positions_per_symbol:
             return False, (
                 f"Max positions per symbol reached for {signal.symbol}: "
                 f"{direct_symbol_count}/{self.config.max_positions_per_symbol}"
@@ -241,28 +242,29 @@ class RiskManager:
             )
 
         # ── Check 7: Minimum quality score ────────────────────────
-        if analysis.score < 40:
+        if not is_hedge and analysis.score < 40:
             return False, f"Trade score {analysis.score} below minimum threshold 40"
 
         # ── Check 8: Probability of profit ────────────────────────
-        if analysis.probability_of_profit < 0.50:
+        if not is_hedge and analysis.probability_of_profit < 0.50:
             return False, f"POP {analysis.probability_of_profit:.1%} below minimum 50%"
 
         # ── Check 9: Earnings in trade window ─────────────────────
-        in_window, earnings_date = self.earnings_calendar.earnings_within_window(
-            signal.symbol,
-            analysis.expiration,
-        )
-        if in_window:
-            logger.info(
-                "Skipping %s: earnings on %s falls within %s",
+        if not is_hedge:
+            in_window, earnings_date = self.earnings_calendar.earnings_within_window(
                 signal.symbol,
-                earnings_date,
                 analysis.expiration,
             )
-            return False, (
-                f"Earnings event on {earnings_date} before expiration {analysis.expiration}"
-            )
+            if in_window:
+                logger.info(
+                    "Skipping %s: earnings on %s falls within %s",
+                    signal.symbol,
+                    earnings_date,
+                    analysis.expiration,
+                )
+                return False, (
+                    f"Earnings event on {earnings_date} before expiration {analysis.expiration}"
+                )
 
         # ── Check 10: Portfolio net-delta guard ───────────────────
         projected_delta = self.portfolio.net_delta + (float(analysis.net_delta) * signal.quantity)
@@ -296,7 +298,7 @@ class RiskManager:
 
         correlated_count = self._count_correlated_positions(signal.symbol)
         effective_count = direct_symbol_count + correlated_count
-        if effective_count >= self.config.max_positions_per_symbol:
+        if not is_hedge and effective_count >= self.config.max_positions_per_symbol:
             return False, (
                 f"Correlation guard: {signal.symbol} is highly correlated with "
                 f"{correlated_count} existing positions; effective limit "
