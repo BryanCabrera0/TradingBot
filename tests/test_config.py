@@ -226,6 +226,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.log_max_bytes, 1024)
         self.assertEqual(cfg.log_backup_count, 1)
 
+    def test_terminal_ui_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            terminal_ui:
+              enabled: true
+              refresh_rate: 0
+              max_activity_events: 1
+              show_rejected_trades: false
+              compact_mode: true
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.terminal_ui.enabled)
+        self.assertEqual(cfg.terminal_ui.refresh_rate, 0.1)
+        self.assertEqual(cfg.terminal_ui.max_activity_events, 10)
+        self.assertFalse(cfg.terminal_ui.show_rejected_trades)
+        self.assertTrue(cfg.terminal_ui.compact_mode)
+
     def test_execution_smart_ladder_fields_normalize(self) -> None:
         config_path = self._write_config(
             """

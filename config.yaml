@@ -514,6 +514,13 @@ alerts:
   drawdown_thresholds: [1.0, 2.0, 3.0]
   webhook_format: generic  # generic | slack | discord
 
+terminal_ui:
+  enabled: true
+  refresh_rate: 0.5
+  max_activity_events: 50
+  show_rejected_trades: true
+  compact_mode: false
+
 # Logging
 logging:
   level: INFO

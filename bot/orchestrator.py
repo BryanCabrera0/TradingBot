@@ -175,6 +175,20 @@ class TradingBot:
         self._last_monte_carlo_run: Optional[datetime] = None
         self._last_reconciliation_watchdog: Optional[datetime] = None
         self._last_cycle_strategy_scores: dict[str, float] = {}
+        self._bot_started_at = self._now_eastern()
+        self._last_scan_completed_at: Optional[datetime] = None
+        self._ui_entries_allowed_last: Optional[bool] = None
+        self.ui = None
+
+        if bool(getattr(getattr(self.config, "terminal_ui", None), "enabled", False)):
+            try:
+                from bot.terminal_ui import TerminalUI
+
+                self.ui = TerminalUI(config=self.config)
+                self.ui.start()
+            except Exception as exc:
+                self.ui = None
+                logger.warning("Terminal UI failed to start; continuing without TUI: %s", exc)
 
         self._log_config_overrides()
         loaded_stats = load_json(STRATEGY_STATS_PATH, {})
@@ -419,6 +433,294 @@ class TradingBot:
         if any(token in lowered for token in ("secret", "token", "hash", "api_key", "webhook")):
             return "<redacted>"
         return value
+
+    def _ui_update(self, method_name: str, **kwargs) -> None:
+        """Fire-and-forget UI update; no-op when terminal UI is disabled."""
+        if not self.ui:
+            return
+        method = getattr(self.ui, method_name, None)
+        if not callable(method):
+            return
+        try:
+            method(**kwargs)
+        except Exception as exc:
+            logger.debug("Terminal UI update failure (%s): %s", method_name, exc)
+
+    def _ui_positions_payload(self, positions: list[dict]) -> list[dict]:
+        rows: list[dict] = []
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            qty = max(1, safe_int(position.get("quantity"), 1))
+            entry_price = safe_float(
+                position.get("entry_credit", details.get("entry_credit", 0.0)),
+                0.0,
+            )
+            current_price = safe_float(
+                position.get("current_value", details.get("current_value", entry_price)),
+                entry_price,
+            )
+            pnl = safe_float(position.get("pnl"), (entry_price - current_price) * qty * 100.0)
+            max_profit_dollars = max(0.0, entry_price * qty * 100.0)
+            pct_of_max = (pnl / max_profit_dollars * 100.0) if max_profit_dollars > 0 else 0.0
+            rows.append(
+                {
+                    "symbol": str(position.get("symbol", "")).upper(),
+                    "strategy": str(position.get("strategy", "")),
+                    "qty": qty,
+                    "dte": safe_int(position.get("dte_remaining", details.get("dte", 0)), 0),
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "pnl": round(pnl, 2),
+                    "pct_of_max_profit": round(pct_of_max, 2),
+                    "delta": safe_float(
+                        details.get("net_delta", position.get("net_delta", 0.0)),
+                        0.0,
+                    ),
+                }
+            )
+        return rows
+
+    def _ui_week_pnl(self, closed_trades: list[dict]) -> float:
+        cutoff = self._now_eastern().date() - timedelta(days=6)
+        total = 0.0
+        for trade in closed_trades:
+            if not isinstance(trade, dict):
+                continue
+            close_date_raw = str(trade.get("close_date", ""))
+            close_date = close_date_raw.split("T", 1)[0]
+            try:
+                closed_day = datetime.strptime(close_date, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if closed_day >= cutoff:
+                total += safe_float(
+                    trade.get("pnl", trade.get("realized_pnl", 0.0)),
+                    0.0,
+                )
+        return round(total, 2)
+
+    def _ui_refresh_metrics(self, closed_trades: list[dict]) -> None:
+        core = compute_analytics(closed_trades).core_metrics
+        total = int(core.get("trades", 0) or 0)
+        wins = 0
+        for trade in closed_trades:
+            if safe_float(trade.get("pnl", trade.get("realized_pnl", 0.0)), 0.0) > 0:
+                wins += 1
+        balance = max(1.0, safe_float(self.risk_manager.portfolio.account_balance, 0.0))
+        today_pnl = safe_float(self.risk_manager.portfolio.daily_pnl, 0.0)
+        today_pct = (today_pnl / balance) * 100.0 if balance > 0 else 0.0
+        self._ui_update(
+            "update_metrics",
+            sharpe=safe_float(core.get("sharpe"), 0.0),
+            sortino=safe_float(core.get("sortino"), 0.0),
+            calmar=safe_float(core.get("calmar"), 0.0),
+            win_rate=safe_float(core.get("win_rate"), 0.0),
+            wins=wins,
+            total=total,
+            profit_factor=safe_float(core.get("profit_factor"), 0.0),
+            max_drawdown=safe_float(core.get("max_drawdown"), 0.0),
+            expectancy=safe_float(core.get("expectancy_per_trade"), 0.0),
+            today_pnl=today_pnl,
+            today_pnl_pct=today_pct,
+            week_pnl=self._ui_week_pnl(closed_trades),
+        )
+
+    def _ui_next_scan_label(self) -> str:
+        next_runs: list[datetime] = []
+        for job in schedule.get_jobs():
+            fn = getattr(job, "job_func", None)
+            if fn is None:
+                continue
+            if getattr(fn, "__name__", "") != "_scheduled_scan":
+                continue
+            next_run = getattr(job, "next_run", None)
+            if isinstance(next_run, datetime):
+                next_runs.append(next_run)
+        if not next_runs:
+            return "N/A"
+        next_run = min(next_runs)
+        return next_run.strftime("%H:%M")
+
+    def _ui_regime_duration(self, regime: str) -> str:
+        history_path = Path(self.config.regime.history_file or "bot/data/regime_history.json")
+        payload = load_json(history_path, {"entries": []})
+        entries = payload.get("entries", []) if isinstance(payload, dict) else []
+        if not isinstance(entries, list) or not entries:
+            return ""
+
+        now = self._now_eastern()
+        latest_change: Optional[datetime] = None
+        for row in reversed(entries):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("regime", "")) != regime:
+                break
+            ts_raw = str(row.get("timestamp", "")).replace("Z", "+00:00")
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=ZoneInfo("UTC"))
+            latest_change = ts.astimezone(EASTERN_TZ)
+        if latest_change is None:
+            return ""
+        elapsed = now - latest_change
+        hours = max(0, int(elapsed.total_seconds() // 3600))
+        minutes = max(0, int((elapsed.total_seconds() % 3600) // 60))
+        return f"{hours}h {minutes}m"
+
+    def _ui_next_econ_event(self) -> str:
+        if not self.econ_calendar:
+            return "N/A"
+        try:
+            context = self.econ_calendar.context(days=14)
+        except Exception:
+            return "N/A"
+        events = context.get("upcoming_macro_events", []) if isinstance(context, dict) else []
+        if not isinstance(events, list) or not events:
+            return "N/A"
+        first = events[0] if isinstance(events[0], dict) else {}
+        name = str(first.get("name", "Event")).strip() or "Event"
+        day_text = str(first.get("event_date", ""))
+        try:
+            event_day = datetime.strptime(day_text, "%Y-%m-%d").date()
+        except ValueError:
+            return name
+        delta_days = (event_day - self._now_eastern().date()).days
+        if delta_days < 0:
+            return name
+        if delta_days == 0:
+            return f"{name} (today)"
+        if delta_days == 1:
+            return f"{name} (1d)"
+        return f"{name} ({delta_days}d)"
+
+    def _ui_uptime_label(self) -> str:
+        elapsed = self._now_eastern() - self._bot_started_at
+        total_seconds = max(0, int(elapsed.total_seconds()))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+
+    def _ui_update_system_status(self) -> None:
+        if not self.ui:
+            return
+        entries_allowed = self._entries_allowed()
+        if self._ui_entries_allowed_last is None:
+            self._ui_entries_allowed_last = entries_allowed
+        elif entries_allowed != self._ui_entries_allowed_last:
+            if entries_allowed:
+                self._ui_update(
+                    "add_event",
+                    event_type="resumed",
+                    message="Trading resumed; entry gate reopened.",
+                )
+            else:
+                self._ui_update(
+                    "add_event",
+                    event_type="paused",
+                    message="Trading paused by circuit breaker state.",
+                )
+            self._ui_entries_allowed_last = entries_allowed
+
+        scanner_state = "✅ Active" if self.scanner else "⏸️ Paused"
+        next_scan = self._ui_next_scan_label()
+        scanner_text = f"{scanner_state} (next: {next_scan})"
+
+        llm_text = "❌ Disabled"
+        if self.config.llm.enabled:
+            if self._service_degradation.get("llm_down"):
+                llm_text = "❌ Failed (fallback: rules)"
+            elif self._service_degradation.get("rule_only_mode"):
+                llm_text = "⚠️ Rule-only fallback"
+            else:
+                llm_text = f"✅ {self.config.llm.model}"
+
+        stream_text = "✅ Connected"
+        if self._service_degradation.get("stream_down"):
+            stream_text = "⚠️ Polling fallback"
+        streaming_connected = False
+        try:
+            streaming_connected = bool(self.schwab.streaming_connected())
+        except Exception:
+            streaming_connected = False
+        if not streaming_connected:
+            stream_text = "⚠️ Polling fallback"
+
+        api_text = "✅ Healthy"
+        if self.circuit_state.get("api_health_halt"):
+            api_text = "❌ Down"
+        elif any(not ok for _, ok in self._api_health_window):
+            api_text = "⚠️ Degraded"
+
+        kill_switch = "🟢 Ready" if entries_allowed else "🟡 PAUSED"
+        breakers = 0
+        if self.circuit_state.get("halt_entries"):
+            breakers += 1
+        if self._portfolio_halt_until and self._now_eastern() < self._portfolio_halt_until:
+            breakers += 1
+        if self.circuit_state.get("consecutive_loss_pause_until"):
+            breakers += 1
+        if self.circuit_state.get("weekly_loss_pause_until"):
+            breakers += 1
+        if self.circuit_state.get("correlation_pause_until"):
+            breakers += 1
+
+        regime = str(self.circuit_state.get("regime", "normal"))
+        last_scan = "N/A"
+        if self._last_scan_completed_at:
+            elapsed = self._now_eastern() - self._last_scan_completed_at
+            mins = max(0, int(elapsed.total_seconds() // 60))
+            last_scan = f"{self._last_scan_completed_at.strftime('%H:%M ET')} ({mins}m ago)"
+
+        reconciliation = "✅ synced"
+        if self._last_reconciliation_watchdog:
+            lag = self._now_eastern() - self._last_reconciliation_watchdog
+            if lag > timedelta(minutes=max(5, int(self.config.reconciliation.interval_minutes) * 2)):
+                reconciliation = "⚠️ stale"
+        elif not self.is_paper:
+            reconciliation = "⚠️ pending"
+
+        ml_status = "❌ disabled"
+        if bool(getattr(self.config.ml_scorer, "enabled", False)):
+            closed_count = len(self._recent_closed_trades())
+            min_training = int(getattr(self.config.ml_scorer, "min_training_trades", 30) or 30)
+            if closed_count >= min_training:
+                ml_status = f"✅ trained ({closed_count} trades)"
+            else:
+                ml_status = f"⏳ not enough data ({closed_count}/{min_training})"
+
+        theta_target = float(getattr(self.config.theta_harvest, "satisfied_pct", 0.80) or 0.80) * 100.0
+        theta_ratio = self._theta_harvest_ratio() * 100.0
+
+        self._ui_update(
+            "update_system_status",
+            scanner=scanner_text,
+            llm=llm_text,
+            streaming=stream_text,
+            api=api_text,
+            kill_switch=kill_switch,
+            breakers=breakers,
+            regime=regime,
+            regime_duration=self._ui_regime_duration(regime),
+            regime_confidence=self.circuit_state.get("regime_confidence"),
+            correlation=self.circuit_state.get("correlation_regime", "normal"),
+            econ=self._ui_next_econ_event(),
+            uptime=self._ui_uptime_label(),
+            last_scan=last_scan,
+            reconciliation=reconciliation,
+            ml_scorer=ml_status,
+            theta_harvest={
+                "earned": theta_ratio,
+                "target": theta_target,
+            },
+            next_scan=next_scan,
+        )
 
     def _warn_if_unclean_previous_shutdown(self) -> None:
         """Log a startup warning when prior runtime did not mark clean shutdown."""
@@ -1319,6 +1621,11 @@ class TradingBot:
                     title="CIRCUIT BREAKER",
                     message=f"VIX={vix_value:.2f}, halting new entries",
                 )
+                self._ui_update(
+                    "add_event",
+                    event_type="circuit_breaker",
+                    message=f"BREAKER: VIX {vix_value:.2f} halted new entries",
+                )
                 self._breaker_alert_flags["crisis"] = True
         elif vix_value >= 25:
             regime = "elevated"
@@ -1342,6 +1649,14 @@ class TradingBot:
                     "vix": self.circuit_state.get("vix"),
                     "confidence": self.circuit_state.get("regime_confidence"),
                 },
+            )
+            confidence_pct = safe_float(self.circuit_state.get("regime_confidence"), 0.0)
+            if confidence_pct <= 1.0:
+                confidence_pct *= 100.0
+            self._ui_update(
+                "add_event",
+                event_type="regime",
+                message=f"Regime → {regime} {confidence_pct:.0f}%",
             )
 
     def _update_correlation_state(self) -> None:
@@ -1385,6 +1700,11 @@ class TradingBot:
                 "Correlation regime shift: %s -> %s",
                 previous,
                 regime,
+            )
+            self._ui_update(
+                "add_event",
+                event_type="warning",
+                message=f"Correlation regime {previous} -> {regime}",
             )
             self._alert(
                 level="WARNING",
@@ -1463,6 +1783,11 @@ class TradingBot:
                             title="Consecutive loss breaker",
                             message=f"Pausing entries until {pause_until.isoformat()}",
                         )
+                        self._ui_update(
+                            "add_event",
+                            event_type="circuit_breaker",
+                            message=f"BREAKER: consecutive losses paused entries until {pause_until.strftime('%H:%M')}",
+                        )
                         self._breaker_alert_flags["consecutive_loss"] = True
         else:
             self._breaker_alert_flags["consecutive_loss"] = False
@@ -1503,6 +1828,11 @@ class TradingBot:
                         title="Weekly loss breaker",
                         message=f"Weekly loss {weekly_loss:,.2f} breached 5% threshold. "
                                 f"Entries paused until {pause_until.isoformat()}",
+                    )
+                    self._ui_update(
+                        "add_event",
+                        event_type="circuit_breaker",
+                        message=f"BREAKER: weekly loss {weekly_loss:,.2f} paused entries",
                     )
                     self._breaker_alert_flags["weekly_loss"] = True
         else:
@@ -1567,6 +1897,11 @@ class TradingBot:
                 message=f"{strategy} paused until {pause_until.isoformat()}",
                 context={"streak": streak},
             )
+            self._ui_update(
+                "add_event",
+                event_type="circuit_breaker",
+                message=f"BREAKER: strategy {strategy} paused until {pause_until.strftime('%H:%M')}",
+            )
 
         for symbol, streak in streak_by_symbol.items():
             if streak < symbol_limit:
@@ -1587,6 +1922,11 @@ class TradingBot:
                 title="Symbol circuit breaker",
                 message=f"{symbol} blacklisted until {pause_until.isoformat()}",
                 context={"streak": streak},
+            )
+            self._ui_update(
+                "add_event",
+                event_type="circuit_breaker",
+                message=f"BREAKER: symbol {symbol} paused",
             )
 
         self._strategy_pause_until = {
@@ -1701,6 +2041,11 @@ class TradingBot:
                     title="Portfolio drawdown breaker",
                     message=f"Drawdown {drawdown * 100.0:.2f}% — entries paused until {pause_until.isoformat()}",
                 )
+                self._ui_update(
+                    "add_event",
+                    event_type="warning",
+                    message=f"Drawdown alert: -{drawdown * 100.0:.2f}% (entries paused)",
+                )
 
     def _apply_api_health_breaker(self) -> None:
         now = self._now_eastern()
@@ -1727,6 +2072,11 @@ class TradingBot:
                 title="API health breaker",
                 message=f"Schwab API error rate {error_rate * 100.0:.1f}% exceeds threshold",
             )
+            self._ui_update(
+                "add_event",
+                event_type="circuit_breaker",
+                message=f"BREAKER: API error rate {error_rate * 100.0:.1f}%",
+            )
         elif self.circuit_state.get("api_health_halt"):
             self.circuit_state["api_health_halt"] = False
 
@@ -1745,6 +2095,11 @@ class TradingBot:
             level="WARNING",
             title="LLM degraded mode",
             message="LLM provider timed out repeatedly. Trading will continue in rule-only mode.",
+        )
+        self._ui_update(
+            "add_event",
+            event_type="warning",
+            message="LLM timed out repeatedly; switched to rule-only mode.",
         )
 
     def _record_api_health(self, success: bool) -> None:
@@ -1926,6 +2281,14 @@ class TradingBot:
             return
 
         for directive in directives:
+            self._ui_update(
+                "add_event",
+                event_type="llm",
+                message=(
+                    f"LLM: {directive.action} "
+                    f"{str(getattr(directive, 'reason', '')).strip()}"
+                ),
+            )
             if directive.action == "scale_size":
                 scalar = float(
                     directive.payload.get(
@@ -2004,6 +2367,7 @@ class TradingBot:
                                 quantity=max(1, int(position.get("quantity", 1))),
                     )
                         )
+        self._ui_update_system_status()
 
     def _recent_regime_states(self, *, limit: int = 3) -> list[dict]:
         path = Path(self.config.regime.history_file or "bot/data/regime_history.json")
@@ -2103,6 +2467,14 @@ class TradingBot:
                 action.estimated_cost,
                 action.reason,
             )
+            self._ui_update(
+                "add_event",
+                event_type="hedged",
+                message=(
+                    f"HEDGE {action.symbol} {action.direction} x{action.quantity} "
+                    f"(est ${float(action.estimated_cost):.2f})"
+                ),
+            )
             executed = False
             if self.config.hedging.auto_execute:
                 executed = self._execute_hedge_action(action)
@@ -2113,6 +2485,12 @@ class TradingBot:
                     message=f"{action.symbol} {action.direction} x{action.quantity}",
                     context={"estimated_cost": action.estimated_cost, "reason": action.reason},
                 )
+                if not executed:
+                    self._ui_update(
+                        "add_event",
+                        event_type="warning",
+                        message=f"HEDGE failed for {action.symbol} {action.direction}",
+                    )
             self._record_hedge_action(action, executed=executed)
 
     def _execute_hedge_action(self, action) -> bool:
@@ -2509,12 +2887,24 @@ class TradingBot:
                 self._scan_for_entries()
             else:
                 logger.warning("Entry scanning paused by circuit breaker state.")
+                self._ui_update(
+                    "add_event",
+                    event_type="paused",
+                    message="Entry scanning paused by circuit breaker state.",
+                )
             self._run_strategy_sandbox_cycle()
 
             logger.info("Scan cycle complete.")
+            self._last_scan_completed_at = self._now_eastern()
+            self._ui_update_system_status()
 
         except Exception as e:
             logger.error("Error during scan cycle: %s", e)
+            self._ui_update(
+                "add_event",
+                event_type="warning",
+                message=f"Scan cycle failed: {e}",
+            )
             logger.debug(traceback.format_exc())
             self._alert(
                 level="ERROR",
@@ -2552,6 +2942,30 @@ class TradingBot:
             "Portfolio: Balance=$%s | Open positions: %d | Daily P/L: $%.2f",
             f"{balance:,.2f}", len(positions), daily_pnl,
         )
+        daily_risk_used = 0.0
+        if float(balance or 0.0) > 0:
+            daily_risk_used = (
+                safe_float(self.risk_manager.portfolio.total_risk_deployed, 0.0)
+                / float(balance)
+                * 100.0
+            )
+        self._ui_update(
+            "update_portfolio",
+            balance=balance,
+            buying_power=None,
+            open_count=len(positions),
+            max_positions=int(self.risk_manager.config.max_open_positions),
+            daily_pnl=daily_pnl,
+            daily_risk_pct=daily_risk_used,
+            max_daily_risk_pct=float(self.config.risk.max_daily_loss_pct),
+            greeks=self.risk_manager.get_portfolio_greeks(),
+        )
+        self._ui_update(
+            "update_positions",
+            positions=self._ui_positions_payload(positions),
+        )
+        self._ui_refresh_metrics(closed_trades)
+        self._ui_update_system_status()
         self._equity_history.append(
             {
                 "date": self._now_eastern().date().isoformat(),
@@ -3935,6 +4349,14 @@ class TradingBot:
             ),
             context={"symbols": [str(p.get("symbol", "")) for _, p in losers[:5]]},
         )
+        self._ui_update(
+            "add_event",
+            event_type="circuit_breaker",
+            message=(
+                f"BREAKER: correlated losses paused entries until "
+                f"{pause_until.strftime('%H:%M')}"
+            ),
+        )
         return close_signals
 
     def _apply_gamma_risk_controls(self, positions: list[dict]) -> list[TradeSignal]:
@@ -4281,6 +4703,14 @@ class TradingBot:
         """Attempt to execute an entry trade after risk approval."""
         correlation_id = str(signal.metadata.get("correlation_id", "")).strip() or uuid.uuid4().hex[:12]
         signal.metadata["correlation_id"] = correlation_id
+
+        def _ui_reject(reason_text: str) -> None:
+            self._ui_update(
+                "add_event",
+                event_type="rejected",
+                message=f"REJECTED {signal.strategy} {signal.symbol} — {reason_text}",
+            )
+
         if (
             signal.action == "open"
             and bool(signal.metadata.get("apply_timing_blocks", False))
@@ -4323,6 +4753,7 @@ class TradingBot:
                     signal.symbol,
                     econ_reason,
                 )
+                _ui_reject(econ_reason or "economic calendar policy")
                 return False
             if econ_reason:
                 signal.metadata["economic_calendar_adjustment"] = econ_reason
@@ -4361,6 +4792,7 @@ class TradingBot:
         analysis = signal.analysis
         if analysis is None:
             logger.warning("Signal %s on %s missing analysis. Skipping.", signal.strategy, signal.symbol)
+            _ui_reject("missing analysis")
             return False
         mtf_ok, mtf_agreement, mtf_votes = self._passes_multi_timeframe_confirmation(signal)
         signal.metadata["multi_timeframe"] = {
@@ -4384,6 +4816,7 @@ class TradingBot:
                 },
             )
             logger.info("Trade REJECTED by multi-timeframe gate: %s", reason)
+            _ui_reject(reason)
             return False
 
         self._refresh_theta_harvest_state()
@@ -4411,6 +4844,7 @@ class TradingBot:
                 signal.symbol,
                 reason,
             )
+            _ui_reject(reason)
             return False
 
         signal_delta = abs(safe_float(getattr(analysis, "net_delta", 0.0), 0.0))
@@ -4441,6 +4875,7 @@ class TradingBot:
                     signal.symbol,
                     budget_reason,
                 )
+                _ui_reject(budget_reason)
                 return False
             if budget_qty < signal.quantity:
                 previous_qty = signal.quantity
@@ -4487,6 +4922,7 @@ class TradingBot:
                     },
                 )
                 logger.info("Trade REJECTED by strategy-regime gate: %s", reason)
+                _ui_reject(reason)
                 return False
 
         slippage_penalty = self._symbol_slippage_penalty(signal.symbol)
@@ -4511,6 +4947,7 @@ class TradingBot:
                         },
                     )
                     logger.info("Trade REJECTED by slippage penalty: %s", reason)
+                    _ui_reject(reason)
                     return False
 
         # Risk check
@@ -4530,6 +4967,7 @@ class TradingBot:
                 "Trade REJECTED by risk manager: %s %s on %s — %s",
                 signal.strategy, signal.action, signal.symbol, reason,
             )
+            _ui_reject(reason)
             return False
         self._append_audit_event(
             event_type="risk_check",
@@ -4590,6 +5028,14 @@ class TradingBot:
                 details=details,
             )
             logger.info("Paper trade opened: %s", result)
+            self._ui_update(
+                "add_event",
+                event_type="opened",
+                message=(
+                    f"OPENED {signal.strategy} {signal.symbol} {signal.quantity}x "
+                    f"${float(analysis.credit):.2f} (Score: {float(analysis.score):.0f})"
+                ),
+            )
             self._append_audit_event(
                 event_type="order_filled",
                 correlation_id=correlation_id,
@@ -4637,6 +5083,7 @@ class TradingBot:
             )
             self._consume_strategy_cooldown_trade(signal.strategy)
             self._refresh_monte_carlo_risk(force=True)
+            self._ui_update_system_status()
             return True
 
         opened = self._execute_live_entry(
@@ -4689,6 +5136,15 @@ class TradingBot:
             )
             self._consume_strategy_cooldown_trade(signal.strategy)
             self._refresh_monte_carlo_risk(force=True)
+            self._ui_update(
+                "add_event",
+                event_type="opened",
+                message=(
+                    f"OPENED {signal.strategy} {signal.symbol} {signal.quantity}x "
+                    f"${float(analysis.credit):.2f} (Score: {float(analysis.score):.0f})"
+                ),
+            )
+            self._ui_update_system_status()
         return opened
 
     def _entry_timing_state(self, now: Optional[datetime] = None) -> dict:
@@ -4975,6 +5431,11 @@ class TradingBot:
                 self._llm_timeout_streak += 1
             if self.config.llm.mode == "blocking":
                 logger.error("LLM review failed in blocking mode: %s", e)
+                self._ui_update(
+                    "add_event",
+                    event_type="rejected",
+                    message=f"REJECTED {signal.strategy} {signal.symbol} — LLM error: {e}",
+                )
                 return False
 
             logger.warning("LLM review failed in advisory mode: %s", e)
@@ -5034,6 +5495,14 @@ class TradingBot:
                 self.config.llm.min_confidence,
                 decision.reasoning,
             )
+            self._ui_update(
+                "add_event",
+                event_type="rejected",
+                message=(
+                    f"REJECTED {signal.strategy} {signal.symbol} — "
+                    f"LLM confidence {decision.confidence:.2f} below gate"
+                ),
+            )
             return False
 
         if not decision.approve:
@@ -5044,6 +5513,14 @@ class TradingBot:
                     signal.action,
                     signal.symbol,
                     decision.reasoning,
+                )
+                self._ui_update(
+                    "add_event",
+                    event_type="rejected",
+                    message=(
+                        f"REJECTED {signal.strategy} {signal.symbol} — "
+                        f"{decision.reasoning}"
+                    ),
                 )
                 return False
 
@@ -5177,6 +5654,11 @@ class TradingBot:
             logger.info("LIVE order placed: %s", result)
             status = str(result.get("status", "")).upper()
             if status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                self._ui_update(
+                    "add_event",
+                    event_type="rejected",
+                    message=f"REJECTED {signal.strategy} {signal.symbol} — broker status {status}",
+                )
                 return False
 
             quality_row = self._record_execution_quality(
@@ -5290,6 +5772,17 @@ class TradingBot:
                 quantity=signal.quantity,
             )
             logger.info("Paper close result: %s", result)
+            status = str(result.get("status", "")).upper()
+            pnl = safe_float(result.get("pnl"), 0.0)
+            if status == "FILLED":
+                self._ui_update(
+                    "add_event",
+                    event_type=("closed_profit" if pnl >= 0 else "closed_loss"),
+                    message=(
+                        f"CLOSED {signal.strategy} {signal.symbol} "
+                        f"{pnl:+.2f} ({signal.reason})"
+                    ),
+                )
             self.alerts.trade_closed(
                 f"{signal.strategy} {signal.symbol} qty={signal.quantity} reason={signal.reason}",
                 context={
@@ -5354,6 +5847,15 @@ class TradingBot:
                         "status": "PLACED",
                     },
                 )
+                self._ui_update(
+                    "add_event",
+                    event_type="closed",
+                    message=(
+                        f"CLOSE submitted {signal.strategy} {signal.symbol} "
+                        f"(reason: {signal.reason})"
+                    ),
+                )
+        self._ui_update_system_status()
 
     def _execute_roll(self, signal: TradeSignal) -> None:
         """Handle a roll action as close-then-open with same strategy family."""
@@ -5452,6 +5954,15 @@ class TradingBot:
             source_symbol=str(signal.symbol),
             target_position_id=new_position_id,
         )
+        self._ui_update(
+            "add_event",
+            event_type="rolled",
+            message=(
+                f"ROLLED {signal.strategy} {signal.symbol} "
+                f"{signal.position_id} -> {new_position_id or 'new position'}"
+            ),
+        )
+        self._ui_update_system_status()
 
     def _find_roll_replacement_signal(
         self,
@@ -5575,6 +6086,14 @@ class TradingBot:
             action,
             position_id,
             getattr(plan, "reason", ""),
+        )
+        self._ui_update(
+            "add_event",
+            event_type="adjusted",
+            message=(
+                f"ADJUSTED {position.get('strategy', '')} {position.get('symbol', '')} "
+                f"{action} ({getattr(plan, 'reason', '')})"
+            ),
         )
 
         if action == "roll_tested_side":
@@ -7344,8 +7863,14 @@ class TradingBot:
         try:
             self._update_portfolio_state()
             self._check_exits()
+            self._ui_update_system_status()
         except Exception as e:
             logger.error("Error during position check: %s", e)
+            self._ui_update(
+                "add_event",
+                event_type="warning",
+                message=f"Position check failed: {e}",
+            )
             self._alert(
                 level="ERROR",
                 title="Position check failed",
@@ -7671,6 +8196,11 @@ class TradingBot:
         self._shutdown_in_progress = True
         logger.info("Shutdown signal received: %s", signum)
         self._running = False
+        self._ui_update(
+            "add_event",
+            event_type="paused",
+            message=f"Shutdown signal received ({signum}).",
+        )
         self._write_runtime_state(clean_shutdown=False, note=f"shutdown_signal:{signum}")
 
         if not self.is_paper:
@@ -7687,6 +8217,12 @@ class TradingBot:
             logger.info("Final shutdown dashboard generated: %s", output)
         except Exception as exc:
             logger.warning("Failed to generate final shutdown dashboard: %s", exc)
+
+        if self.ui:
+            try:
+                self.ui.stop()
+            except Exception as exc:
+                logger.debug("Terminal UI stop failed during shutdown: %s", exc)
 
         self._write_runtime_state(clean_shutdown=True, note="shutdown_complete")
         logger.info("Shutdown complete")
@@ -7970,6 +8506,12 @@ class TradingBot:
         self.connect()
         self._validate_llm_readiness()
         self.setup_schedule()
+        self._ui_update(
+            "add_event",
+            event_type="resumed",
+            message=f"Bot started in {self.config.trading_mode.upper()} mode.",
+        )
+        self._ui_update_system_status()
 
         # Run an initial scan immediately when the market is open.
         if self.is_paper or self._is_market_open_now():
@@ -7987,6 +8529,7 @@ class TradingBot:
                 self._maybe_log_heartbeat()
                 self._maintain_streaming()
                 self._auto_generate_dashboard_if_due()
+                self._ui_update_system_status()
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
@@ -7998,4 +8541,9 @@ class TradingBot:
     def stop(self) -> None:
         """Stop the bot gracefully."""
         self._running = False
+        if self.ui:
+            try:
+                self.ui.stop()
+            except Exception as exc:
+                logger.debug("Terminal UI stop failed: %s", exc)
         logger.info("Bot stop requested.")

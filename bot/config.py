@@ -224,6 +224,15 @@ class ExecutionTimingConfig:
 
 
 @dataclass
+class TerminalUIConfig:
+    enabled: bool = False
+    refresh_rate: float = 0.5
+    max_activity_events: int = 50
+    show_rejected_trades: bool = True
+    compact_mode: bool = False
+
+
+@dataclass
 class RLPromptOptimizerConfig:
     enabled: bool = False
     min_trades_for_pattern: int = 8
@@ -633,6 +642,7 @@ class BotConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    terminal_ui: TerminalUIConfig = field(default_factory=TerminalUIConfig)
     max_signals_per_symbol_per_strategy: int = 2
     risk_profiles: dict[str, RiskConfig] = field(default_factory=_default_risk_profiles)
     log_level: str = "INFO"
@@ -978,6 +988,29 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.alerts.weekly_summary = _env_bool(
         "ALERTS_WEEKLY_SUMMARY",
         cfg.alerts.weekly_summary,
+    )
+    cfg.terminal_ui.enabled = _env_bool(
+        "TERMINAL_UI_ENABLED",
+        cfg.terminal_ui.enabled,
+    )
+    cfg.terminal_ui.refresh_rate = _env_float(
+        "TERMINAL_UI_REFRESH_RATE",
+        cfg.terminal_ui.refresh_rate,
+        minimum=0.1,
+        maximum=10.0,
+    )
+    cfg.terminal_ui.max_activity_events = _env_int(
+        "TERMINAL_UI_MAX_ACTIVITY_EVENTS",
+        cfg.terminal_ui.max_activity_events,
+        minimum=10,
+    )
+    cfg.terminal_ui.show_rejected_trades = _env_bool(
+        "TERMINAL_UI_SHOW_REJECTED_TRADES",
+        cfg.terminal_ui.show_rejected_trades,
+    )
+    cfg.terminal_ui.compact_mode = _env_bool(
+        "TERMINAL_UI_COMPACT_MODE",
+        cfg.terminal_ui.compact_mode,
     )
     cfg.log_max_bytes = _env_int("LOG_MAX_BYTES", cfg.log_max_bytes, minimum=1024)
     cfg.log_backup_count = _env_int(
@@ -1363,6 +1396,12 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
             if hasattr(cfg.alerts, key):
                 setattr(cfg.alerts, key, val)
 
+    terminal_ui = raw.get("terminal_ui", {})
+    if terminal_ui:
+        for key, val in terminal_ui.items():
+            if hasattr(cfg.terminal_ui, key):
+                setattr(cfg.terminal_ui, key, val)
+
     if "max_signals_per_symbol_per_strategy" in raw:
         cfg.max_signals_per_symbol_per_strategy = raw.get(
             "max_signals_per_symbol_per_strategy",
@@ -1654,6 +1693,17 @@ def _normalize_config(cfg: BotConfig) -> None:
         cfg.alerts.drawdown_thresholds,
         default=[1.0, 2.0, 3.0],
     )
+    cfg.terminal_ui.enabled = bool(cfg.terminal_ui.enabled)
+    cfg.terminal_ui.refresh_rate = max(
+        0.1,
+        min(10.0, float(cfg.terminal_ui.refresh_rate)),
+    )
+    cfg.terminal_ui.max_activity_events = max(
+        10,
+        int(cfg.terminal_ui.max_activity_events),
+    )
+    cfg.terminal_ui.show_rejected_trades = bool(cfg.terminal_ui.show_rejected_trades)
+    cfg.terminal_ui.compact_mode = bool(cfg.terminal_ui.compact_mode)
     cfg.log_max_bytes = max(1024, int(cfg.log_max_bytes))
     cfg.log_backup_count = max(1, int(cfg.log_backup_count))
     cfg.execution.entry_step_timeout_seconds = max(10, int(cfg.execution.entry_step_timeout_seconds))
