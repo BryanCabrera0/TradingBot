@@ -7255,11 +7255,29 @@ class TradingBot:
     def setup_schedule(self) -> None:
         """Configure the automated trading schedule."""
         sched_config = self.config.schedule
+        tz_fallback_warned = False
+
+        def _schedule_at(job, at_time: str, callback, *, label: str) -> None:
+            nonlocal tz_fallback_warned
+            try:
+                job.at(at_time, tz="America/New_York").do(callback)
+            except (ModuleNotFoundError, ImportError):
+                job.at(at_time).do(callback)
+                if not tz_fallback_warned:
+                    logger.warning(
+                        "pytz is unavailable; schedule timezone support disabled. "
+                        "Falling back to local-time scheduling."
+                    )
+                    tz_fallback_warned = True
+                logger.info("Scheduled %s at %s (local timezone fallback)", label, at_time)
 
         # Schedule market scans
         for scan_time in sched_config.scan_times:
-            schedule.every().day.at(scan_time, tz="America/New_York").do(
-                self._scheduled_scan
+            _schedule_at(
+                schedule.every().day,
+                scan_time,
+                self._scheduled_scan,
+                label="scan",
             )
             logger.info("Scheduled scan at %s ET", scan_time)
 
@@ -7273,16 +7291,31 @@ class TradingBot:
             logger.info("Scheduled live reconciliation watchdog every %d minutes", recon_interval)
 
         # Daily performance report
-        schedule.every().day.at("16:05", tz="America/New_York").do(self._daily_report)
+        _schedule_at(
+            schedule.every().day,
+            "16:05",
+            self._daily_report,
+            label="daily_report",
+        )
         logger.info("Scheduled daily report at 16:05 ET")
-        schedule.every().day.at("16:10", tz="America/New_York").do(self._scheduled_dashboard)
+        _schedule_at(
+            schedule.every().day,
+            "16:10",
+            self._scheduled_dashboard,
+            label="dashboard",
+        )
         logger.info("Scheduled dashboard generation at 16:10 ET")
         if bool(self.config.ml_scorer.enabled):
             retrain_day = str(self.config.ml_scorer.retrain_day or "sunday").strip().lower()
             retrain_time = str(self.config.ml_scorer.retrain_time or "18:00").strip() or "18:00"
             day_job = getattr(schedule.every(), retrain_day, None)
             if day_job is not None:
-                day_job.at(retrain_time, tz="America/New_York").do(self._scheduled_ml_retrain)
+                _schedule_at(
+                    day_job,
+                    retrain_time,
+                    self._scheduled_ml_retrain,
+                    label="ml_retrain",
+                )
                 logger.info(
                     "Scheduled ML scorer retraining at %s %s ET",
                     retrain_day.title(),
