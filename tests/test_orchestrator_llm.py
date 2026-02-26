@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import schedule
+
 from bot.analysis import SpreadAnalysis
 from bot.config import BotConfig
 from bot.llm_advisor import LLMDecision
@@ -43,6 +45,18 @@ def make_config(mode: str) -> BotConfig:
 
 
 class OrchestratorLLMTests(unittest.TestCase):
+    def test_setup_schedule_registers_ml_retrain_job(self) -> None:
+        schedule.clear()
+        bot = TradingBot(make_config("advisory"))
+        bot.config.ml_scorer.enabled = True
+        bot.config.ml_scorer.retrain_day = "sunday"
+        bot.config.ml_scorer.retrain_time = "18:00"
+
+        bot.setup_schedule()
+        funcs = [repr(job.job_func) for job in schedule.get_jobs()]
+        self.assertTrue(any("_scheduled_ml_retrain" in fn for fn in funcs))
+        schedule.clear()
+
     def test_blocking_mode_rejects_trade(self) -> None:
         bot = TradingBot(make_config("blocking"))
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=2)
@@ -378,6 +392,43 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertTrue(bot._last_ranked_signals)
         self.assertEqual(bot._last_ranked_signals[0]["symbol"], "BBB")
 
+    def test_composite_score_includes_ml_score_and_low_confidence_flag(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.ml_scorer = mock.Mock()
+        bot.ml_scorer.predict_score = mock.Mock(return_value=0.20)
+        signal = make_signal("SPY")
+        signal.metadata["regime_score_weight"] = 1.0
+        signal.metadata["vol_surface"] = {"realized_implied_spread": 2.0}
+
+        composite = bot._composite_signal_score(signal)
+
+        self.assertGreater(composite, 0.0)
+        self.assertEqual(signal.metadata.get("ml_flag"), "low_confidence")
+        self.assertAlmostEqual(signal.metadata.get("ml_score"), 0.2, places=4)
+
+    def test_llm_context_includes_ml_flags(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.risk_manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        bot.llm_advisor = mock.Mock()
+        bot.llm_advisor.review_trade.return_value = LLMDecision(
+            approve=True,
+            confidence=0.9,
+            risk_adjustment=1.0,
+            reason="ok",
+        )
+        signal = make_signal("AAPL")
+        signal.metadata["ml_score"] = 0.22
+        signal.metadata["ml_flag"] = "low_confidence"
+
+        approved = bot._review_entry_with_llm(signal)
+
+        self.assertTrue(approved)
+        _, context = bot.llm_advisor.review_trade.call_args.args
+        self.assertEqual(context.get("ml_flag"), "low_confidence")
+        self.assertAlmostEqual(float(context.get("ml_score")), 0.22, places=4)
+
     def test_strategy_regime_gate_rejects_when_historical_win_rate_is_weak(self) -> None:
         bot = TradingBot(make_config("advisory"))
         bot._strategy_stats = {
@@ -419,6 +470,73 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertTrue(executed)
         bot.risk_manager.approve_trade.assert_called_once()
 
+    def test_theta_harvest_blocks_short_premium_entries_after_cutoff(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_advisor = None
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot._refresh_theta_harvest_state = mock.Mock()
+        bot._theta_harvest_state = {
+            "date": bot._now_eastern().date().isoformat(),
+            "expected_theta": 100.0,
+            "theta_earned": 85.0,
+            "ratio": 0.85,
+        }
+        bot._now_eastern = mock.Mock(return_value=bot._now_eastern().replace(hour=14, minute=5))
+
+        executed = bot._try_execute_entry(make_signal("SPY"))
+
+        self.assertFalse(executed)
+        bot.paper_trader.execute_open.assert_not_called()
+
+    def test_theta_harvest_underperforming_relaxes_score_floor(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_advisor = None
+        bot._strategy_stats = {
+            "credit_spreads": {
+                "HIGH_VOL_CHOP": {"wins": 15, "losses": 7, "win_rate": 68.18}
+            }
+        }
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.risk_manager.register_open_position = mock.Mock()
+        now_et = bot._now_eastern().replace(hour=14, minute=10)
+        bot._now_eastern = mock.Mock(return_value=now_et)
+        bot._refresh_theta_harvest_state = mock.Mock()
+        bot._theta_harvest_state = {
+            "date": now_et.date().isoformat(),
+            "expected_theta": 100.0,
+            "theta_earned": 20.0,
+            "ratio": 0.20,
+        }
+
+        signal = make_signal("SPY")
+        signal.analysis.score = 46.0
+        signal.metadata["regime"] = "HIGH_VOL_CHOP"
+        executed = bot._try_execute_entry(signal)
+
+        self.assertTrue(executed)
+        bot.risk_manager.approve_trade.assert_called_once()
+
+    def test_monte_carlo_high_risk_reduces_entry_quantity(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_advisor = None
+        bot._monte_carlo_state = {"high_risk": True, "var99_pct_account": 4.2}
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=4)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.risk_manager.register_open_position = mock.Mock()
+        bot._refresh_monte_carlo_risk = mock.Mock()
+
+        signal = make_signal("SPY")
+        executed = bot._try_execute_entry(signal)
+
+        self.assertTrue(executed)
+        _, kwargs = bot.paper_trader.execute_open.call_args
+        self.assertEqual(kwargs["quantity"], 2)
+
     def test_portfolio_strategist_context_includes_regime_streak_and_risk_contributors(self) -> None:
         bot = TradingBot(make_config("advisory"))
         bot.llm_strategist = mock.Mock()
@@ -426,6 +544,7 @@ class OrchestratorLLMTests(unittest.TestCase):
         bot._recent_regime_states = mock.Mock(return_value=[{"regime": "BULL_TREND"}])
         bot._strategy_streak_summary = mock.Mock(return_value={"credit_spreads": {"streak": 2, "type": "wins"}})
         bot._top_risk_contributors = mock.Mock(return_value=[{"symbol": "SPY", "risk_dollars": 1200.0}])
+        bot.current_regime_state.sub_signals = {"term_structure_steepness": 0.12, "term_structure_momentum": -0.01}
 
         bot._apply_portfolio_strategist()
 
@@ -433,6 +552,8 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertIn("recent_regime_states", context)
         self.assertIn("strategy_streaks", context)
         self.assertIn("top_risk_contributors", context)
+        self.assertIn("regime_sub_signals", context)
+        self.assertIn("term_structure_steepness", context["regime_sub_signals"])
 
 
 if __name__ == "__main__":

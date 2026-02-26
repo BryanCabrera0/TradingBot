@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
+import copy
+import json
 import logging
 import math
 import random
@@ -18,6 +21,7 @@ import pandas as pd
 from bot.config import BotConfig, load_config
 from bot.analytics import compute as compute_analytics
 from bot.data_store import dump_json, ensure_data_dir
+from bot.number_utils import safe_float
 from bot.regime_detector import LOW_VOL_GRIND, MarketRegimeDetector
 from bot.risk_manager import RiskManager
 from bot.strategies.base import TradeSignal
@@ -35,6 +39,14 @@ logger = logging.getLogger(__name__)
 class BacktestResult:
     report_path: str
     report: dict
+
+
+@dataclass
+class WalkForwardWindow:
+    train_start: str
+    train_end: str
+    test_start: str
+    test_end: str
 
 
 class Backtester:
@@ -83,6 +95,275 @@ class Backtester:
         report = self._build_report(start_date, end_date)
         report_path = self._write_report(report)
         return BacktestResult(report_path=report_path, report=report)
+
+    def run_walkforward(
+        self,
+        *,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        train_days: Optional[int] = None,
+        test_days: Optional[int] = None,
+        step_days: Optional[int] = None,
+    ) -> dict:
+        """Run rolling walk-forward optimization and persist results."""
+        available_days = self._available_trading_days()
+        if start:
+            start_date = datetime.strptime(start, "%Y-%m-%d").date()
+            available_days = [day for day in available_days if day >= start_date]
+        if end:
+            end_date = datetime.strptime(end, "%Y-%m-%d").date()
+            available_days = [day for day in available_days if day <= end_date]
+        if not available_days:
+            return {
+                "windows": [],
+                "strategies": {},
+                "oos_summary": {
+                    "windows": 0,
+                    "avg_sharpe": 0.0,
+                    "avg_win_rate": 0.0,
+                    "max_drawdown": 0.0,
+                },
+            }
+
+        train = max(10, int(train_days or self.config.walkforward.train_days))
+        test = max(5, int(test_days or self.config.walkforward.test_days))
+        step = max(1, int(step_days or self.config.walkforward.step_days))
+        windows = self._build_walkforward_windows(
+            available_days,
+            train_days=train,
+            test_days=test,
+            step_days=step,
+        )
+        if not windows:
+            return {
+                "windows": [],
+                "strategies": {},
+                "oos_summary": {
+                    "windows": 0,
+                    "avg_sharpe": 0.0,
+                    "avg_win_rate": 0.0,
+                    "max_drawdown": 0.0,
+                },
+            }
+
+        enabled_strategies = [strategy.name for strategy in self._build_strategies()]
+        param_grid = self._walkforward_parameter_grid()
+        strategy_results: dict[str, dict] = {}
+
+        for strategy_name in enabled_strategies:
+            strategy_windows: list[dict] = []
+            param_scores: dict[str, list[float]] = defaultdict(list)
+            for window in windows:
+                best_params: dict[str, float] = {}
+                best_train_score = float("-inf")
+                best_train_metrics: dict = {}
+                for params in param_grid:
+                    train_metrics = self._walkforward_eval_window(
+                        strategy_name=strategy_name,
+                        params=params,
+                        start=window.train_start,
+                        end=window.train_end,
+                    )
+                    train_score = (
+                        safe_float(train_metrics.get("sharpe_ratio"), 0.0)
+                        + safe_float(train_metrics.get("total_return"), 0.0) * 100.0
+                    )
+                    key = json.dumps(params, sort_keys=True)
+                    param_scores[key].append(train_score)
+                    if train_score > best_train_score:
+                        best_train_score = train_score
+                        best_params = dict(params)
+                        best_train_metrics = dict(train_metrics)
+
+                test_metrics = self._walkforward_eval_window(
+                    strategy_name=strategy_name,
+                    params=best_params,
+                    start=window.test_start,
+                    end=window.test_end,
+                )
+                strategy_windows.append(
+                    {
+                        "window": {
+                            "train_start": window.train_start,
+                            "train_end": window.train_end,
+                            "test_start": window.test_start,
+                            "test_end": window.test_end,
+                        },
+                        "best_params": best_params,
+                        "train_metrics": best_train_metrics,
+                        "test_metrics": test_metrics,
+                    }
+                )
+
+            test_sharpes = [safe_float(row.get("test_metrics", {}).get("sharpe_ratio"), 0.0) for row in strategy_windows]
+            test_win_rates = [safe_float(row.get("test_metrics", {}).get("win_rate"), 0.0) for row in strategy_windows]
+            test_returns = [safe_float(row.get("test_metrics", {}).get("total_return"), 0.0) for row in strategy_windows]
+            test_drawdowns = [safe_float(row.get("test_metrics", {}).get("max_drawdown"), 0.0) for row in strategy_windows]
+
+            averaged_param_scores = {
+                key: float(np.mean(values)) if values else float("-inf")
+                for key, values in param_scores.items()
+            }
+            best_param_key = max(averaged_param_scores, key=averaged_param_scores.get) if averaged_param_scores else "{}"
+            try:
+                optimal_params = json.loads(best_param_key)
+            except Exception:
+                optimal_params = {}
+
+            strategy_results[strategy_name] = {
+                "windows": strategy_windows,
+                "optimal_params": optimal_params,
+                "oos": {
+                    "avg_sharpe": round(float(np.mean(test_sharpes)) if test_sharpes else 0.0, 4),
+                    "avg_win_rate": round(float(np.mean(test_win_rates)) if test_win_rates else 0.0, 4),
+                    "avg_total_return": round(float(np.mean(test_returns)) if test_returns else 0.0, 6),
+                    "max_drawdown": round(float(np.max(test_drawdowns)) if test_drawdowns else 0.0, 6),
+                    "confidence_interval_5_95": [
+                        round(float(np.percentile(test_returns, 5)), 6) if test_returns else 0.0,
+                        round(float(np.percentile(test_returns, 95)), 6) if test_returns else 0.0,
+                    ],
+                },
+            }
+
+        all_sharpes = [
+            safe_float(strategy_results[name]["oos"].get("avg_sharpe"), 0.0)
+            for name in strategy_results
+        ]
+        all_win_rates = [
+            safe_float(strategy_results[name]["oos"].get("avg_win_rate"), 0.0)
+            for name in strategy_results
+        ]
+        all_drawdowns = [
+            safe_float(strategy_results[name]["oos"].get("max_drawdown"), 0.0)
+            for name in strategy_results
+        ]
+        payload = {
+            "generated_at": datetime.utcnow().isoformat(),
+            "config": {
+                "train_days": train,
+                "test_days": test,
+                "step_days": step,
+                "parameter_grid_size": len(param_grid),
+            },
+            "windows": [window.__dict__ for window in windows],
+            "strategies": strategy_results,
+            "oos_summary": {
+                "windows": len(windows),
+                "avg_sharpe": round(float(np.mean(all_sharpes)) if all_sharpes else 0.0, 4),
+                "avg_win_rate": round(float(np.mean(all_win_rates)) if all_win_rates else 0.0, 4),
+                "max_drawdown": round(float(np.max(all_drawdowns)) if all_drawdowns else 0.0, 6),
+            },
+        }
+        output = ensure_data_dir("bot/data") / "walkforward_results.json"
+        dump_json(output, payload)
+        payload["output_path"] = str(output)
+        return payload
+
+    def _walkforward_eval_window(
+        self,
+        *,
+        strategy_name: str,
+        params: dict,
+        start: str,
+        end: str,
+    ) -> dict:
+        run_cfg = copy.deepcopy(self.config)
+        self._configure_single_strategy(run_cfg, strategy_name, params)
+        bt = Backtester(
+            run_cfg,
+            data_dir=self.data_dir,
+            initial_balance=self.initial_balance,
+            commission_per_contract=self.commission_per_contract,
+            base_slippage_pct=self.base_slippage_pct,
+        )
+        bt.risk_manager.earnings_calendar = _AlwaysNoEarnings()
+        result = bt.run(start=start, end=end)
+        report = result.report if isinstance(result.report, dict) else {}
+        return {
+            "total_return": safe_float(report.get("total_return"), 0.0),
+            "sharpe_ratio": safe_float(report.get("sharpe_ratio"), 0.0),
+            "win_rate": safe_float(report.get("win_rate"), 0.0),
+            "max_drawdown": safe_float(report.get("max_drawdown"), 0.0),
+            "closed_trades": int(report.get("closed_trades", 0) or 0),
+        }
+
+    @staticmethod
+    def _configure_single_strategy(cfg: BotConfig, strategy_name: str, params: dict) -> None:
+        enabled = {
+            "credit_spreads",
+            "iron_condors",
+            "covered_calls",
+            "naked_puts",
+            "calendar_spreads",
+        }
+        for name in enabled:
+            section = getattr(cfg, name, None)
+            if section is not None and hasattr(section, "enabled"):
+                setattr(section, "enabled", name == strategy_name)
+        target = getattr(cfg, strategy_name, None)
+        if target is None:
+            return
+        for key, value in params.items():
+            if hasattr(target, key):
+                setattr(target, key, value)
+            if key == "stop_loss_multiple" and hasattr(target, "stop_loss_pct"):
+                setattr(target, "stop_loss_pct", value)
+
+    def _available_trading_days(self) -> list[date]:
+        days: set[date] = set()
+        for path in sorted(self.data_dir.glob("*_*.parquet.gz")) + sorted(self.data_dir.glob("*_*.parquet.csv.gz")):
+            parts = path.name.split("_")
+            if len(parts) < 2:
+                continue
+            day_part = parts[-1].split(".", 1)[0]
+            try:
+                parsed = datetime.strptime(day_part, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            days.add(parsed)
+        return sorted(days)
+
+    @staticmethod
+    def _build_walkforward_windows(
+        trading_days: list[date],
+        *,
+        train_days: int,
+        test_days: int,
+        step_days: int,
+    ) -> list[WalkForwardWindow]:
+        windows: list[WalkForwardWindow] = []
+        total = len(trading_days)
+        cursor = 0
+        while cursor + train_days + test_days <= total:
+            train_slice = trading_days[cursor : cursor + train_days]
+            test_slice = trading_days[cursor + train_days : cursor + train_days + test_days]
+            windows.append(
+                WalkForwardWindow(
+                    train_start=train_slice[0].isoformat(),
+                    train_end=train_slice[-1].isoformat(),
+                    test_start=test_slice[0].isoformat(),
+                    test_end=test_slice[-1].isoformat(),
+                )
+            )
+            cursor += step_days
+        return windows
+
+    @staticmethod
+    def _walkforward_parameter_grid() -> list[dict]:
+        grid: list[dict] = []
+        for short_delta in (0.10, 0.15, 0.20, 0.25):
+            for profit_target_pct in (0.30, 0.40, 0.50, 0.60):
+                for stop_loss_multiple in (1.5, 2.0, 2.5, 3.0):
+                    for min_dte in (15, 20, 25, 30):
+                        grid.append(
+                            {
+                                "short_delta": short_delta,
+                                "profit_target_pct": profit_target_pct,
+                                "stop_loss_multiple": stop_loss_multiple,
+                                "min_dte": min_dte,
+                            }
+                        )
+        return grid
 
     def _build_strategies(self) -> list:
         strategies = []
@@ -778,3 +1059,39 @@ def _monthly_returns(equity_curve: list[dict], initial_balance: float) -> dict[s
         else:
             out[month] = round((end / start) - 1.0, 6)
     return out
+
+
+class _AlwaysNoEarnings:
+    """Offline-safe earnings calendar fallback used in backtest optimization loops."""
+
+    @staticmethod
+    def earnings_within_window(_symbol: str, _expiration: str) -> tuple[bool, Optional[str]]:
+        return False, None
+
+
+def _run_cli() -> int:
+    parser = argparse.ArgumentParser(description="Historical options backtester")
+    parser.add_argument("--mode", choices=["backtest", "walkforward"], default="backtest")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--data-dir", default="bot/data")
+    parser.add_argument("--start", default="")
+    parser.add_argument("--end", default="")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    backtester = Backtester(cfg, data_dir=args.data_dir)
+
+    if args.mode == "walkforward":
+        result = backtester.run_walkforward(start=args.start or None, end=args.end or None)
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    if not args.start or not args.end:
+        parser.error("--start and --end are required for --mode backtest")
+    result = backtester.run(start=args.start, end=args.end)
+    print(json.dumps({"report_path": result.report_path, "report": result.report}, indent=2, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_cli())

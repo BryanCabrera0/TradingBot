@@ -286,6 +286,83 @@ class RiskManagerTests(unittest.TestCase):
         self.assertLess(scalar, 1.0)
         self.assertGreaterEqual(scalar, 0.50)
 
+    def test_strategy_allocation_boosts_high_sharpe_strategy(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.set_strategy_allocation_config(
+            {
+                "enabled": True,
+                "lookback_trades": 30,
+                "min_sharpe_for_boost": 1.5,
+                "cold_start_penalty": 0.75,
+                "cold_start_window_days": 60,
+                "cold_start_min_trades": 10,
+            }
+        )
+        manager.update_trade_history(
+            [
+                {
+                    "strategy": "bull_put_spread",
+                    "pnl": 120.0 + (idx % 5),
+                    "close_date": "2026-02-10",
+                }
+                for idx in range(30)
+            ]
+        )
+
+        scalar = manager.strategy_allocation_scalar("bull_put_spread")
+
+        self.assertEqual(scalar, 1.25)
+
+    def test_strategy_allocation_cuts_negative_sharpe_strategy(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.set_strategy_allocation_config(
+            {
+                "enabled": True,
+                "lookback_trades": 30,
+                "min_sharpe_for_boost": 1.5,
+                "cold_start_penalty": 0.75,
+                "cold_start_window_days": 60,
+                "cold_start_min_trades": 10,
+            }
+        )
+        manager.update_trade_history(
+            [
+                {
+                    "strategy": "bull_put_spread",
+                    "pnl": -100.0 - (idx % 7),
+                    "close_date": "2026-02-10",
+                }
+                for idx in range(30)
+            ]
+        )
+
+        scalar = manager.strategy_allocation_scalar("bull_put_spread")
+
+        self.assertEqual(scalar, 0.5)
+
+    def test_strategy_allocation_applies_cold_start_penalty(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.set_strategy_allocation_config(
+            {
+                "enabled": True,
+                "lookback_trades": 30,
+                "min_sharpe_for_boost": 1.5,
+                "cold_start_penalty": 0.75,
+                "cold_start_window_days": 60,
+                "cold_start_min_trades": 10,
+            }
+        )
+        manager.update_trade_history(
+            [
+                {"strategy": "bull_put_spread", "pnl": 80.0, "close_date": "2020-02-10"}
+                for _ in range(20)
+            ]
+        )
+
+        scalar = manager.strategy_allocation_scalar("bull_put_spread")
+
+        self.assertEqual(scalar, 0.75)
+
 
 if __name__ == "__main__":
     unittest.main()

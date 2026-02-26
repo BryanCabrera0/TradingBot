@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -13,6 +13,7 @@ import numpy as np
 from bot.config import RiskConfig
 from bot.data_store import load_json
 from bot.earnings_calendar import EarningsCalendar
+from bot.number_utils import safe_float
 from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,26 @@ class RiskManager:
             "max_scale_up": 1.25,
             "max_scale_down": 0.50,
         }
+        self.strategy_allocation_config: dict = {
+            "enabled": True,
+            "lookback_trades": 30,
+            "min_sharpe_for_boost": 1.5,
+            "cold_start_penalty": 0.75,
+            "cold_start_window_days": 60,
+            "cold_start_min_trades": 10,
+        }
+        self.greeks_budget_config: dict = {
+            "enabled": True,
+            "reduce_size_to_fit": True,
+            "limits": {
+                "BULL_TREND": {"delta_min": -50.0, "delta_max": 80.0, "vega_min": -200.0, "vega_max": 100.0},
+                "BEAR_TREND": {"delta_min": -80.0, "delta_max": 30.0, "vega_min": -100.0, "vega_max": 200.0},
+                "HIGH_VOL_CHOP": {"delta_min": -30.0, "delta_max": 30.0, "vega_min": -300.0, "vega_max": -50.0},
+                "LOW_VOL_GRIND": {"delta_min": -40.0, "delta_max": 60.0, "vega_min": -150.0, "vega_max": 50.0},
+                "CRASH/CRISIS": {"delta_min": -20.0, "delta_max": 10.0, "vega_min": 0.0, "vega_max": 500.0},
+                "NORMAL": {"delta_min": -50.0, "delta_max": 50.0, "vega_min": -200.0, "vega_max": 200.0},
+            },
+        }
         self.portfolio = PortfolioState()
         self.earnings_calendar = EarningsCalendar()
         self.sector_map = self._load_sector_map()
@@ -70,6 +91,28 @@ class RiskManager:
         for key in self.sizing_config:
             if hasattr(sizing, key):
                 self.sizing_config[key] = getattr(sizing, key)
+
+    def set_strategy_allocation_config(self, cfg: object) -> None:
+        """Configure strategy-level allocation scaling controls."""
+        if cfg is None:
+            return
+        if isinstance(cfg, dict):
+            self.strategy_allocation_config.update(cfg)
+            return
+        for key in self.strategy_allocation_config:
+            if hasattr(cfg, key):
+                self.strategy_allocation_config[key] = getattr(cfg, key)
+
+    def set_greeks_budget_config(self, cfg: object) -> None:
+        """Configure regime-aware Greeks budget controls."""
+        if cfg is None:
+            return
+        if isinstance(cfg, dict):
+            self.greeks_budget_config.update(cfg)
+            return
+        for key in self.greeks_budget_config:
+            if hasattr(cfg, key):
+                self.greeks_budget_config[key] = getattr(cfg, key)
 
     def update_trade_history(self, closed_trades: list[dict]) -> None:
         self._closed_trades = [item for item in (closed_trades or []) if isinstance(item, dict)]
@@ -290,6 +333,19 @@ class RiskManager:
                 f"vs ±{vega_limit:.2f}"
             )
 
+        # ── Check 11b: Regime-adaptive Greeks budget ───────────────
+        signal_delta = abs(safe_float(getattr(analysis, "net_delta", 0.0), 0.0))
+        signal_vega = abs(safe_float(getattr(analysis, "net_vega", 0.0), 0.0))
+        if (signal_delta + signal_vega) > 0:
+            budget_ok, _, budget_reason = self.evaluate_greeks_budget(
+                signal,
+                regime=(signal.metadata or {}).get("regime", "NORMAL"),
+                quantity=signal.quantity,
+                allow_resize=False,
+            )
+            if not budget_ok:
+                return False, budget_reason
+
         # ── Check 12: Sector concentration + correlation guard ────
         sector = self.sector_map.get(signal.symbol.upper(), "Unknown")
         sector_risk_after = self.portfolio.sector_risk.get(sector, 0.0) + position_max_loss
@@ -338,6 +394,104 @@ class RiskManager:
         )
         return True, "Approved"
 
+    def evaluate_greeks_budget(
+        self,
+        signal: TradeSignal,
+        *,
+        regime: Optional[str] = None,
+        quantity: Optional[int] = None,
+        allow_resize: bool = True,
+    ) -> tuple[bool, int, str]:
+        """Check regime-aware delta/vega budgets and optionally downsize quantity."""
+        if signal.action != "open":
+            qty = max(1, int(quantity or signal.quantity or 1))
+            return True, qty, "Greeks budget not applicable"
+        analysis = signal.analysis
+        if analysis is None:
+            qty = max(1, int(quantity or signal.quantity or 1))
+            return False, qty, "No analysis data attached to signal"
+        cfg = self.greeks_budget_config
+        if not bool(cfg.get("enabled", True)):
+            qty = max(1, int(quantity or signal.quantity or 1))
+            return True, qty, "Greeks budget disabled"
+
+        limits = self._greeks_limits_for_regime(regime or "NORMAL")
+        if not limits:
+            qty = max(1, int(quantity or signal.quantity or 1))
+            return True, qty, "No Greeks budget limits for regime"
+
+        requested_qty = max(1, int(quantity or signal.quantity or 1))
+        delta_unit = safe_float(getattr(analysis, "net_delta", 0.0), 0.0)
+        vega_unit = safe_float(getattr(analysis, "net_vega", 0.0), 0.0) * 100.0
+        delta_min = safe_float(limits.get("delta_min"), -1e9)
+        delta_max = safe_float(limits.get("delta_max"), 1e9)
+        vega_min = safe_float(limits.get("vega_min"), -1e9)
+        vega_max = safe_float(limits.get("vega_max"), 1e9)
+
+        def _fits(qty: int) -> bool:
+            projected_delta = self.portfolio.net_delta + (delta_unit * qty)
+            projected_vega = self.portfolio.net_vega + (vega_unit * qty)
+            return (
+                (delta_min <= projected_delta <= delta_max)
+                and (vega_min <= projected_vega <= vega_max)
+            )
+
+        if _fits(requested_qty):
+            return True, requested_qty, "Greeks budget within limits"
+
+        regime_key = self._normalize_regime_key(regime or "NORMAL")
+        if not allow_resize or not bool(cfg.get("reduce_size_to_fit", True)):
+            return (
+                False,
+                0,
+                (
+                    f"Greeks budget breach in {regime_key}: requested qty {requested_qty} "
+                    f"would exceed delta[{delta_min:.1f},{delta_max:.1f}] / "
+                    f"vega[{vega_min:.1f},{vega_max:.1f}]"
+                ),
+            )
+
+        for candidate_qty in range(requested_qty - 1, 0, -1):
+            if _fits(candidate_qty):
+                return (
+                    True,
+                    candidate_qty,
+                    (
+                        f"Greeks budget resized in {regime_key}: {requested_qty} -> {candidate_qty} "
+                        f"to stay within delta[{delta_min:.1f},{delta_max:.1f}] / "
+                        f"vega[{vega_min:.1f},{vega_max:.1f}]"
+                    ),
+                )
+
+        return (
+            False,
+            0,
+            (
+                f"Greeks budget breach in {regime_key}: minimum qty 1 still exceeds "
+                f"delta[{delta_min:.1f},{delta_max:.1f}] / vega[{vega_min:.1f},{vega_max:.1f}]"
+            ),
+        )
+
+    def _greeks_limits_for_regime(self, regime: str) -> dict:
+        limits = self.greeks_budget_config.get("limits", {})
+        if not isinstance(limits, dict):
+            return {}
+        regime_key = self._normalize_regime_key(regime)
+        row = limits.get(regime_key)
+        if isinstance(row, dict):
+            return row
+        fallback = limits.get("NORMAL")
+        return fallback if isinstance(fallback, dict) else {}
+
+    @staticmethod
+    def _normalize_regime_key(regime: str) -> str:
+        raw = str(regime or "").strip().upper()
+        if not raw:
+            return "NORMAL"
+        if raw in {"CRASH", "CRISIS", "CRASH_CRISIS", "CRASH/CIRISIS", "CRASH_CRIISIS"}:
+            return "CRASH/CRISIS"
+        return raw
+
     def calculate_position_size(self, signal: TradeSignal) -> int:
         """Calculate the number of contracts to trade."""
         if signal.analysis is None or signal.analysis.max_loss <= 0:
@@ -345,6 +499,7 @@ class RiskManager:
 
         balance = self.portfolio.account_balance
         risk_scalar = self._equity_curve_risk_scalar()
+        risk_scalar *= self.strategy_allocation_scalar(signal.strategy)
         adjusted_max_position_risk_pct = float(self.config.max_position_risk_pct) * risk_scalar
         max_risk_per_trade = balance * (adjusted_max_position_risk_pct / 100.0)
         risk_per_contract = signal.analysis.max_loss * 100
@@ -358,6 +513,59 @@ class RiskManager:
         else:
             contracts = int(max_risk_per_trade / risk_per_contract)
         return max(1, min(contracts, 10))
+
+    def strategy_allocation_scalar(self, strategy_name: str) -> float:
+        """Return strategy-level size scalar from rolling Sharpe/cold-start heuristics."""
+        cfg = self.strategy_allocation_config
+        if not bool(cfg.get("enabled", True)):
+            return 1.0
+        strategy_key = str(strategy_name or "").strip().lower()
+        if not strategy_key:
+            return 1.0
+        lookback = max(5, int(cfg.get("lookback_trades", 30)))
+        min_sharpe_for_boost = float(cfg.get("min_sharpe_for_boost", 1.5))
+        cold_penalty = max(0.1, min(1.0, float(cfg.get("cold_start_penalty", 0.75))))
+        cold_window = max(7, int(cfg.get("cold_start_window_days", 60)))
+        cold_min_trades = max(1, int(cfg.get("cold_start_min_trades", 10)))
+
+        strategy_trades = [
+            item
+            for item in self._closed_trades
+            if isinstance(item, dict) and str(item.get("strategy", "")).strip().lower() == strategy_key
+        ]
+        if not strategy_trades:
+            return cold_penalty
+
+        recent = strategy_trades[-lookback:]
+        pnls = np.array(
+            [safe_float(item.get("pnl", item.get("realized_pnl", 0.0)), 0.0) for item in recent],
+            dtype=float,
+        )
+        sharpe = 0.0
+        if len(pnls) >= 2:
+            std = float(np.std(pnls, ddof=1))
+            if std > 0:
+                sharpe = float((np.mean(pnls) / std) * np.sqrt(len(pnls)))
+
+        scalar = 1.0
+        if sharpe < 0.0:
+            scalar = 0.5
+        elif sharpe > min_sharpe_for_boost:
+            scalar = 1.25
+
+        cutoff = datetime.utcnow().date() - timedelta(days=cold_window)
+        recent_window_count = 0
+        for trade in strategy_trades:
+            close_date = str(trade.get("close_date", "")).split("T", 1)[0]
+            try:
+                trade_day = datetime.strptime(close_date, "%Y-%m-%d").date()
+            except Exception:
+                continue
+            if trade_day >= cutoff:
+                recent_window_count += 1
+        if recent_window_count < cold_min_trades:
+            scalar = min(scalar, cold_penalty)
+        return max(0.1, min(1.25, float(scalar)))
 
     def _equity_curve_slope(self) -> float:
         """Slope of normalized rolling cumulative P&L across recent closed trades."""

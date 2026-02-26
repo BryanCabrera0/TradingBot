@@ -201,6 +201,49 @@ sizing:
   max_scale_up: 1.25
   max_scale_down: 0.50
 
+strategy_allocation:
+  enabled: true
+  lookback_trades: 30
+  min_sharpe_for_boost: 1.5
+  cold_start_penalty: 0.75
+  cold_start_window_days: 60
+  cold_start_min_trades: 10
+
+greeks_budget:
+  enabled: true
+  reduce_size_to_fit: true
+  limits:
+    BULL_TREND:
+      delta_min: -50.0
+      delta_max: 80.0
+      vega_min: -200.0
+      vega_max: 100.0
+    BEAR_TREND:
+      delta_min: -80.0
+      delta_max: 30.0
+      vega_min: -100.0
+      vega_max: 200.0
+    HIGH_VOL_CHOP:
+      delta_min: -30.0
+      delta_max: 30.0
+      vega_min: -300.0
+      vega_max: -50.0
+    LOW_VOL_GRIND:
+      delta_min: -40.0
+      delta_max: 60.0
+      vega_min: -150.0
+      vega_max: 50.0
+    CRASH/CRISIS:
+      delta_min: -20.0
+      delta_max: 10.0
+      vega_min: 0.0
+      vega_max: 500.0
+    NORMAL:
+      delta_min: -50.0
+      delta_max: 50.0
+      vega_min: -200.0
+      vega_max: 200.0
+
 regime:
   enabled: false
   min_confidence: 0.55
@@ -301,6 +344,10 @@ execution:
   stale_order_minutes: 20
   # Capture partial-fill quantities/prices into live ledger state
   include_partials_in_ledger: true
+  # Track partially filled ladder outcomes as live partial positions
+  partial_fill_handling: true
+  # Cancel/re-evaluate working entries when underlying moves this much (%)
+  market_move_cancel_pct: 1.0
   # Avoid poor execution windows for entries (exits are exempt)
   block_first_minutes: 15
   block_last_minutes: 10
@@ -317,12 +364,73 @@ execution:
 # Signal ranking + per-symbol signal fanout control
 signal_ranking:
   enabled: true
-  weight_score: 0.40
-  weight_pop: 0.30
-  weight_credit: 0.15
-  weight_vol_premium: 0.15
+  weight_score: 0.30
+  weight_pop: 0.25
+  weight_credit: 0.10
+  weight_vol_premium: 0.10
+  ml_score_weight: 0.25
   top_ranked_to_log: 5
 max_signals_per_symbol_per_strategy: 2
+
+ml_scorer:
+  enabled: true
+  min_training_trades: 30
+  retrain_day: sunday
+  retrain_time: "18:00"
+  feature_importance_log: true
+  closed_trades_file: bot/data/closed_trades.json
+  model_file: bot/data/ml_model.json
+  feature_importance_file: bot/data/ml_feature_importance.json
+
+theta_harvest:
+  enabled: true
+  satisfied_pct: 0.80
+  underperform_pct: 0.30
+  cutoff_hour: 14
+
+correlation_monitor:
+  enabled: true
+  lookback_days: 20
+  crisis_threshold: 0.95
+  stress_threshold: 0.85
+
+execution_timing:
+  adaptive: true
+  min_fills_per_bucket: 20
+  analysis_file: bot/data/execution_timing_analysis.json
+
+scaling:
+  enabled: false
+  scale_in_delay_minutes: 60
+  scale_in_max_adds: 2
+  partial_exit_pct: 0.40
+  partial_exit_size: 0.50
+
+walkforward:
+  enabled: false
+  train_days: 60
+  test_days: 20
+  step_days: 20
+
+monte_carlo:
+  enabled: true
+  simulations: 10000
+  var_limit_pct: 3.0
+
+reconciliation:
+  interval_minutes: 30
+  auto_import: true
+
+multi_timeframe:
+  enabled: true
+  min_agreement: 2
+
+cooldown:
+  graduated: true
+  level_1_losses: 2
+  level_1_reduction: 0.25
+  level_2_losses: 3
+  level_2_reduction: 0.50
 
 # Optional LLM advisor
 # Use provider "ollama" for local models on your Mac, or "openai" for cloud.
@@ -344,11 +452,16 @@ llm:
   ensemble_enabled: false
   ensemble_models:
     - openai:gpt-5.2-pro
-    - anthropic:claude-sonnet-4-20250514
+    - openai:gpt-5.2
   ensemble_agreement_threshold: 0.66
+  multi_turn_enabled: true
+  multi_turn_confidence_threshold: 70
+  adversarial_review_enabled: true
+  adversarial_loss_threshold_pct: 0.50
   journal_enabled: false
   journal_file: bot/data/trade_journal.json
   journal_context_entries: 20
+  explanations_file: bot/data/trade_explanations.json
 
 # News intelligence layer
 # Pulls stock-specific and market-level headlines and includes them in LLM review context.

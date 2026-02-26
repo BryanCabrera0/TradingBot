@@ -163,6 +163,8 @@ class ExecutionConfig:
     cancel_stale_orders: bool = True
     stale_order_minutes: int = 20
     include_partials_in_ledger: bool = True
+    partial_fill_handling: bool = True
+    market_move_cancel_pct: float = 1.0
     block_first_minutes: int = 15
     block_last_minutes: int = 10
     entry_step_timeout_seconds: int = 45
@@ -178,11 +180,137 @@ class ExecutionConfig:
 @dataclass
 class SignalRankingConfig:
     enabled: bool = True
-    weight_score: float = 0.40
-    weight_pop: float = 0.30
-    weight_credit: float = 0.15
-    weight_vol_premium: float = 0.15
+    weight_score: float = 0.30
+    weight_pop: float = 0.25
+    weight_credit: float = 0.10
+    weight_vol_premium: float = 0.10
+    ml_score_weight: float = 0.25
     top_ranked_to_log: int = 5
+
+
+@dataclass
+class MLScorerConfig:
+    enabled: bool = True
+    min_training_trades: int = 30
+    retrain_day: str = "sunday"
+    retrain_time: str = "18:00"
+    feature_importance_log: bool = True
+    closed_trades_file: str = "bot/data/closed_trades.json"
+    model_file: str = "bot/data/ml_model.json"
+    feature_importance_file: str = "bot/data/ml_feature_importance.json"
+
+
+@dataclass
+class ThetaHarvestConfig:
+    enabled: bool = True
+    satisfied_pct: float = 0.80
+    underperform_pct: float = 0.30
+    cutoff_hour: int = 14
+
+
+@dataclass
+class CorrelationMonitorConfig:
+    enabled: bool = True
+    lookback_days: int = 20
+    crisis_threshold: float = 0.95
+    stress_threshold: float = 0.85
+
+
+@dataclass
+class ExecutionTimingConfig:
+    adaptive: bool = True
+    min_fills_per_bucket: int = 20
+    analysis_file: str = "bot/data/execution_timing_analysis.json"
+
+
+@dataclass
+class RLPromptOptimizerConfig:
+    enabled: bool = False
+    min_trades_for_pattern: int = 8
+    loss_rate_threshold: float = 0.60
+    max_rules: int = 25
+    rolling_window_size: int = 100
+    learned_rules_file: str = "bot/data/learned_rules.json"
+    audit_log_file: str = "bot/data/audit_log.jsonl"
+
+
+@dataclass
+class AltDataConfig:
+    gex_enabled: bool = True
+    dark_pool_proxy_enabled: bool = True
+    social_sentiment_enabled: bool = True
+    social_sentiment_cache_minutes: int = 30
+    social_sentiment_model: str = "gpt-5.2"
+
+
+@dataclass
+class ExecutionAlgoConfig:
+    enabled: bool = False
+    algo_type: str = "smart_ladder"  # smart_ladder | twap | iceberg | adaptive
+    twap_slices: int = 4
+    twap_window_seconds: int = 300
+    iceberg_visible_qty: int = 1
+    adaptive_spread_pause_threshold: float = 1.5
+    adaptive_spread_accelerate_threshold: float = 0.8
+
+
+@dataclass
+class StrategySandboxConfig:
+    enabled: bool = False
+    min_failing_score: float = 40.0
+    consecutive_fail_cycles: int = 3
+    backtest_days: int = 30
+    min_sharpe: float = 0.5
+    max_drawdown_pct: float = 15.0
+    deployment_days: int = 5
+    sizing_scalar: float = 0.5
+    state_file: str = "bot/data/strategy_sandbox_state.json"
+    active_strategy: dict = field(default_factory=dict)
+
+
+@dataclass
+class ScalingConfig:
+    enabled: bool = False
+    scale_in_delay_minutes: int = 60
+    scale_in_max_adds: int = 2
+    partial_exit_pct: float = 0.40
+    partial_exit_size: float = 0.50
+
+
+@dataclass
+class WalkForwardConfig:
+    enabled: bool = False
+    train_days: int = 60
+    test_days: int = 20
+    step_days: int = 20
+
+
+@dataclass
+class MonteCarloConfig:
+    enabled: bool = True
+    simulations: int = 10_000
+    var_limit_pct: float = 3.0
+
+
+@dataclass
+class ReconciliationConfig:
+    interval_minutes: int = 30
+    auto_import: bool = True
+
+
+@dataclass
+class MultiTimeframeConfig:
+    enabled: bool = True
+    min_agreement: int = 2
+
+
+@dataclass
+class CooldownConfig:
+    graduated: bool = True
+    level_1_losses: int = 2
+    level_1_reduction: float = 0.25
+    level_2_losses: int = 3
+    level_2_reduction: float = 0.50
 
 
 @dataclass
@@ -205,9 +333,14 @@ class LLMConfig:
     ensemble_enabled: bool = False
     ensemble_models: list = field(default_factory=lambda: ["openai:gpt-5.2-pro"])
     ensemble_agreement_threshold: float = 0.66
+    multi_turn_enabled: bool = True
+    multi_turn_confidence_threshold: float = 70.0
+    adversarial_review_enabled: bool = True
+    adversarial_loss_threshold_pct: float = 0.50
     journal_enabled: bool = False
     journal_file: str = "bot/data/trade_journal.json"
     journal_context_entries: int = 20
+    explanations_file: str = "bot/data/trade_explanations.json"
 
 
 @dataclass
@@ -322,6 +455,32 @@ class SizingConfig:
     equity_curve_lookback: int = 20
     max_scale_up: float = 1.25
     max_scale_down: float = 0.50
+
+
+@dataclass
+class StrategyAllocationConfig:
+    enabled: bool = True
+    lookback_trades: int = 30
+    min_sharpe_for_boost: float = 1.5
+    cold_start_penalty: float = 0.75
+    cold_start_window_days: int = 60
+    cold_start_min_trades: int = 10
+
+
+@dataclass
+class GreeksBudgetConfig:
+    enabled: bool = True
+    reduce_size_to_fit: bool = True
+    limits: dict = field(
+        default_factory=lambda: {
+            "BULL_TREND": {"delta_min": -50.0, "delta_max": 80.0, "vega_min": -200.0, "vega_max": 100.0},
+            "BEAR_TREND": {"delta_min": -80.0, "delta_max": 30.0, "vega_min": -100.0, "vega_max": 200.0},
+            "HIGH_VOL_CHOP": {"delta_min": -30.0, "delta_max": 30.0, "vega_min": -300.0, "vega_max": -50.0},
+            "LOW_VOL_GRIND": {"delta_min": -40.0, "delta_max": 60.0, "vega_min": -150.0, "vega_max": 50.0},
+            "CRASH/CRISIS": {"delta_min": -20.0, "delta_max": 10.0, "vega_min": 0.0, "vega_max": 500.0},
+            "NORMAL": {"delta_min": -50.0, "delta_max": 50.0, "vega_min": -200.0, "vega_max": 200.0},
+        }
+    )
 
 
 @dataclass
@@ -441,6 +600,8 @@ class BotConfig:
     )
     risk: RiskConfig = field(default_factory=RiskConfig)
     sizing: SizingConfig = field(default_factory=SizingConfig)
+    strategy_allocation: StrategyAllocationConfig = field(default_factory=StrategyAllocationConfig)
+    greeks_budget: GreeksBudgetConfig = field(default_factory=GreeksBudgetConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     vol_surface: VolSurfaceConfig = field(default_factory=VolSurfaceConfig)
     econ_calendar: EconCalendarConfig = field(default_factory=EconCalendarConfig)
@@ -455,6 +616,20 @@ class BotConfig:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     signal_ranking: SignalRankingConfig = field(default_factory=SignalRankingConfig)
+    ml_scorer: MLScorerConfig = field(default_factory=MLScorerConfig)
+    theta_harvest: ThetaHarvestConfig = field(default_factory=ThetaHarvestConfig)
+    correlation_monitor: CorrelationMonitorConfig = field(default_factory=CorrelationMonitorConfig)
+    execution_timing: ExecutionTimingConfig = field(default_factory=ExecutionTimingConfig)
+    rl_prompt_optimizer: RLPromptOptimizerConfig = field(default_factory=RLPromptOptimizerConfig)
+    alt_data: AltDataConfig = field(default_factory=AltDataConfig)
+    execution_algos: ExecutionAlgoConfig = field(default_factory=ExecutionAlgoConfig)
+    strategy_sandbox: StrategySandboxConfig = field(default_factory=StrategySandboxConfig)
+    scaling: ScalingConfig = field(default_factory=ScalingConfig)
+    walkforward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
+    monte_carlo: MonteCarloConfig = field(default_factory=MonteCarloConfig)
+    reconciliation: ReconciliationConfig = field(default_factory=ReconciliationConfig)
+    multi_timeframe: MultiTimeframeConfig = field(default_factory=MultiTimeframeConfig)
+    cooldown: CooldownConfig = field(default_factory=CooldownConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
@@ -562,6 +737,26 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         minimum=0.0,
         maximum=1.0,
     )
+    cfg.llm.multi_turn_enabled = _env_bool(
+        "LLM_MULTI_TURN_ENABLED",
+        cfg.llm.multi_turn_enabled,
+    )
+    cfg.llm.multi_turn_confidence_threshold = _env_float(
+        "LLM_MULTI_TURN_CONFIDENCE_THRESHOLD",
+        cfg.llm.multi_turn_confidence_threshold,
+        minimum=0.0,
+        maximum=100.0,
+    )
+    cfg.llm.adversarial_review_enabled = _env_bool(
+        "LLM_ADVERSARIAL_REVIEW_ENABLED",
+        cfg.llm.adversarial_review_enabled,
+    )
+    cfg.llm.adversarial_loss_threshold_pct = _env_float(
+        "LLM_ADVERSARIAL_LOSS_THRESHOLD_PCT",
+        cfg.llm.adversarial_loss_threshold_pct,
+        minimum=0.0,
+        maximum=1.0,
+    )
     cfg.llm.journal_enabled = _env_bool(
         "LLM_JOURNAL_ENABLED",
         cfg.llm.journal_enabled,
@@ -571,6 +766,10 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "LLM_JOURNAL_CONTEXT_ENTRIES",
         cfg.llm.journal_context_entries,
         minimum=1,
+    )
+    cfg.llm.explanations_file = os.getenv(
+        "LLM_EXPLANATIONS_FILE",
+        cfg.llm.explanations_file,
     )
     cfg.news.enabled = _env_bool("NEWS_ENABLED", cfg.news.enabled)
     cfg.news.cache_seconds = _env_int(
@@ -634,6 +833,126 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     cfg.execution.include_partials_in_ledger = _env_bool(
         "EXECUTION_INCLUDE_PARTIALS_IN_LEDGER",
         cfg.execution.include_partials_in_ledger,
+    )
+    cfg.rl_prompt_optimizer.enabled = _env_bool(
+        "RL_PROMPT_OPTIMIZER_ENABLED",
+        cfg.rl_prompt_optimizer.enabled,
+    )
+    cfg.rl_prompt_optimizer.min_trades_for_pattern = _env_int(
+        "RL_PROMPT_OPTIMIZER_MIN_TRADES_FOR_PATTERN",
+        cfg.rl_prompt_optimizer.min_trades_for_pattern,
+        minimum=1,
+    )
+    cfg.rl_prompt_optimizer.loss_rate_threshold = _env_float(
+        "RL_PROMPT_OPTIMIZER_LOSS_RATE_THRESHOLD",
+        cfg.rl_prompt_optimizer.loss_rate_threshold,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    cfg.rl_prompt_optimizer.max_rules = _env_int(
+        "RL_PROMPT_OPTIMIZER_MAX_RULES",
+        cfg.rl_prompt_optimizer.max_rules,
+        minimum=1,
+    )
+    cfg.rl_prompt_optimizer.rolling_window_size = _env_int(
+        "RL_PROMPT_OPTIMIZER_ROLLING_WINDOW_SIZE",
+        cfg.rl_prompt_optimizer.rolling_window_size,
+        minimum=5,
+    )
+    cfg.alt_data.gex_enabled = _env_bool(
+        "ALT_DATA_GEX_ENABLED",
+        cfg.alt_data.gex_enabled,
+    )
+    cfg.alt_data.dark_pool_proxy_enabled = _env_bool(
+        "ALT_DATA_DARK_POOL_PROXY_ENABLED",
+        cfg.alt_data.dark_pool_proxy_enabled,
+    )
+    cfg.alt_data.social_sentiment_enabled = _env_bool(
+        "ALT_DATA_SOCIAL_SENTIMENT_ENABLED",
+        cfg.alt_data.social_sentiment_enabled,
+    )
+    cfg.alt_data.social_sentiment_cache_minutes = _env_int(
+        "ALT_DATA_SOCIAL_SENTIMENT_CACHE_MINUTES",
+        cfg.alt_data.social_sentiment_cache_minutes,
+        minimum=1,
+    )
+    cfg.alt_data.social_sentiment_model = os.getenv(
+        "ALT_DATA_SOCIAL_SENTIMENT_MODEL",
+        cfg.alt_data.social_sentiment_model,
+    )
+    cfg.execution_algos.enabled = _env_bool(
+        "EXECUTION_ALGOS_ENABLED",
+        cfg.execution_algos.enabled,
+    )
+    cfg.execution_algos.algo_type = os.getenv(
+        "EXECUTION_ALGO_TYPE",
+        cfg.execution_algos.algo_type,
+    )
+    cfg.execution_algos.twap_slices = _env_int(
+        "EXECUTION_ALGO_TWAP_SLICES",
+        cfg.execution_algos.twap_slices,
+        minimum=1,
+    )
+    cfg.execution_algos.twap_window_seconds = _env_int(
+        "EXECUTION_ALGO_TWAP_WINDOW_SECONDS",
+        cfg.execution_algos.twap_window_seconds,
+        minimum=10,
+    )
+    cfg.execution_algos.iceberg_visible_qty = _env_int(
+        "EXECUTION_ALGO_ICEBERG_VISIBLE_QTY",
+        cfg.execution_algos.iceberg_visible_qty,
+        minimum=1,
+    )
+    cfg.execution_algos.adaptive_spread_pause_threshold = _env_float(
+        "EXECUTION_ALGO_ADAPTIVE_PAUSE_THRESHOLD",
+        cfg.execution_algos.adaptive_spread_pause_threshold,
+        minimum=1.0,
+    )
+    cfg.execution_algos.adaptive_spread_accelerate_threshold = _env_float(
+        "EXECUTION_ALGO_ADAPTIVE_ACCELERATE_THRESHOLD",
+        cfg.execution_algos.adaptive_spread_accelerate_threshold,
+        minimum=0.1,
+        maximum=1.0,
+    )
+    cfg.strategy_sandbox.enabled = _env_bool(
+        "STRATEGY_SANDBOX_ENABLED",
+        cfg.strategy_sandbox.enabled,
+    )
+    cfg.strategy_sandbox.min_failing_score = _env_float(
+        "STRATEGY_SANDBOX_MIN_FAILING_SCORE",
+        cfg.strategy_sandbox.min_failing_score,
+        minimum=0.0,
+        maximum=100.0,
+    )
+    cfg.strategy_sandbox.consecutive_fail_cycles = _env_int(
+        "STRATEGY_SANDBOX_CONSECUTIVE_FAIL_CYCLES",
+        cfg.strategy_sandbox.consecutive_fail_cycles,
+        minimum=1,
+    )
+    cfg.strategy_sandbox.backtest_days = _env_int(
+        "STRATEGY_SANDBOX_BACKTEST_DAYS",
+        cfg.strategy_sandbox.backtest_days,
+        minimum=5,
+    )
+    cfg.strategy_sandbox.min_sharpe = _env_float(
+        "STRATEGY_SANDBOX_MIN_SHARPE",
+        cfg.strategy_sandbox.min_sharpe,
+    )
+    cfg.strategy_sandbox.max_drawdown_pct = _env_float(
+        "STRATEGY_SANDBOX_MAX_DRAWDOWN_PCT",
+        cfg.strategy_sandbox.max_drawdown_pct,
+        minimum=1.0,
+    )
+    cfg.strategy_sandbox.deployment_days = _env_int(
+        "STRATEGY_SANDBOX_DEPLOYMENT_DAYS",
+        cfg.strategy_sandbox.deployment_days,
+        minimum=1,
+    )
+    cfg.strategy_sandbox.sizing_scalar = _env_float(
+        "STRATEGY_SANDBOX_SIZING_SCALAR",
+        cfg.strategy_sandbox.sizing_scalar,
+        minimum=0.1,
+        maximum=1.0,
     )
     cfg.alerts.enabled = _env_bool("ALERTS_ENABLED", cfg.alerts.enabled)
     cfg.alerts.webhook_url = os.getenv("ALERTS_WEBHOOK_URL", cfg.alerts.webhook_url)
@@ -838,6 +1157,9 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in crush.items():
             if hasattr(cfg.earnings_vol_crush, key):
                 setattr(cfg.earnings_vol_crush, key, val)
+    sandbox = strats.get("sandbox", {})
+    if isinstance(sandbox, dict):
+        cfg.strategy_sandbox.active_strategy = dict(sandbox)
 
     scanner = raw.get("scanner", {})
     if scanner:
@@ -856,6 +1178,16 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in sizing.items():
             if hasattr(cfg.sizing, key):
                 setattr(cfg.sizing, key, val)
+    strategy_allocation = raw.get("strategy_allocation", {})
+    if strategy_allocation:
+        for key, val in strategy_allocation.items():
+            if hasattr(cfg.strategy_allocation, key):
+                setattr(cfg.strategy_allocation, key, val)
+    greeks_budget = raw.get("greeks_budget", {})
+    if greeks_budget:
+        for key, val in greeks_budget.items():
+            if hasattr(cfg.greeks_budget, key):
+                setattr(cfg.greeks_budget, key, val)
 
     regime = raw.get("regime", {})
     if regime:
@@ -940,6 +1272,76 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in signal_ranking.items():
             if hasattr(cfg.signal_ranking, key):
                 setattr(cfg.signal_ranking, key, val)
+    ml_scorer = raw.get("ml_scorer", {})
+    if ml_scorer:
+        for key, val in ml_scorer.items():
+            if hasattr(cfg.ml_scorer, key):
+                setattr(cfg.ml_scorer, key, val)
+    theta_harvest = raw.get("theta_harvest", {})
+    if theta_harvest:
+        for key, val in theta_harvest.items():
+            if hasattr(cfg.theta_harvest, key):
+                setattr(cfg.theta_harvest, key, val)
+    correlation_monitor = raw.get("correlation_monitor", {})
+    if correlation_monitor:
+        for key, val in correlation_monitor.items():
+            if hasattr(cfg.correlation_monitor, key):
+                setattr(cfg.correlation_monitor, key, val)
+    execution_timing = raw.get("execution_timing", {})
+    if execution_timing:
+        for key, val in execution_timing.items():
+            if hasattr(cfg.execution_timing, key):
+                setattr(cfg.execution_timing, key, val)
+    rl_prompt_optimizer = raw.get("rl_prompt_optimizer", {})
+    if rl_prompt_optimizer:
+        for key, val in rl_prompt_optimizer.items():
+            if hasattr(cfg.rl_prompt_optimizer, key):
+                setattr(cfg.rl_prompt_optimizer, key, val)
+    alt_data = raw.get("alt_data", {})
+    if alt_data:
+        for key, val in alt_data.items():
+            if hasattr(cfg.alt_data, key):
+                setattr(cfg.alt_data, key, val)
+    execution_algos = raw.get("execution_algos", {})
+    if execution_algos:
+        for key, val in execution_algos.items():
+            if hasattr(cfg.execution_algos, key):
+                setattr(cfg.execution_algos, key, val)
+    strategy_sandbox = raw.get("strategy_sandbox", {})
+    if strategy_sandbox:
+        for key, val in strategy_sandbox.items():
+            if hasattr(cfg.strategy_sandbox, key):
+                setattr(cfg.strategy_sandbox, key, val)
+    scaling = raw.get("scaling", {})
+    if scaling:
+        for key, val in scaling.items():
+            if hasattr(cfg.scaling, key):
+                setattr(cfg.scaling, key, val)
+    walkforward = raw.get("walkforward", {})
+    if walkforward:
+        for key, val in walkforward.items():
+            if hasattr(cfg.walkforward, key):
+                setattr(cfg.walkforward, key, val)
+    monte_carlo = raw.get("monte_carlo", {})
+    if monte_carlo:
+        for key, val in monte_carlo.items():
+            if hasattr(cfg.monte_carlo, key):
+                setattr(cfg.monte_carlo, key, val)
+    reconciliation = raw.get("reconciliation", {})
+    if reconciliation:
+        for key, val in reconciliation.items():
+            if hasattr(cfg.reconciliation, key):
+                setattr(cfg.reconciliation, key, val)
+    multi_timeframe = raw.get("multi_timeframe", {})
+    if multi_timeframe:
+        for key, val in multi_timeframe.items():
+            if hasattr(cfg.multi_timeframe, key):
+                setattr(cfg.multi_timeframe, key, val)
+    cooldown = raw.get("cooldown", {})
+    if cooldown:
+        for key, val in cooldown.items():
+            if hasattr(cfg.cooldown, key):
+                setattr(cfg.cooldown, key, val)
 
     llm = raw.get("llm", {})
     if llm:
@@ -1110,6 +1512,8 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.execution.stale_order_minutes = max(1, int(cfg.execution.stale_order_minutes))
     cfg.execution.cancel_stale_orders = bool(cfg.execution.cancel_stale_orders)
     cfg.execution.include_partials_in_ledger = bool(cfg.execution.include_partials_in_ledger)
+    cfg.execution.partial_fill_handling = bool(cfg.execution.partial_fill_handling)
+    cfg.execution.market_move_cancel_pct = max(0.0, float(cfg.execution.market_move_cancel_pct))
     cfg.execution.block_first_minutes = max(0, int(cfg.execution.block_first_minutes))
     cfg.execution.block_last_minutes = max(0, int(cfg.execution.block_last_minutes))
     cfg.scanner.request_pause_seconds = max(0.0, float(cfg.scanner.request_pause_seconds))
@@ -1138,9 +1542,20 @@ def _normalize_config(cfg: BotConfig) -> None:
         cfg.llm.ensemble_models,
         default=["openai:gpt-5.2-pro"],
     )
+    cfg.llm.multi_turn_enabled = bool(cfg.llm.multi_turn_enabled)
+    cfg.llm.multi_turn_confidence_threshold = max(
+        50.0,
+        min(100.0, float(cfg.llm.multi_turn_confidence_threshold)),
+    )
+    cfg.llm.adversarial_review_enabled = bool(cfg.llm.adversarial_review_enabled)
+    cfg.llm.adversarial_loss_threshold_pct = max(
+        0.0,
+        min(1.0, float(cfg.llm.adversarial_loss_threshold_pct)),
+    )
     cfg.llm.journal_enabled = bool(cfg.llm.journal_enabled)
     cfg.llm.journal_file = str(cfg.llm.journal_file or "bot/data/trade_journal.json")
     cfg.llm.journal_context_entries = max(1, int(cfg.llm.journal_context_entries))
+    cfg.llm.explanations_file = str(cfg.llm.explanations_file or "bot/data/trade_explanations.json")
     if cfg.llm.provider == "anthropic":
         if not str(cfg.llm.model).strip() or str(cfg.llm.model).strip().lower().startswith("gpt-"):
             cfg.llm.model = "claude-sonnet-4-20250514"
@@ -1239,18 +1654,135 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.signal_ranking.weight_pop = max(0.0, min(1.0, float(cfg.signal_ranking.weight_pop)))
     cfg.signal_ranking.weight_credit = max(0.0, min(1.0, float(cfg.signal_ranking.weight_credit)))
     cfg.signal_ranking.weight_vol_premium = max(0.0, min(1.0, float(cfg.signal_ranking.weight_vol_premium)))
+    cfg.signal_ranking.ml_score_weight = max(0.0, min(1.0, float(cfg.signal_ranking.ml_score_weight)))
     cfg.signal_ranking.top_ranked_to_log = max(1, int(cfg.signal_ranking.top_ranked_to_log))
     total_rank_weight = (
         cfg.signal_ranking.weight_score
         + cfg.signal_ranking.weight_pop
         + cfg.signal_ranking.weight_credit
         + cfg.signal_ranking.weight_vol_premium
+        + cfg.signal_ranking.ml_score_weight
     )
     if total_rank_weight <= 0:
-        cfg.signal_ranking.weight_score = 0.40
-        cfg.signal_ranking.weight_pop = 0.30
-        cfg.signal_ranking.weight_credit = 0.15
-        cfg.signal_ranking.weight_vol_premium = 0.15
+        cfg.signal_ranking.weight_score = 0.30
+        cfg.signal_ranking.weight_pop = 0.25
+        cfg.signal_ranking.weight_credit = 0.10
+        cfg.signal_ranking.weight_vol_premium = 0.10
+        cfg.signal_ranking.ml_score_weight = 0.25
+    cfg.ml_scorer.enabled = bool(cfg.ml_scorer.enabled)
+    cfg.ml_scorer.min_training_trades = max(1, int(cfg.ml_scorer.min_training_trades))
+    cfg.ml_scorer.retrain_day = _normalize_choice(
+        cfg.ml_scorer.retrain_day,
+        allowed={"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"},
+        default="sunday",
+        field_name="ml_scorer.retrain_day",
+    )
+    cfg.ml_scorer.retrain_time = str(cfg.ml_scorer.retrain_time or "18:00").strip() or "18:00"
+    cfg.ml_scorer.feature_importance_log = bool(cfg.ml_scorer.feature_importance_log)
+    cfg.ml_scorer.closed_trades_file = str(cfg.ml_scorer.closed_trades_file or "bot/data/closed_trades.json")
+    cfg.ml_scorer.model_file = str(cfg.ml_scorer.model_file or "bot/data/ml_model.json")
+    cfg.ml_scorer.feature_importance_file = str(
+        cfg.ml_scorer.feature_importance_file or "bot/data/ml_feature_importance.json"
+    )
+    cfg.theta_harvest.enabled = bool(cfg.theta_harvest.enabled)
+    cfg.theta_harvest.satisfied_pct = max(0.0, min(1.0, float(cfg.theta_harvest.satisfied_pct)))
+    cfg.theta_harvest.underperform_pct = max(0.0, min(1.0, float(cfg.theta_harvest.underperform_pct)))
+    cfg.theta_harvest.cutoff_hour = max(0, min(23, int(cfg.theta_harvest.cutoff_hour)))
+    cfg.correlation_monitor.enabled = bool(cfg.correlation_monitor.enabled)
+    cfg.correlation_monitor.lookback_days = max(10, int(cfg.correlation_monitor.lookback_days))
+    cfg.correlation_monitor.crisis_threshold = max(0.0, min(1.0, float(cfg.correlation_monitor.crisis_threshold)))
+    cfg.correlation_monitor.stress_threshold = max(0.0, min(1.0, float(cfg.correlation_monitor.stress_threshold)))
+    cfg.execution_timing.adaptive = bool(cfg.execution_timing.adaptive)
+    cfg.execution_timing.min_fills_per_bucket = max(1, int(cfg.execution_timing.min_fills_per_bucket))
+    cfg.execution_timing.analysis_file = str(
+        cfg.execution_timing.analysis_file or "bot/data/execution_timing_analysis.json"
+    )
+    cfg.rl_prompt_optimizer.enabled = bool(cfg.rl_prompt_optimizer.enabled)
+    cfg.rl_prompt_optimizer.min_trades_for_pattern = max(3, int(cfg.rl_prompt_optimizer.min_trades_for_pattern))
+    cfg.rl_prompt_optimizer.loss_rate_threshold = max(
+        0.5,
+        min(0.99, float(cfg.rl_prompt_optimizer.loss_rate_threshold)),
+    )
+    cfg.rl_prompt_optimizer.max_rules = max(1, int(cfg.rl_prompt_optimizer.max_rules))
+    cfg.rl_prompt_optimizer.rolling_window_size = max(20, int(cfg.rl_prompt_optimizer.rolling_window_size))
+    cfg.rl_prompt_optimizer.learned_rules_file = str(
+        cfg.rl_prompt_optimizer.learned_rules_file or "bot/data/learned_rules.json"
+    )
+    cfg.rl_prompt_optimizer.audit_log_file = str(
+        cfg.rl_prompt_optimizer.audit_log_file or "bot/data/audit_log.jsonl"
+    )
+    cfg.alt_data.gex_enabled = bool(cfg.alt_data.gex_enabled)
+    cfg.alt_data.dark_pool_proxy_enabled = bool(cfg.alt_data.dark_pool_proxy_enabled)
+    cfg.alt_data.social_sentiment_enabled = bool(cfg.alt_data.social_sentiment_enabled)
+    cfg.alt_data.social_sentiment_cache_minutes = max(
+        1,
+        int(cfg.alt_data.social_sentiment_cache_minutes),
+    )
+    cfg.alt_data.social_sentiment_model = str(cfg.alt_data.social_sentiment_model or "gpt-5.2").strip()
+    cfg.execution_algos.enabled = bool(cfg.execution_algos.enabled)
+    cfg.execution_algos.algo_type = _normalize_choice(
+        cfg.execution_algos.algo_type,
+        allowed={"smart_ladder", "twap", "iceberg", "adaptive"},
+        default="smart_ladder",
+        field_name="execution_algos.algo_type",
+    )
+    cfg.execution_algos.twap_slices = max(1, int(cfg.execution_algos.twap_slices))
+    cfg.execution_algos.twap_window_seconds = max(10, int(cfg.execution_algos.twap_window_seconds))
+    cfg.execution_algos.iceberg_visible_qty = max(1, int(cfg.execution_algos.iceberg_visible_qty))
+    cfg.execution_algos.adaptive_spread_pause_threshold = max(
+        1.0,
+        float(cfg.execution_algos.adaptive_spread_pause_threshold),
+    )
+    cfg.execution_algos.adaptive_spread_accelerate_threshold = max(
+        0.1,
+        min(1.0, float(cfg.execution_algos.adaptive_spread_accelerate_threshold)),
+    )
+    cfg.strategy_sandbox.enabled = bool(cfg.strategy_sandbox.enabled)
+    cfg.strategy_sandbox.min_failing_score = max(
+        0.0,
+        min(100.0, float(cfg.strategy_sandbox.min_failing_score)),
+    )
+    cfg.strategy_sandbox.consecutive_fail_cycles = max(
+        1,
+        int(cfg.strategy_sandbox.consecutive_fail_cycles),
+    )
+    cfg.strategy_sandbox.backtest_days = max(5, int(cfg.strategy_sandbox.backtest_days))
+    cfg.strategy_sandbox.min_sharpe = float(cfg.strategy_sandbox.min_sharpe)
+    cfg.strategy_sandbox.max_drawdown_pct = max(1.0, float(cfg.strategy_sandbox.max_drawdown_pct))
+    cfg.strategy_sandbox.deployment_days = max(1, int(cfg.strategy_sandbox.deployment_days))
+    cfg.strategy_sandbox.sizing_scalar = max(
+        0.1,
+        min(1.0, float(cfg.strategy_sandbox.sizing_scalar)),
+    )
+    cfg.strategy_sandbox.state_file = str(
+        cfg.strategy_sandbox.state_file or "bot/data/strategy_sandbox_state.json"
+    )
+    if not isinstance(cfg.strategy_sandbox.active_strategy, dict):
+        cfg.strategy_sandbox.active_strategy = {}
+    cfg.scaling.enabled = bool(cfg.scaling.enabled)
+    cfg.scaling.scale_in_delay_minutes = max(1, int(cfg.scaling.scale_in_delay_minutes))
+    cfg.scaling.scale_in_max_adds = max(0, int(cfg.scaling.scale_in_max_adds))
+    cfg.scaling.partial_exit_pct = max(0.0, min(1.0, float(cfg.scaling.partial_exit_pct)))
+    cfg.scaling.partial_exit_size = max(0.0, min(1.0, float(cfg.scaling.partial_exit_size)))
+    cfg.walkforward.enabled = bool(cfg.walkforward.enabled)
+    cfg.walkforward.train_days = max(10, int(cfg.walkforward.train_days))
+    cfg.walkforward.test_days = max(5, int(cfg.walkforward.test_days))
+    cfg.walkforward.step_days = max(1, int(cfg.walkforward.step_days))
+    cfg.monte_carlo.enabled = bool(cfg.monte_carlo.enabled)
+    cfg.monte_carlo.simulations = max(100, int(cfg.monte_carlo.simulations))
+    cfg.monte_carlo.var_limit_pct = max(0.0, float(cfg.monte_carlo.var_limit_pct))
+    cfg.reconciliation.interval_minutes = max(5, int(cfg.reconciliation.interval_minutes))
+    cfg.reconciliation.auto_import = bool(cfg.reconciliation.auto_import)
+    cfg.multi_timeframe.enabled = bool(cfg.multi_timeframe.enabled)
+    cfg.multi_timeframe.min_agreement = max(1, min(3, int(cfg.multi_timeframe.min_agreement)))
+    cfg.cooldown.graduated = bool(cfg.cooldown.graduated)
+    cfg.cooldown.level_1_losses = max(1, int(cfg.cooldown.level_1_losses))
+    cfg.cooldown.level_1_reduction = max(0.0, min(0.95, float(cfg.cooldown.level_1_reduction)))
+    cfg.cooldown.level_2_losses = max(cfg.cooldown.level_1_losses, int(cfg.cooldown.level_2_losses))
+    cfg.cooldown.level_2_reduction = max(
+        cfg.cooldown.level_1_reduction,
+        min(0.95, float(cfg.cooldown.level_2_reduction)),
+    )
     cfg.max_signals_per_symbol_per_strategy = max(1, int(cfg.max_signals_per_symbol_per_strategy))
     cfg.risk = _normalize_risk_config(cfg.risk)
     cfg.risk_profiles = _normalize_risk_profiles(cfg.risk_profiles)
@@ -1268,6 +1800,18 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.sizing.equity_curve_lookback = max(5, int(cfg.sizing.equity_curve_lookback))
     cfg.sizing.max_scale_up = max(1.0, float(cfg.sizing.max_scale_up))
     cfg.sizing.max_scale_down = max(0.1, min(1.0, float(cfg.sizing.max_scale_down)))
+    cfg.strategy_allocation.enabled = bool(cfg.strategy_allocation.enabled)
+    cfg.strategy_allocation.lookback_trades = max(5, int(cfg.strategy_allocation.lookback_trades))
+    cfg.strategy_allocation.min_sharpe_for_boost = float(cfg.strategy_allocation.min_sharpe_for_boost)
+    cfg.strategy_allocation.cold_start_penalty = max(
+        0.1,
+        min(1.0, float(cfg.strategy_allocation.cold_start_penalty)),
+    )
+    cfg.strategy_allocation.cold_start_window_days = max(7, int(cfg.strategy_allocation.cold_start_window_days))
+    cfg.strategy_allocation.cold_start_min_trades = max(1, int(cfg.strategy_allocation.cold_start_min_trades))
+    cfg.greeks_budget.enabled = bool(cfg.greeks_budget.enabled)
+    cfg.greeks_budget.reduce_size_to_fit = bool(cfg.greeks_budget.reduce_size_to_fit)
+    cfg.greeks_budget.limits = _normalize_greeks_budget_limits(cfg.greeks_budget.limits)
     cfg.regime.min_confidence = max(0.0, min(1.0, float(cfg.regime.min_confidence)))
     cfg.regime.uncertain_size_scalar = max(0.1, min(2.0, float(cfg.regime.uncertain_size_scalar)))
     cfg.vol_surface.max_vol_of_vol_for_condors = max(0.0, float(cfg.vol_surface.max_vol_of_vol_for_condors))
@@ -1443,6 +1987,51 @@ def _normalize_positive_float_list(value: object, default: list[float]) -> list[
         if parsed > 0:
             normalized.append(parsed)
     return normalized or list(default)
+
+
+def _normalize_greeks_budget_limits(value: object) -> dict:
+    """Normalize per-regime Greeks budget limits."""
+    defaults = GreeksBudgetConfig().limits
+    normalized: dict[str, dict[str, float]] = {
+        str(regime): {
+            "delta_min": float(row.get("delta_min", -1e9)),
+            "delta_max": float(row.get("delta_max", 1e9)),
+            "vega_min": float(row.get("vega_min", -1e9)),
+            "vega_max": float(row.get("vega_max", 1e9)),
+        }
+        for regime, row in defaults.items()
+        if isinstance(row, dict)
+    }
+
+    if not isinstance(value, dict):
+        return normalized
+
+    def _regime_key(raw: object) -> str:
+        key = str(raw or "").strip().upper()
+        if key in {"CRASH", "CRISIS", "CRASH_CRIISIS", "CRASH_CRISIS"}:
+            return "CRASH/CRISIS"
+        return key or "NORMAL"
+
+    for raw_regime, raw_limits in value.items():
+        if not isinstance(raw_limits, dict):
+            continue
+        regime = _regime_key(raw_regime)
+        row = normalized.get(regime, normalized.get("NORMAL", {}).copy())
+        if not isinstance(row, dict):
+            row = {}
+        for field_name in ("delta_min", "delta_max", "vega_min", "vega_max"):
+            raw_val = raw_limits.get(field_name, row.get(field_name))
+            try:
+                row[field_name] = float(raw_val)
+            except (TypeError, ValueError):
+                row[field_name] = float(row.get(field_name, 0.0))
+        if row["delta_min"] > row["delta_max"]:
+            row["delta_min"], row["delta_max"] = row["delta_max"], row["delta_min"]
+        if row["vega_min"] > row["vega_max"]:
+            row["vega_min"], row["vega_max"] = row["vega_max"], row["vega_min"]
+        normalized[regime] = row
+
+    return normalized
 
 
 def _normalize_int_list(

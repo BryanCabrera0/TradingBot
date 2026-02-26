@@ -16,8 +16,10 @@ import requests
 
 from bot.config import LLMConfig
 from bot.data_store import dump_json, load_json
+from bot.multi_agent_cio import MultiAgentCIO
 from bot.number_utils import safe_float
 from bot.openai_compat import extract_responses_output_text, request_openai_json
+from bot.rl_prompt_optimizer import load_active_rules
 from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ class LLMDecision:
     risk_adjustment: float = 1.0
     raw_response: str = ""
     review_id: str = ""
+    explanation: dict = None
 
     def __init__(
         self,
@@ -75,6 +78,7 @@ class LLMDecision:
         risk_adjustment: float = 1.0,
         raw_response: str = "",
         review_id: str = "",
+        explanation: Optional[dict] = None,
         approve: Optional[bool] = None,
         reason: Optional[str] = None,
     ):
@@ -90,6 +94,7 @@ class LLMDecision:
         self.risk_adjustment = float(risk_adjustment)
         self.raw_response = str(raw_response or "")
         self.review_id = str(review_id or "")
+        self.explanation = explanation if isinstance(explanation, dict) else {}
 
     @property
     def approve(self) -> bool:
@@ -110,6 +115,8 @@ class LLMAdvisor:
     def __init__(self, config: LLMConfig):
         self.config = config
         self.track_record_path = Path(self.config.track_record_file)
+        self.explanations_path = Path(self.config.explanations_file)
+        self.learned_rules_path = Path("bot/data/learned_rules.json")
 
     def health_check(self) -> tuple[bool, str]:
         """Check whether the configured provider is reachable/configured."""
@@ -148,7 +155,12 @@ class LLMAdvisor:
         if self.config.ensemble_enabled:
             decision, model_votes = self._review_trade_ensemble(prompt)
             raw_response = json.dumps(
-                {"ensemble": True, "votes": model_votes, "final_verdict": decision.verdict},
+                {
+                    "deep_debate": True,
+                    "votes": model_votes,
+                    "final_verdict": decision.verdict,
+                    "capital_allocation_scalar": decision.risk_adjustment,
+                },
                 separators=(",", ":"),
             )
         else:
@@ -159,14 +171,38 @@ class LLMAdvisor:
                 raw_response = self._query_model(retry_prompt)
                 decision, _ = self._parse_decision(raw_response)
 
+        multi_turn = {"used": False, "changed_verdict": False}
+        decision, raw_response, multi_turn = self._maybe_multi_turn_review(
+            signal=signal,
+            initial_decision=decision,
+            initial_raw=raw_response,
+            context=context or {},
+        )
         raw_confidence_pct = decision.confidence_pct
         adjusted_confidence_pct = self._calibrated_confidence_pct(raw_confidence_pct)
         decision.confidence = round(max(0.0, min(1.0, adjusted_confidence_pct / 100.0)), 4)
         decision.raw_response = raw_response
         signal.metadata["llm_raw_confidence"] = raw_confidence_pct
         signal.metadata["llm_adjusted_confidence"] = adjusted_confidence_pct
+        signal.metadata["llm_capital_allocation_scalar"] = decision.risk_adjustment
+        if self.config.ensemble_enabled:
+            signal.metadata["llm_deep_debate"] = True
+            rounds = [
+                int(v.get("round", 1))
+                for v in model_votes
+                if isinstance(v, dict)
+            ]
+            signal.metadata["llm_debate_rounds"] = max(rounds) if rounds else 1
+        signal.metadata["llm_multi_turn_used"] = bool(multi_turn.get("used"))
+        signal.metadata["llm_multi_turn_changed_verdict"] = bool(multi_turn.get("changed_verdict"))
         decision.raw_response = raw_response
-        decision.review_id = self._record_review(signal, decision, context or {}, model_votes=model_votes)
+        decision.review_id = self._record_review(
+            signal,
+            decision,
+            context or {},
+            model_votes=model_votes,
+            multi_turn=multi_turn,
+        )
         return decision
 
     def bind_position(self, review_id: str, position_id: str) -> None:
@@ -181,6 +217,8 @@ class LLMAdvisor:
                 continue
             if trade.get("review_id") == review_id:
                 trade["position_id"] = position_id
+                if str(trade.get("verdict", "")).lower() in {"approve", "reduce_size"}:
+                    self._upsert_trade_explanation(position_id=position_id, trade=trade)
                 break
         dump_json(self.track_record_path, payload)
 
@@ -209,6 +247,7 @@ class LLMAdvisor:
         dump_json(self.track_record_path, payload)
         if updated_trade:
             self._append_trade_journal(updated_trade)
+            self._append_explanation_outcome(position_id=position_id, trade=updated_trade)
         self.log_weekly_hit_rate()
 
     def log_weekly_hit_rate(self) -> None:
@@ -246,6 +285,7 @@ class LLMAdvisor:
         context: dict,
         *,
         model_votes: Optional[list[dict]] = None,
+        multi_turn: Optional[dict] = None,
     ) -> str:
         payload = load_json(self.track_record_path, {"trades": [], "meta": {}})
         if not isinstance(payload, dict):
@@ -271,6 +311,7 @@ class LLMAdvisor:
                 "position_id": None,
                 "outcome": None,
                 "model_votes": model_votes or [],
+                "multi_turn": multi_turn or {"used": False, "changed_verdict": False},
                 "trade_snapshot": {
                     "expiration": getattr(signal.analysis, "expiration", None),
                     "dte": getattr(signal.analysis, "dte", None),
@@ -279,6 +320,7 @@ class LLMAdvisor:
                     "credit": getattr(signal.analysis, "credit", None),
                     "max_loss": getattr(signal.analysis, "max_loss", None),
                 },
+                "explanation": self._normalize_explanation(signal, decision),
                 "context": {
                     "portfolio_exposure": context.get("portfolio_exposure"),
                     "earnings_proximity": context.get("earnings_proximity"),
@@ -287,8 +329,102 @@ class LLMAdvisor:
                 },
             }
         )
+        self._record_multi_turn_stats(payload, multi_turn or {})
         dump_json(self.track_record_path, payload)
         return review_id
+
+    def _record_multi_turn_stats(self, payload: dict, multi_turn: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            payload["meta"] = meta
+        stats = meta.get("multi_turn_stats")
+        if not isinstance(stats, dict):
+            stats = {"used": 0, "changed_verdict": 0}
+            meta["multi_turn_stats"] = stats
+        if bool(multi_turn.get("used")):
+            stats["used"] = int(stats.get("used", 0) or 0) + 1
+        if bool(multi_turn.get("changed_verdict")):
+            stats["changed_verdict"] = int(stats.get("changed_verdict", 0) or 0) + 1
+
+    def _maybe_multi_turn_review(
+        self,
+        *,
+        signal: TradeSignal,
+        initial_decision: LLMDecision,
+        initial_raw: str,
+        context: dict,
+    ) -> tuple[LLMDecision, str, dict]:
+        if not bool(getattr(self.config, "multi_turn_enabled", False)):
+            return initial_decision, initial_raw, {"used": False, "changed_verdict": False}
+
+        threshold = _clamp_float(
+            getattr(self.config, "multi_turn_confidence_threshold", 70.0),
+            50.0,
+            100.0,
+        )
+        confidence_pct = initial_decision.confidence_pct
+        uncertain_zone = 50.0 <= confidence_pct <= threshold
+        if initial_decision.verdict != "reduce_size" and not uncertain_zone:
+            return initial_decision, initial_raw, {"used": False, "changed_verdict": False}
+
+        follow_prompt = self._build_follow_up_prompt(signal, initial_decision, context)
+        follow_raw = self._query_model(follow_prompt)
+        follow_decision, valid = self._parse_decision(follow_raw)
+        if not valid:
+            retry_prompt = f"{follow_prompt}\n\nPlease respond ONLY with valid JSON."
+            follow_raw = self._query_model(retry_prompt)
+            follow_decision, valid = self._parse_decision(follow_raw)
+        if not valid:
+            return initial_decision, initial_raw, {"used": True, "changed_verdict": False}
+
+        changed = follow_decision.verdict != initial_decision.verdict
+        merged_raw = json.dumps(
+            {
+                "turn1": self._safe_json_load(initial_raw) or initial_raw,
+                "turn2": self._safe_json_load(follow_raw) or follow_raw,
+            },
+            separators=(",", ":"),
+        )
+        return follow_decision, merged_raw, {"used": True, "changed_verdict": changed}
+
+    def _build_follow_up_prompt(self, signal: TradeSignal, decision: LLMDecision, context: dict) -> str:
+        history = self._relevant_history_context(signal)
+        payload = {
+            "task": "Re-evaluate this trade with focused uncertainty resolution. Return JSON only.",
+            "first_pass": {
+                "verdict": decision.verdict,
+                "confidence": decision.confidence_pct,
+                "reasoning": decision.reasoning,
+                "suggested_adjustment": decision.suggested_adjustment,
+            },
+            "concern_areas": [
+                "model uncertainty",
+                "portfolio greek exposure",
+                "recent similar trade outcomes",
+                "cross-asset correlation regime",
+            ],
+            "additional_context": {
+                "portfolio_greeks": (context.get("portfolio_exposure", {}) if isinstance(context.get("portfolio_exposure"), dict) else {}),
+                "correlation_state": context.get("correlation_state", {}),
+                "similar_trades": history.get("similar_trades", []),
+                "recent_mistakes": history.get("recent_mistakes", []),
+            },
+            "output_schema": {
+                "verdict": "approve|reject|reduce_size",
+                "confidence": "0-100",
+                "reasoning": "short rationale",
+                "suggested_adjustment": "string or null",
+                "bull_case": "string",
+                "bear_case": "string",
+                "key_risk": "string",
+                "expected_duration": "string",
+                "confidence_drivers": ["string", "string", "string"],
+            },
+        }
+        return json.dumps(payload, separators=(",", ":"))
 
     def _recompute_calibration(self, payload: dict) -> None:
         """Recompute confidence calibration buckets from closed outcomes."""
@@ -363,15 +499,24 @@ class LLMAdvisor:
         *,
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         provider_name = str(provider or self.config.provider).strip().lower()
         model_name = str(model or self.config.model).strip()
         if provider_name == "ollama":
             return self._query_ollama(prompt, model=model_name)
         if provider_name == "openai":
-            return self._query_openai(prompt, model=model_name)
+            return self._query_openai(
+                prompt,
+                model=model_name,
+                system_prompt=system_prompt,
+            )
         if provider_name == "anthropic":
-            return self._query_anthropic(prompt, model=model_name)
+            return self._query_anthropic(
+                prompt,
+                model=model_name,
+                system_prompt=system_prompt,
+            )
         raise RuntimeError(f"Unsupported LLM provider: {provider_name}")
 
     def _query_ollama(self, prompt: str, *, model: Optional[str] = None) -> str:
@@ -388,7 +533,13 @@ class LLMAdvisor:
         data = response.json()
         return str(data.get("response", "")).strip()
 
-    def _query_openai(self, prompt: str, *, model: Optional[str] = None) -> str:
+    def _query_openai(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
         api_key = os.getenv("OPENAI_API_KEY")
         if not _is_configured_secret(api_key):
             raise RuntimeError("OPENAI_API_KEY is missing")
@@ -396,7 +547,7 @@ class LLMAdvisor:
         return request_openai_json(
             api_key=api_key,
             model=model or self.config.model,
-            system_prompt=self._system_prompt(),
+            system_prompt=system_prompt or self._system_prompt(),
             user_prompt=prompt,
             timeout_seconds=self.config.timeout_seconds,
             temperature=self.config.temperature,
@@ -415,13 +566,28 @@ class LLMAdvisor:
                     "confidence": {"type": "number", "minimum": 0, "maximum": 100},
                     "reasoning": {"type": "string", "maxLength": 280},
                     "suggested_adjustment": {"type": ["string", "null"], "maxLength": 120},
+                    "bull_case": {"type": ["string", "null"], "maxLength": 280},
+                    "bear_case": {"type": ["string", "null"], "maxLength": 280},
+                    "key_risk": {"type": ["string", "null"], "maxLength": 180},
+                    "expected_duration": {"type": ["string", "null"], "maxLength": 120},
+                    "confidence_drivers": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string", "maxLength": 120},
+                        "maxItems": 5,
+                    },
                 },
                 "required": ["verdict", "confidence", "reasoning", "suggested_adjustment"],
-                "additionalProperties": False,
+                "additionalProperties": True,
             },
         )
 
-    def _query_anthropic(self, prompt: str, *, model: Optional[str] = None) -> str:
+    def _query_anthropic(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not _is_configured_secret(api_key):
             raise RuntimeError("ANTHROPIC_API_KEY is missing")
@@ -436,7 +602,7 @@ class LLMAdvisor:
             model=model or self.config.model or "claude-sonnet-4-20250514",
             max_tokens=350,
             temperature=self.config.temperature,
-            system=self._system_prompt(),
+            system=system_prompt or self._system_prompt(),
             messages=[{"role": "user", "content": prompt}],
         )
         chunks = []
@@ -452,55 +618,34 @@ class LLMAdvisor:
         return extract_responses_output_text(data)
 
     def _review_trade_ensemble(self, prompt: str) -> tuple[LLMDecision, list[dict]]:
-        """Run a multi-model ensemble and combine verdicts via weighted voting."""
-        specs = self._ensemble_specs()
-        if len(specs) <= 1:
-            raw = self._query_model(prompt)
-            decision, valid = self._parse_decision(raw)
-            if not valid:
-                retry_prompt = f"{prompt}\n\nPlease respond ONLY with valid JSON."
-                retry_raw = self._query_model(retry_prompt)
-                decision, _ = self._parse_decision(retry_raw)
-                raw = retry_raw
-            vote = {
-                "model_id": specs[0]["model_id"] if specs else f"{self.config.provider}:{self.config.model}",
-                "provider": specs[0]["provider"] if specs else self.config.provider,
-                "model": specs[0]["model"] if specs else self.config.model,
-                "verdict": decision.verdict,
-                "confidence": decision.confidence_pct,
-                "risk_adjustment": decision.risk_adjustment,
-                "reasoning": decision.reasoning,
-            }
-            return decision, [vote]
-
-        votes: list[dict] = []
-        with ThreadPoolExecutor(max_workers=min(3, len(specs))) as pool:
-            futures = [
-                pool.submit(self._ensemble_vote_for_model, spec, prompt)
-                for spec in specs
-            ]
-            for future in as_completed(futures):
-                try:
-                    vote = future.result()
-                except Exception as exc:
-                    logger.warning("LLM ensemble vote failed: %s", exc)
-                    continue
-                if vote:
-                    votes.append(vote)
-
-        if not votes:
-            return (
-                LLMDecision(
-                    verdict="reject",
-                    confidence=0.0,
-                    reasoning="All ensemble model calls failed",
-                    risk_adjustment=1.0,
-                ),
-                [],
+        """Run deep-debate CIO arbitration via a single OpenAI provider path."""
+        prompt_payload = self._safe_json_load(prompt)
+        prompt_rules = []
+        if isinstance(prompt_payload, dict):
+            raw_rules = prompt_payload.get("learned_rules", [])
+            if isinstance(raw_rules, list):
+                prompt_rules = [str(item).strip() for item in raw_rules if str(item).strip()]
+        if not prompt_rules:
+            prompt_rules = load_active_rules(self.learned_rules_path)
+        debate = MultiAgentCIO(
+            query_model=self._query_model,
+            parse_decision=self._parse_decision,
+            primary_model="gpt-5.2-pro",
+            fallback_model="gpt-5.2",
+            provider="openai",
+            learned_rules=prompt_rules,
+        )
+        result = debate.run(prompt)
+        final_raw = json.dumps(result.final_payload, separators=(",", ":"))
+        decision, valid = self._parse_decision(final_raw)
+        if not valid:
+            decision = LLMDecision(
+                verdict="reject",
+                confidence=0.0,
+                reasoning="Deep-debate CIO returned invalid final payload",
+                risk_adjustment=1.0,
             )
-
-        decision = self._aggregate_ensemble_votes(votes)
-        return decision, votes
+        return decision, result.model_votes
 
     def _ensemble_vote_for_model(self, spec: dict, prompt: str) -> dict:
         provider = spec["provider"]
@@ -736,6 +881,35 @@ class LLMAdvisor:
                 break
         return deduped
 
+    def _explanation_context(self, signal: Optional[TradeSignal] = None) -> list[dict]:
+        payload = load_json(self.explanations_path, {"positions": {}})
+        positions = payload.get("positions", {}) if isinstance(payload, dict) else {}
+        if not isinstance(positions, dict):
+            return []
+        symbol = str(signal.symbol or "").upper() if signal else ""
+        strategy = str(signal.strategy or "") if signal else ""
+        rows = [item for item in positions.values() if isinstance(item, dict)]
+        rows.sort(key=lambda row: str(row.get("updated_at", row.get("timestamp", ""))), reverse=True)
+        selected: list[dict] = []
+        for row in rows:
+            row_symbol = str(row.get("symbol", "")).upper()
+            row_strategy = str(row.get("strategy", ""))
+            if symbol and row_symbol != symbol and strategy and row_strategy != strategy:
+                continue
+            selected.append(
+                {
+                    "symbol": row_symbol,
+                    "strategy": row_strategy,
+                    "bull_case": row.get("bull_case"),
+                    "bear_case": row.get("bear_case"),
+                    "key_risk": row.get("key_risk"),
+                    "outcome": row.get("outcome"),
+                }
+            )
+            if len(selected) >= 6:
+                break
+        return selected
+
     def _append_trade_journal(self, trade: dict) -> None:
         if not self.config.journal_enabled:
             return
@@ -950,9 +1124,18 @@ class LLMAdvisor:
                 }
             )
 
+        learned_rules = []
+        if isinstance(context, dict):
+            raw_rules = context.get("learned_rules", [])
+            if isinstance(raw_rules, list):
+                learned_rules = [str(item).strip() for item in raw_rules if str(item).strip()]
+        if not learned_rules:
+            learned_rules = load_active_rules(self.learned_rules_path, limit=25)
+
         payload = {
             "task": "Review this options trade and decide approve/reject/reduce_size.",
             "risk_style": risk_style,
+            "learned_rules": learned_rules[:25],
             "risk_policy": {
                 **risk_policy,
                 "mode": self.config.mode,
@@ -974,12 +1157,18 @@ class LLMAdvisor:
                 "news_sentiment_summary": (context or {}).get("news_sentiment_summary", {}),
                 "sector_performance": (context or {}).get("sector_performance", {}),
                 "options_flow": (context or {}).get("options_flow", {}),
+                "alt_data": (context or {}).get("alt_data", {}),
+                "gex": (context or {}).get("gex", {}),
+                "dark_pool_proxy": (context or {}).get("dark_pool_proxy", {}),
+                "social_sentiment": (context or {}).get("social_sentiment", {}),
                 "economic_events": (context or {}).get("economic_events", {}),
                 "trade_parameters": analysis_data,
                 "portfolio_exposure": (context or {}).get("portfolio_exposure", {}),
                 "recent_trade_journal": self._journal_context(signal),
+                "recent_trade_explanations": self._explanation_context(signal),
                 "historical_context": history_context,
                 "similar_trades": history_context.get("similar_trades", []),
+                "learned_rules": learned_rules[:25],
             },
         }
         return json.dumps(payload, separators=(",", ":"))
@@ -1038,6 +1227,19 @@ class LLMAdvisor:
         if not reasoning:
             reasoning = "LLM response missing reason"
 
+        confidence_drivers = data.get("confidence_drivers")
+        if isinstance(confidence_drivers, list):
+            confidence_drivers = [str(item).strip() for item in confidence_drivers if str(item).strip()][:3]
+        else:
+            confidence_drivers = []
+        explanation = {
+            "bull_case": str(data.get("bull_case") or "").strip(),
+            "bear_case": str(data.get("bear_case") or "").strip(),
+            "key_risk": str(data.get("key_risk") or "").strip(),
+            "expected_duration": str(data.get("expected_duration") or "").strip(),
+            "confidence_drivers": confidence_drivers,
+        }
+
         return (
             LLMDecision(
                 verdict=verdict_raw,
@@ -1045,9 +1247,152 @@ class LLMAdvisor:
                 reasoning=reasoning,
                 suggested_adjustment=suggested_adjustment,
                 risk_adjustment=risk_adjustment,
+                explanation=explanation,
             ),
             True,
         )
+
+    def _normalize_explanation(self, signal: TradeSignal, decision: LLMDecision) -> dict:
+        explanation = decision.explanation if isinstance(decision.explanation, dict) else {}
+        bull_case = str(explanation.get("bull_case", "")).strip()
+        bear_case = str(explanation.get("bear_case", "")).strip()
+        key_risk = str(explanation.get("key_risk", "")).strip()
+        expected_duration = str(explanation.get("expected_duration", "")).strip()
+        drivers = explanation.get("confidence_drivers", [])
+        if not isinstance(drivers, list):
+            drivers = []
+        drivers = [str(item).strip() for item in drivers if str(item).strip()][:3]
+        if not bull_case:
+            bull_case = f"{signal.strategy} setup aligns with current probability and score metrics."
+        if not bear_case:
+            bear_case = "Adverse price move or volatility expansion can quickly reduce edge."
+        if not key_risk:
+            key_risk = "Correlation shock against the trade direction."
+        if not expected_duration:
+            dte = int(getattr(signal.analysis, "dte", 0) or 0) if signal.analysis else 0
+            expected_duration = f"{max(1, min(dte, 30))} days"
+        if not drivers:
+            drivers = [
+                "strategy score",
+                "probability of profit",
+                "volatility regime",
+            ]
+        return {
+            "bull_case": bull_case[:280],
+            "bear_case": bear_case[:280],
+            "key_risk": key_risk[:180],
+            "expected_duration": expected_duration[:120],
+            "confidence_drivers": drivers[:3],
+        }
+
+    def _upsert_trade_explanation(self, *, position_id: str, trade: dict) -> None:
+        if not position_id:
+            return
+        payload = load_json(self.explanations_path, {"positions": {}})
+        if not isinstance(payload, dict):
+            payload = {"positions": {}}
+        positions = payload.get("positions")
+        if not isinstance(positions, dict):
+            positions = {}
+            payload["positions"] = positions
+        explanation = trade.get("explanation", {}) if isinstance(trade.get("explanation"), dict) else {}
+        positions[position_id] = {
+            "position_id": position_id,
+            "review_id": trade.get("review_id"),
+            "timestamp": date.today().isoformat(),
+            "updated_at": date.today().isoformat(),
+            "symbol": trade.get("symbol"),
+            "strategy": trade.get("strategy"),
+            "verdict": trade.get("verdict"),
+            "confidence": trade.get("confidence"),
+            "bull_case": str(explanation.get("bull_case", "")),
+            "bear_case": str(explanation.get("bear_case", "")),
+            "key_risk": str(explanation.get("key_risk", "")),
+            "expected_duration": str(explanation.get("expected_duration", "")),
+            "confidence_drivers": explanation.get("confidence_drivers", []),
+            "outcome": None,
+            "actual_duration_days": None,
+            "key_risk_materialized": None,
+        }
+        dump_json(self.explanations_path, payload)
+
+    def _append_explanation_outcome(self, *, position_id: str, trade: dict) -> None:
+        if not position_id:
+            return
+        payload = load_json(self.explanations_path, {"positions": {}})
+        positions = payload.get("positions", {}) if isinstance(payload, dict) else {}
+        if not isinstance(positions, dict):
+            return
+        row = positions.get(position_id)
+        if not isinstance(row, dict):
+            return
+        outcome = _coerce_float(trade.get("outcome"), 0.0)
+        row["outcome"] = outcome
+        row["actual_pnl"] = outcome
+        row["updated_at"] = date.today().isoformat()
+        opened = str(trade.get("timestamp", "")).split("T", 1)[0]
+        closed = str(trade.get("outcome_date", "")).split("T", 1)[0]
+        duration_days = None
+        try:
+            if opened and closed:
+                duration_days = (date.fromisoformat(closed) - date.fromisoformat(opened)).days
+        except Exception:
+            duration_days = None
+        row["actual_duration_days"] = duration_days
+        key_risk_text = str(row.get("key_risk", "")).lower()
+        reason_text = str(trade.get("reasoning", "")).lower()
+        row["key_risk_materialized"] = bool(
+            key_risk_text
+            and reason_text
+            and any(token and token in reason_text for token in key_risk_text.split()[:3])
+        )
+        dump_json(self.explanations_path, payload)
+
+    def adversarial_review_position(self, position: dict, *, context: Optional[dict] = None) -> dict:
+        """Run close-vs-hold adversarial reasoning for stressed positions."""
+        if not bool(getattr(self.config, "adversarial_review_enabled", False)):
+            return {"should_exit": False, "close_conviction": 0.0, "hold_conviction": 0.0}
+        context = context or {}
+        base_payload = {
+            "position": {
+                "symbol": position.get("symbol"),
+                "strategy": position.get("strategy"),
+                "dte_remaining": position.get("dte_remaining"),
+                "entry_credit": position.get("entry_credit"),
+                "current_value": position.get("current_value"),
+                "unrealized_pnl": position.get("unrealized_pnl"),
+                "max_loss": position.get("max_loss"),
+            },
+            "context": context,
+            "schema": {"conviction": "0-100", "reasoning": "short text"},
+        }
+        close_prompt = json.dumps(
+            {
+                **base_payload,
+                "task": "Argue why this position should be closed immediately.",
+            },
+            separators=(",", ":"),
+        )
+        hold_prompt = json.dumps(
+            {
+                **base_payload,
+                "task": "Argue why this position should be held.",
+            },
+            separators=(",", ":"),
+        )
+        close_raw = self._query_model(close_prompt)
+        hold_raw = self._query_model(hold_prompt)
+        close_data = self._safe_json_load(close_raw)
+        hold_data = self._safe_json_load(hold_raw)
+        close_conviction = _clamp_float(close_data.get("conviction"), 0.0, 100.0)
+        hold_conviction = _clamp_float(hold_data.get("conviction"), 0.0, 100.0)
+        return {
+            "should_exit": bool(close_conviction >= (hold_conviction + 20.0)),
+            "close_conviction": close_conviction,
+            "hold_conviction": hold_conviction,
+            "close_reasoning": str(close_data.get("reasoning", ""))[:280],
+            "hold_reasoning": str(hold_data.get("reasoning", ""))[:280],
+        }
 
     @staticmethod
     def _safe_json_load(text: str) -> dict:

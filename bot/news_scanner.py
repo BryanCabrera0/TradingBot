@@ -94,23 +94,39 @@ class NewsScanner:
     def get_market_news(self) -> list[NewsItem]:
         return self._with_cache("market", self._fetch_market_news)
 
-    def get_symbol_sentiment(self, symbol: str, headlines: list[NewsItem] | None = None) -> dict:
-        """Return LLM-scored symbol sentiment with a 30-minute cache."""
+    def get_symbol_sentiment(
+        self,
+        symbol: str,
+        headlines: list[NewsItem] | None = None,
+        *,
+        model: Optional[str] = None,
+        cache_seconds: Optional[int] = None,
+    ) -> dict:
+        """Return LLM-scored symbol sentiment with per-symbol caching."""
         symbol_key = symbol.upper().strip()
-        cached = self._sentiment_cache.get(symbol_key)
-        if cached and (time.time() - cached[0]) < self.config.llm_sentiment_cache_seconds:
+        model_key = str(model or self.config.llm_model or "").strip() or self.config.llm_model
+        ttl = max(0, int(self.config.llm_sentiment_cache_seconds if cache_seconds is None else cache_seconds))
+        cache_key = f"{symbol_key}:{model_key}"
+        cached = self._sentiment_cache.get(cache_key)
+        if cached and (time.time() - cached[0]) < ttl:
             return cached[1]
 
         items = headlines if headlines is not None else self.get_symbol_news(symbol_key)
         top_titles = [item.title for item in items[:5]]
         if not top_titles:
-            sentiment = {"sentiment": "neutral", "confidence": 50, "key_event": None}
+            sentiment = {
+                "sentiment": "neutral",
+                "score": 0.0,
+                "catalyst": None,
+                "confidence": 0.50,
+                "key_event": None,
+            }
         elif self.config.llm_sentiment_enabled:
-            sentiment = self._score_sentiment_with_llm(symbol_key, top_titles)
+            sentiment = self._score_sentiment_with_llm(symbol_key, top_titles, model=model_key)
         else:
             sentiment = self._fallback_sentiment(top_titles)
 
-        self._sentiment_cache[symbol_key] = (time.time(), sentiment)
+        self._sentiment_cache[cache_key] = (time.time(), sentiment)
         return sentiment
 
     def trade_direction_policy(self, symbol: str, *, sentiment: Optional[dict] = None) -> dict:
@@ -118,7 +134,9 @@ class NewsScanner:
         sentiment = sentiment or self.get_symbol_sentiment(symbol)
         direction = str(sentiment.get("sentiment", "neutral")).lower()
         confidence = float(sentiment.get("confidence", 0.0) or 0.0)
-        key_event = str(sentiment.get("key_event", "") or "").lower()
+        if confidence > 1.0:
+            confidence /= 100.0
+        key_event = str(sentiment.get("catalyst", sentiment.get("key_event", "")) or "").lower()
 
         block_all = any(keyword in key_event for keyword in SENTIMENT_EVENT_BLOCKLIST)
         allow_bull_put = True
@@ -129,10 +147,10 @@ class NewsScanner:
             allow_bull_put = False
             allow_bear_call = False
             reason = f"Binary event risk: {sentiment.get('key_event')}"
-        elif direction == "bearish" and confidence > 70:
+        elif direction == "bearish" and confidence > 0.70:
             allow_bull_put = False
             reason = "Bearish high-confidence sentiment blocks bull puts"
-        elif direction == "bullish" and confidence > 70:
+        elif direction == "bullish" and confidence > 0.70:
             allow_bear_call = False
             reason = "Bullish high-confidence sentiment blocks bear calls"
 
@@ -143,7 +161,8 @@ class NewsScanner:
             "reason": reason,
             "sentiment": direction,
             "confidence": confidence,
-            "key_event": sentiment.get("key_event"),
+            "key_event": sentiment.get("catalyst", sentiment.get("key_event")),
+            "score": float(sentiment.get("score", 0.0) or 0.0),
         }
 
     def _with_cache(self, key: str, loader) -> list[NewsItem]:
@@ -253,7 +272,7 @@ class NewsScanner:
             )
         return items
 
-    def _score_sentiment_with_llm(self, symbol: str, headlines: list[str]) -> dict:
+    def _score_sentiment_with_llm(self, symbol: str, headlines: list[str], *, model: Optional[str] = None) -> dict:
         api_key = os.getenv("OPENAI_API_KEY")
         if not _is_configured_secret(api_key):
             return self._fallback_sentiment(headlines)
@@ -264,14 +283,15 @@ class NewsScanner:
             "task": "Return JSON sentiment summary for these headlines.",
             "schema": {
                 "sentiment": "bullish|bearish|neutral",
-                "confidence": "0-100",
-                "key_event": "string|null",
+                "score": "-1.0 to 1.0",
+                "catalyst": "string|null",
+                "confidence": "0.0 to 1.0",
             },
         }
         try:
             raw = request_openai_json(
                 api_key=api_key,
-                model=self.config.llm_model,
+                model=str(model or self.config.llm_model),
                 system_prompt="You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
                 user_prompt=json.dumps(prompt, separators=(",", ":")),
                 timeout_seconds=self.config.request_timeout_seconds,
@@ -285,18 +305,26 @@ class NewsScanner:
                     "type": "object",
                     "properties": {
                         "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
-                        "key_event": {"type": ["string", "null"]},
+                        "score": {"type": "number", "minimum": -1, "maximum": 1},
+                        "catalyst": {"type": ["string", "null"]},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     },
-                    "required": ["sentiment", "confidence", "key_event"],
+                    "required": ["sentiment", "score", "catalyst", "confidence"],
                     "additionalProperties": False,
                 },
             )
             parsed = json.loads(raw) if raw else {}
+            score = float(parsed.get("score", 0.0) or 0.0)
+            confidence = float(parsed.get("confidence", 0.5) or 0.5)
+            if confidence > 1.0:
+                confidence = confidence / 100.0
+            catalyst = parsed.get("catalyst", parsed.get("key_event"))
             return {
                 "sentiment": str(parsed.get("sentiment", "neutral")).lower(),
-                "confidence": float(parsed.get("confidence", 50.0) or 50.0),
-                "key_event": parsed.get("key_event"),
+                "score": max(-1.0, min(1.0, score)),
+                "confidence": max(0.0, min(1.0, confidence)),
+                "catalyst": str(catalyst).strip() if catalyst is not None else None,
+                "key_event": str(catalyst).strip() if catalyst is not None else None,
             }
         except Exception as exc:
             logger.debug("LLM sentiment failed for %s: %s", symbol, exc)
@@ -322,10 +350,12 @@ class NewsScanner:
             sentiment = "bearish"
         else:
             sentiment = "neutral"
-        confidence = min(100.0, max(40.0, abs(score) * 30 + 40))
+        confidence = min(0.95, max(0.40, abs(score) * 0.30 + 0.40))
         return {
             "sentiment": sentiment,
-            "confidence": round(confidence, 1),
+            "score": round(max(-1.0, min(1.0, score)), 4),
+            "confidence": round(confidence, 4),
+            "catalyst": key_event,
             "key_event": key_event,
         }
 

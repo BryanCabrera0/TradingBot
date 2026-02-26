@@ -130,6 +130,44 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         self.assertEqual(len(exits), 1)
         self.assertEqual(exits[0].position_id, "g2")
 
+    def test_correlation_crisis_sets_pause_and_size_reduction(self) -> None:
+        bot = TradingBot(_config())
+        bot.correlation_monitor = mock.Mock(
+            get_correlation_state=mock.Mock(
+                return_value={
+                    "correlation_regime": "crisis",
+                    "correlations": {"SPY_QQQ": 0.99},
+                    "flags": {"spy_vix_positive": True},
+                }
+            )
+        )
+
+        bot._update_correlation_state()
+
+        self.assertEqual(bot.circuit_state.get("correlation_regime"), "crisis")
+        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_size_scalar")), 0.5, places=4)
+        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_stop_widen_scalar")), 1.25, places=4)
+        self.assertFalse(bot._entries_allowed())
+
+    def test_correlation_stressed_reduces_entry_size_without_halt(self) -> None:
+        bot = TradingBot(_config())
+        bot.correlation_monitor = mock.Mock(
+            get_correlation_state=mock.Mock(
+                return_value={
+                    "correlation_regime": "stressed",
+                    "correlations": {"SPY_QQQ": 0.90},
+                    "flags": {"equity_corr_spike": True},
+                }
+            )
+        )
+
+        bot._update_correlation_state()
+
+        self.assertEqual(bot.circuit_state.get("correlation_regime"), "stressed")
+        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_size_scalar")), 0.75, places=4)
+        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_stop_widen_scalar")), 1.0, places=4)
+        self.assertTrue(bot._entries_allowed())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -119,6 +119,53 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         self.assertEqual(kwargs["shifts"], [0.0, 0.10, 0.25, 0.40])
         self.assertEqual(kwargs["step_timeouts"], [45, 45, 45, 30])
 
+    def test_live_entry_partial_fill_tracks_partial_position(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot.live_ledger = mock.Mock()
+        bot.schwab.get_quote = mock.Mock(return_value={"quote": {"lastPrice": 500.0}})
+        bot.schwab.build_bull_put_spread = mock.Mock(return_value={"order": "spec"})
+        bot.schwab.place_order_with_ladder = mock.Mock(
+            return_value={
+                "order_id": "abc123",
+                "status": "PARTIALLY_FILLED",
+                "filled_quantity": 1,
+                "midpoint_price": 1.4,
+                "fill_price": 1.35,
+                "requested_price": 1.35,
+            }
+        )
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            quantity=2,
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.4,
+                max_loss=3.6,
+                probability_of_profit=0.63,
+                score=58,
+            ),
+        )
+
+        opened = bot._execute_live_entry(
+            signal,
+            details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95},
+        )
+
+        self.assertTrue(opened)
+        kwargs = bot.live_ledger.register_entry_order.call_args.kwargs
+        self.assertEqual(kwargs["quantity"], 1)
+        self.assertEqual(kwargs["entry_order_id"], "")
+        self.assertEqual(kwargs["entry_order_status"], "FILLED")
+        self.assertEqual(signal.quantity, 1)
+
     def test_live_exit_places_close_order_and_marks_closing(self) -> None:
         bot = TradingBot(make_live_config())
         bot.live_ledger = mock.Mock()
@@ -220,6 +267,32 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
             "stale-order",
             status="CANCELED",
         )
+
+    def test_reconcile_cancels_working_entry_on_market_move(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot.live_ledger = mock.Mock()
+        bot.live_ledger.pending_entry_order_ids.return_value = ["work-order"]
+        bot.live_ledger.pending_exit_order_ids.return_value = []
+        bot.live_ledger.get_position_by_order_id.return_value = {
+            "position_id": "live_1",
+            "status": "working",
+            "symbol": "SPY",
+            "strategy": "bull_put_spread",
+            "quantity": 1,
+            "max_loss": 3.6,
+            "entry_credit": 1.3,
+            "details": {"entry_underlying_price": 100.0},
+        }
+        bot.schwab.get_order = mock.Mock(return_value={"status": "WORKING", "enteredTime": "2026-02-23T09:00:00-05:00"})
+        bot.schwab.get_quote = mock.Mock(return_value={"quote": {"lastPrice": 102.0}})
+        bot._cancel_stale_live_order = mock.Mock()
+        bot._reenter_canceled_working_entry = mock.Mock()
+        bot.config.execution.market_move_cancel_pct = 1.0
+
+        bot._reconcile_live_orders()
+
+        bot._cancel_stale_live_order.assert_called_once_with("work-order", side="entry")
+        bot._reenter_canceled_working_entry.assert_called_once()
 
     def test_bootstrap_imports_existing_broker_spread_position(self) -> None:
         bot = TradingBot(make_live_config())
@@ -484,6 +557,50 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         kwargs = bot.live_ledger.register_entry_order.call_args.kwargs
         self.assertEqual(kwargs["strategy"], "unknown_external")
 
+    def test_periodic_reconciliation_watchdog_imports_orphans(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot.live_ledger = mock.Mock()
+        bot.live_ledger.close_missing_from_broker.return_value = 1
+        bot.live_ledger.list_positions.return_value = []
+        bot._get_broker_positions = mock.Mock(
+            return_value=[
+                {
+                    "instrument": {"assetType": "OPTION", "symbol": "QQQ   260320P00100000"},
+                    "shortQuantity": 1.0,
+                    "longQuantity": 0.0,
+                }
+            ]
+        )
+        bot._alert = mock.Mock()
+
+        actions = bot._maybe_run_reconciliation_watchdog(force=True)
+
+        self.assertEqual(actions, 2)
+        bot.live_ledger.register_entry_order.assert_called_once()
+        bot._alert.assert_called_once()
+
+    def test_periodic_reconciliation_respects_auto_import_toggle(self) -> None:
+        cfg = make_live_config()
+        cfg.reconciliation.auto_import = False
+        bot = TradingBot(cfg)
+        bot.live_ledger = mock.Mock()
+        bot.live_ledger.close_missing_from_broker.return_value = 0
+        bot.live_ledger.list_positions.return_value = []
+        bot._get_broker_positions = mock.Mock(
+            return_value=[
+                {
+                    "instrument": {"assetType": "OPTION", "symbol": "QQQ   260320P00100000"},
+                    "shortQuantity": 1.0,
+                    "longQuantity": 0.0,
+                }
+            ]
+        )
+
+        actions = bot._maybe_run_reconciliation_watchdog(force=True)
+
+        self.assertEqual(actions, 0)
+        bot.live_ledger.register_entry_order.assert_not_called()
+
     def test_stream_quote_triggers_immediate_exit_check(self) -> None:
         bot = TradingBot(make_paper_config())
         bot._service_degradation["stream_down"] = False
@@ -562,6 +679,30 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot._persist_runtime_exit_state(positions)
 
         bot.live_ledger.update_position_metadata.assert_called_once()
+
+    def test_record_daily_pnl_attribution_calls_engine(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot.risk_manager.portfolio.open_positions = [
+            {
+                "position_id": "p1",
+                "symbol": "SPY",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.2,
+                "current_value": 1.0,
+                "details": {"net_delta": 2.0, "net_gamma": 0.1, "net_theta": 0.1, "net_vega": 0.5},
+            }
+        ]
+        bot.schwab.get_price_history = mock.Mock(return_value=[{"close": 500.0}, {"close": 503.0}])
+        bot.pnl_attribution = mock.Mock()
+        bot.pnl_attribution.compute_attribution = mock.Mock(return_value={"portfolio": {"delta_pnl": 5.0}})
+        bot.pnl_attribution.record_daily_snapshot = mock.Mock()
+
+        summary = bot._record_daily_pnl_attribution()
+
+        self.assertIn("delta_pnl", summary)
+        bot.pnl_attribution.compute_attribution.assert_called_once()
+        bot.pnl_attribution.record_daily_snapshot.assert_called_once()
 
     def test_entry_timing_block_queues_signal(self) -> None:
         bot = TradingBot(make_paper_config())
@@ -659,6 +800,40 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
         self.assertTrue(executed)
         bot.paper_trader.execute_open.assert_called_once()
+
+    def test_adaptive_execution_timing_queues_non_preferred_bucket(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T11:20:00-05:00"))
+        bot._entry_timing_state = mock.Mock(return_value={"allowed": True, "optimal": True, "reason": "optimal_window"})
+        bot._refresh_execution_timing_analysis = mock.Mock()
+        bot._preferred_execution_bucket = mock.Mock(return_value={"active": True, "preferred_bucket": "10:00-11:00"})
+        bot._execution_time_bucket = mock.Mock(return_value="11:00-13:00")
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p2"})
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.2,
+                max_loss=3.8,
+                probability_of_profit=0.62,
+                score=55,
+            ),
+            metadata={"apply_timing_blocks": True},
+        )
+
+        executed = bot._try_execute_entry(signal)
+
+        self.assertFalse(executed)
+        self.assertEqual(len(bot.signal_queue), 1)
+        bot.paper_trader.execute_open.assert_not_called()
 
     def test_record_slippage_history_applies_symbol_penalty_after_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

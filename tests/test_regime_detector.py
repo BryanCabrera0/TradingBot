@@ -74,6 +74,57 @@ class RegimeDetectorTests(unittest.TestCase):
         payload = state.as_context()
         self.assertIn("sub_signals", payload)
         self.assertIn("vix_level", payload["sub_signals"])
+        self.assertIn("term_structure_steepness", payload["sub_signals"])
+
+    def test_term_structure_inversion_can_force_crisis(self) -> None:
+        state = self.detector.detect_from_inputs(
+            {
+                "vix_level": 22.0,
+                "vix_term_ratio": 0.95,
+                "vix_3m": 18.0,
+                "vix_6m": 17.0,
+                "vix_1y": 16.0,
+                "term_structure_steepness": -0.08,
+                "term_structure_momentum": -0.04,
+                "spy_trend_score": -0.2,
+                "breadth_above_50ma": 0.45,
+                "put_call_ratio": 1.1,
+                "vol_of_vol": 0.12,
+            }
+        )
+
+        self.assertEqual(state.regime, CRASH_CRISIS)
+        self.assertTrue(state.sub_signals.get("term_structure_flattening_warning"))
+
+    def test_collect_inputs_estimates_missing_vix_curve_from_chain(self) -> None:
+        get_quote = mock.Mock(
+            side_effect=lambda symbol: {"quote": {"lastPrice": 18.0}} if symbol in {"$VIX", "^VIX", "VIX"} else {}
+        )
+        option_chain = {
+            "callExpDateMap": {
+                "2026-05-15:80": {"500.0": [{"volatility": 0.22}]},
+                "2026-08-21:180": {"500.0": [{"volatility": 0.24}]},
+                "2027-02-19:360": {"500.0": [{"volatility": 0.26}]},
+            },
+            "putExpDateMap": {
+                "2026-05-15:80": {"480.0": [{"volatility": 0.23}]},
+                "2026-08-21:180": {"480.0": [{"volatility": 0.25}]},
+                "2027-02-19:360": {"480.0": [{"volatility": 0.27}]},
+            },
+        }
+        detector = MarketRegimeDetector(
+            get_price_history=mock.Mock(return_value=[{"close": 400.0 + i} for i in range(260)]),
+            get_quote=get_quote,
+            get_option_chain=mock.Mock(return_value=option_chain),
+        )
+
+        inputs = detector._collect_inputs()
+
+        self.assertGreater(inputs.get("vix_3m", 0.0), 0.0)
+        self.assertGreater(inputs.get("vix_6m", 0.0), 0.0)
+        self.assertGreater(inputs.get("vix_1y", 0.0), 0.0)
+        self.assertIn("term_structure_steepness", inputs)
+        self.assertIn("term_structure_momentum", inputs)
 
     def test_detect_uses_cache_within_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

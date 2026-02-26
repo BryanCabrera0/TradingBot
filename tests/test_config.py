@@ -224,6 +224,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.execution.ladder_step_timeouts_seconds, [45, 5, 30])
         self.assertEqual(cfg.execution.max_ladder_attempts, 10)
 
+    def test_execution_partial_fill_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            execution:
+              partial_fill_handling: true
+              market_move_cancel_pct: -1.0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.execution.partial_fill_handling)
+        self.assertEqual(cfg.execution.market_move_cancel_pct, 0.0)
+
     def test_signal_ranking_fields_normalize(self) -> None:
         config_path = self._write_config(
             """
@@ -233,6 +249,7 @@ class ConfigTests(unittest.TestCase):
               weight_pop: -1
               weight_credit: 0.2
               weight_vol_premium: 0.1
+              ml_score_weight: 4
               top_ranked_to_log: 0
             max_signals_per_symbol_per_strategy: 0
             """
@@ -247,8 +264,179 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.signal_ranking.weight_pop, 0.0)
         self.assertEqual(cfg.signal_ranking.weight_credit, 0.2)
         self.assertEqual(cfg.signal_ranking.weight_vol_premium, 0.1)
+        self.assertEqual(cfg.signal_ranking.ml_score_weight, 1.0)
         self.assertEqual(cfg.signal_ranking.top_ranked_to_log, 1)
         self.assertEqual(cfg.max_signals_per_symbol_per_strategy, 1)
+
+    def test_ml_scorer_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            ml_scorer:
+              enabled: true
+              min_training_trades: 0
+              retrain_day: " FUNDAY "
+              retrain_time: ""
+              feature_importance_log: false
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.ml_scorer.enabled)
+        self.assertEqual(cfg.ml_scorer.min_training_trades, 1)
+        self.assertEqual(cfg.ml_scorer.retrain_day, "sunday")
+        self.assertEqual(cfg.ml_scorer.retrain_time, "18:00")
+        self.assertFalse(cfg.ml_scorer.feature_importance_log)
+
+    def test_theta_harvest_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            theta_harvest:
+              enabled: true
+              satisfied_pct: 2.0
+              underperform_pct: -2.0
+              cutoff_hour: 30
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.theta_harvest.enabled)
+        self.assertEqual(cfg.theta_harvest.satisfied_pct, 1.0)
+        self.assertEqual(cfg.theta_harvest.underperform_pct, 0.0)
+        self.assertEqual(cfg.theta_harvest.cutoff_hour, 23)
+
+    def test_correlation_monitor_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            correlation_monitor:
+              enabled: true
+              lookback_days: 1
+              crisis_threshold: 2.0
+              stress_threshold: -2.0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.correlation_monitor.enabled)
+        self.assertEqual(cfg.correlation_monitor.lookback_days, 10)
+        self.assertEqual(cfg.correlation_monitor.crisis_threshold, 1.0)
+        self.assertEqual(cfg.correlation_monitor.stress_threshold, 0.0)
+
+    def test_execution_timing_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            execution_timing:
+              adaptive: true
+              min_fills_per_bucket: 0
+              analysis_file: ""
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.execution_timing.adaptive)
+        self.assertEqual(cfg.execution_timing.min_fills_per_bucket, 1)
+        self.assertEqual(cfg.execution_timing.analysis_file, "bot/data/execution_timing_analysis.json")
+
+    def test_pillar_two_to_five_config_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            strategies:
+              sandbox:
+                name: sandbox_alpha
+                enabled: true
+            rl_prompt_optimizer:
+              enabled: true
+              min_trades_for_pattern: 1
+              loss_rate_threshold: 0.1
+              max_rules: 0
+              rolling_window_size: 5
+            alt_data:
+              gex_enabled: true
+              dark_pool_proxy_enabled: true
+              social_sentiment_enabled: true
+              social_sentiment_cache_minutes: 0
+              social_sentiment_model: ""
+            execution_algos:
+              enabled: true
+              algo_type: turbo
+              twap_slices: 0
+              twap_window_seconds: 0
+              iceberg_visible_qty: 0
+              adaptive_spread_pause_threshold: 0.1
+              adaptive_spread_accelerate_threshold: 9
+            strategy_sandbox:
+              enabled: true
+              min_failing_score: -2
+              consecutive_fail_cycles: 0
+              backtest_days: 0
+              max_drawdown_pct: 0
+              deployment_days: 0
+              sizing_scalar: 9
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.rl_prompt_optimizer.enabled)
+        self.assertEqual(cfg.rl_prompt_optimizer.min_trades_for_pattern, 3)
+        self.assertEqual(cfg.rl_prompt_optimizer.loss_rate_threshold, 0.5)
+        self.assertEqual(cfg.rl_prompt_optimizer.max_rules, 1)
+        self.assertEqual(cfg.rl_prompt_optimizer.rolling_window_size, 20)
+
+        self.assertEqual(cfg.alt_data.social_sentiment_cache_minutes, 1)
+        self.assertEqual(cfg.alt_data.social_sentiment_model, "gpt-5.2")
+
+        self.assertTrue(cfg.execution_algos.enabled)
+        self.assertEqual(cfg.execution_algos.algo_type, "smart_ladder")
+        self.assertEqual(cfg.execution_algos.twap_slices, 1)
+        self.assertEqual(cfg.execution_algos.twap_window_seconds, 10)
+        self.assertEqual(cfg.execution_algos.iceberg_visible_qty, 1)
+        self.assertEqual(cfg.execution_algos.adaptive_spread_pause_threshold, 1.0)
+        self.assertEqual(cfg.execution_algos.adaptive_spread_accelerate_threshold, 1.0)
+
+        self.assertTrue(cfg.strategy_sandbox.enabled)
+        self.assertEqual(cfg.strategy_sandbox.min_failing_score, 0.0)
+        self.assertEqual(cfg.strategy_sandbox.consecutive_fail_cycles, 1)
+        self.assertEqual(cfg.strategy_sandbox.backtest_days, 5)
+        self.assertEqual(cfg.strategy_sandbox.max_drawdown_pct, 1.0)
+        self.assertEqual(cfg.strategy_sandbox.deployment_days, 1)
+        self.assertEqual(cfg.strategy_sandbox.sizing_scalar, 1.0)
+        self.assertEqual(cfg.strategy_sandbox.active_strategy.get("name"), "sandbox_alpha")
+
+    def test_scaling_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            scaling:
+              enabled: true
+              scale_in_delay_minutes: 0
+              scale_in_max_adds: -2
+              partial_exit_pct: 2.0
+              partial_exit_size: -1.0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.scaling.enabled)
+        self.assertEqual(cfg.scaling.scale_in_delay_minutes, 1)
+        self.assertEqual(cfg.scaling.scale_in_max_adds, 0)
+        self.assertEqual(cfg.scaling.partial_exit_pct, 1.0)
+        self.assertEqual(cfg.scaling.partial_exit_size, 0.0)
 
     def test_sizing_equity_curve_fields_normalize(self) -> None:
         config_path = self._write_config(
@@ -269,6 +457,146 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.sizing.equity_curve_lookback, 5)
         self.assertEqual(cfg.sizing.max_scale_up, 1.0)
         self.assertEqual(cfg.sizing.max_scale_down, 1.0)
+
+    def test_walkforward_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            walkforward:
+              enabled: true
+              train_days: 0
+              test_days: 0
+              step_days: 0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.walkforward.enabled)
+        self.assertEqual(cfg.walkforward.train_days, 10)
+        self.assertEqual(cfg.walkforward.test_days, 5)
+        self.assertEqual(cfg.walkforward.step_days, 1)
+
+    def test_monte_carlo_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            monte_carlo:
+              enabled: true
+              simulations: 1
+              var_limit_pct: -2
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.monte_carlo.enabled)
+        self.assertEqual(cfg.monte_carlo.simulations, 100)
+        self.assertEqual(cfg.monte_carlo.var_limit_pct, 0.0)
+
+    def test_reconciliation_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            reconciliation:
+              interval_minutes: 0
+              auto_import: false
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.reconciliation.interval_minutes, 5)
+        self.assertFalse(cfg.reconciliation.auto_import)
+
+    def test_multi_timeframe_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            multi_timeframe:
+              enabled: true
+              min_agreement: 9
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.multi_timeframe.enabled)
+        self.assertEqual(cfg.multi_timeframe.min_agreement, 3)
+
+    def test_cooldown_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            cooldown:
+              graduated: true
+              level_1_losses: 0
+              level_1_reduction: -2
+              level_2_losses: 1
+              level_2_reduction: 2
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.cooldown.level_1_losses, 1)
+        self.assertEqual(cfg.cooldown.level_1_reduction, 0.0)
+        self.assertEqual(cfg.cooldown.level_2_losses, 1)
+        self.assertEqual(cfg.cooldown.level_2_reduction, 0.95)
+
+    def test_strategy_allocation_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            strategy_allocation:
+              enabled: true
+              lookback_trades: 0
+              min_sharpe_for_boost: 2.1
+              cold_start_penalty: 9.0
+              cold_start_window_days: 0
+              cold_start_min_trades: 0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.strategy_allocation.enabled)
+        self.assertEqual(cfg.strategy_allocation.lookback_trades, 5)
+        self.assertEqual(cfg.strategy_allocation.min_sharpe_for_boost, 2.1)
+        self.assertEqual(cfg.strategy_allocation.cold_start_penalty, 1.0)
+        self.assertEqual(cfg.strategy_allocation.cold_start_window_days, 7)
+        self.assertEqual(cfg.strategy_allocation.cold_start_min_trades, 1)
+
+    def test_greeks_budget_limits_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            greeks_budget:
+              enabled: true
+              reduce_size_to_fit: true
+              limits:
+                crash:
+                  delta_min: 5
+                  delta_max: -5
+                  vega_min: "bad"
+                  vega_max: 100
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        crash = cfg.greeks_budget.limits["CRASH/CRISIS"]
+        self.assertEqual(crash["delta_min"], -5.0)
+        self.assertEqual(crash["delta_max"], 5.0)
+        self.assertEqual(crash["vega_min"], 0.0)
+        self.assertEqual(crash["vega_max"], 100.0)
 
     def test_risk_correlated_and_gamma_fields_normalize(self) -> None:
         config_path = self._write_config(

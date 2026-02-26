@@ -2,8 +2,9 @@ import json
 import os
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
+from typing import Optional
+from unittest import mock
 
 from bot.analysis import SpreadAnalysis
 from bot.config import LLMConfig
@@ -277,32 +278,67 @@ class LLMAdvisorTests(unittest.TestCase):
         self.assertEqual(decision.verdict, "reduce_size")
         self.assertLess(decision.risk_adjustment, 1.0)
 
-    def test_ensemble_disagreement_defaults_reject(self) -> None:
+    def test_deep_debate_conflict_forces_rebuttal_and_reject(self) -> None:
         cfg = LLMConfig(
             enabled=True,
-            provider="ollama",
+            provider="openai",
             ensemble_enabled=True,
-            ensemble_models=["openai:gpt-5.2-pro", "anthropic:claude-sonnet-4-20250514"],
-            ensemble_agreement_threshold=0.66,
+            multi_turn_enabled=False,
         )
         advisor = LLMAdvisor(cfg)
-        advisor._ensemble_specs = mock.Mock(
-            return_value=[
-                {"provider": "openai", "model": "gpt-5.2-pro", "model_id": "openai:gpt-5.2-pro"},
-                {"provider": "anthropic", "model": "claude-sonnet-4-20250514", "model_id": "anthropic:claude-sonnet-4-20250514"},
-            ]
-        )
-        advisor._ensemble_vote_for_model = mock.Mock(
+        advisor._query_model = mock.Mock(
             side_effect=[
-                {"model_id": "openai:gpt-5.2-pro", "provider": "openai", "model": "gpt-5.2-pro", "verdict": "approve", "confidence": 80, "risk_adjustment": 1.0, "reasoning": "ok", "weight": 1.0},
-                {"model_id": "anthropic:claude-sonnet-4-20250514", "provider": "anthropic", "model": "claude-sonnet-4-20250514", "verdict": "reject", "confidence": 82, "risk_adjustment": 1.0, "reasoning": "no", "weight": 1.0},
+                '{"verdict":"approve","confidence":80,"reasoning":"macro supports entry","suggested_adjustment":null,"risk_adjustment":1.0,"capital_allocation_scalar":1.0}',
+                '{"verdict":"reject","confidence":83,"reasoning":"vol regime hostile","suggested_adjustment":null,"risk_adjustment":1.0,"capital_allocation_scalar":1.0}',
+                '{"verdict":"reduce_size","confidence":74,"reasoning":"tail risk elevated","suggested_adjustment":"reduce 30%","risk_adjustment":0.7,"capital_allocation_scalar":0.7}',
+                '{"verdict":"reduce_size","confidence":71,"reasoning":"conflict detected; request rebuttal","suggested_adjustment":"reduce 20%","risk_adjustment":0.8,"capital_allocation_scalar":0.8,"force_debate":true}',
+                '{"verdict":"reject","confidence":79,"reasoning":"macro downside risk now dominates","suggested_adjustment":null,"risk_adjustment":1.0,"capital_allocation_scalar":1.0}',
+                '{"verdict":"reject","confidence":81,"reasoning":"vol skew now adverse","suggested_adjustment":null,"risk_adjustment":1.0,"capital_allocation_scalar":1.0}',
+                '{"verdict":"reject","confidence":84,"reasoning":"portfolio tail risk unacceptable","suggested_adjustment":null,"risk_adjustment":1.0,"capital_allocation_scalar":1.0}',
+                '{"verdict":"reject","confidence":88,"reasoning":"CIO final no-go after rebuttal","suggested_adjustment":null,"risk_adjustment":1.0,"capital_allocation_scalar":1.0}',
             ]
         )
 
         decision, votes = advisor._review_trade_ensemble("{}")
 
-        self.assertEqual(len(votes), 2)
+        self.assertGreaterEqual(len(votes), 7)
         self.assertEqual(decision.verdict, "reject")
+        self.assertEqual(max(int(v.get("round", 1)) for v in votes), 2)
+        self.assertTrue(all(str(v.get("provider")) == "openai" for v in votes))
+
+    def test_deep_debate_falls_back_to_gpt52_when_primary_fails(self) -> None:
+        cfg = LLMConfig(
+            enabled=True,
+            provider="openai",
+            ensemble_enabled=True,
+            multi_turn_enabled=False,
+        )
+        advisor = LLMAdvisor(cfg)
+        models_seen: list[str] = []
+
+        def _fake_query(
+            prompt: str,
+            *,
+            provider: Optional[str] = None,
+            model: Optional[str] = None,
+            system_prompt: Optional[str] = None,
+        ) -> str:
+            models_seen.append(str(model or ""))
+            if model == "gpt-5.2-pro":
+                raise RuntimeError("rate limited")
+            return (
+                '{"verdict":"approve","confidence":90,"reasoning":"fallback succeeded",'
+                '"suggested_adjustment":"reduce 10%","risk_adjustment":0.9,'
+                '"capital_allocation_scalar":0.9}'
+            )
+
+        advisor._query_model = mock.Mock(side_effect=_fake_query)
+
+        decision, votes = advisor._review_trade_ensemble("{}")
+
+        self.assertEqual(decision.verdict, "approve")
+        self.assertTrue(any(model == "gpt-5.2" for model in models_seen))
+        self.assertGreaterEqual(len(votes), 4)
 
     def test_prompt_includes_journal_context_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -454,6 +490,106 @@ class LLMAdvisorTests(unittest.TestCase):
         stats = payload["meta"]["model_stats"]["openai:gpt-5.2-pro"]
         self.assertEqual(stats["trades"], 1)
         self.assertEqual(stats["hits"], 1)
+
+    def test_multi_turn_rechecks_uncertain_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            track = Path(tmp_dir) / "llm_track.json"
+            advisor = LLMAdvisor(
+                LLMConfig(
+                    enabled=True,
+                    provider="ollama",
+                    track_record_file=str(track),
+                    multi_turn_enabled=True,
+                    multi_turn_confidence_threshold=70,
+                )
+            )
+            advisor._query_model = mock.Mock(
+                side_effect=[
+                    '{"verdict":"reduce_size","confidence":65,"reasoning":"uncertain","suggested_adjustment":"reduce 20%"}',
+                    '{"verdict":"approve","confidence":82,"reasoning":"resolved","suggested_adjustment":null}',
+                ]
+            )
+            signal = make_signal()
+
+            decision = advisor.review_trade(signal, {"portfolio_exposure": {"total_delta": 12}})
+
+            self.assertEqual(advisor._query_model.call_count, 2)
+            self.assertEqual(decision.verdict, "approve")
+            self.assertTrue(bool(signal.metadata.get("llm_multi_turn_used")))
+            self.assertTrue(bool(signal.metadata.get("llm_multi_turn_changed_verdict")))
+
+    def test_multi_turn_skips_high_confidence_non_reduce(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(
+                enabled=True,
+                provider="ollama",
+                multi_turn_enabled=True,
+                multi_turn_confidence_threshold=70,
+            )
+        )
+        advisor._query_model = mock.Mock(
+            return_value='{"verdict":"approve","confidence":91,"reasoning":"clear","suggested_adjustment":null}'
+        )
+        signal = make_signal()
+
+        decision = advisor.review_trade(signal, {})
+
+        self.assertEqual(decision.verdict, "approve")
+        self.assertEqual(advisor._query_model.call_count, 1)
+        self.assertFalse(bool(signal.metadata.get("llm_multi_turn_used")))
+
+    def test_trade_explanations_saved_and_outcome_appended(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            track = Path(tmp_dir) / "llm_track.json"
+            explanations = Path(tmp_dir) / "explanations.json"
+            advisor = LLMAdvisor(
+                LLMConfig(
+                    enabled=True,
+                    provider="ollama",
+                    track_record_file=str(track),
+                    explanations_file=str(explanations),
+                )
+            )
+            advisor._query_model = mock.Mock(
+                return_value=(
+                    '{"verdict":"approve","confidence":88,"reasoning":"good setup",'
+                    '"suggested_adjustment":null,"bull_case":"premium rich",'
+                    '"bear_case":"gap risk","key_risk":"earnings surprise",'
+                    '"expected_duration":"10 days","confidence_drivers":["score","pop","iv"]}'
+                )
+            )
+            signal = make_signal()
+
+            decision = advisor.review_trade(signal, {})
+            advisor.bind_position(decision.review_id, "pos_1")
+            advisor.record_outcome("pos_1", 125.0)
+
+            payload = json.loads(explanations.read_text(encoding="utf-8"))
+            row = payload["positions"]["pos_1"]
+            self.assertEqual(row["bull_case"], "premium rich")
+            self.assertEqual(float(row["outcome"]), 125.0)
+
+    def test_adversarial_review_can_trigger_exit(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(
+                enabled=True,
+                provider="ollama",
+                adversarial_review_enabled=True,
+            )
+        )
+        advisor._query_model = mock.Mock(
+            side_effect=[
+                '{"conviction":85,"reasoning":"risk is asymmetric"}',
+                '{"conviction":50,"reasoning":"can recover"}',
+            ]
+        )
+
+        result = advisor.adversarial_review_position(
+            {"symbol": "SPY", "strategy": "bull_put_spread", "dte_remaining": 7}
+        )
+
+        self.assertTrue(result["should_exit"])
+        self.assertGreater(result["close_conviction"], result["hold_conviction"])
 
 
 if __name__ == "__main__":

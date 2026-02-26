@@ -92,6 +92,11 @@ class LiveTradeLedger:
         """Register a newly submitted live entry order."""
         position_id = f"live_{str(uuid.uuid4())[:8]}"
         now_iso = datetime.now().isoformat()
+        normalized_entry_status = str(entry_order_status or "PLACED").upper()
+        if not entry_order_id or normalized_entry_status == "FILLED":
+            lifecycle_status = "open"
+        else:
+            lifecycle_status = "working"
 
         record = {
             "position_id": position_id,
@@ -103,9 +108,9 @@ class LiveTradeLedger:
             "current_value": max(0.0, safe_float(entry_credit, 0.0)),
             "details": details or {},
             "expiration": str((details or {}).get("expiration", "")),
-            "status": "open" if not entry_order_id else "opening",
+            "status": lifecycle_status,
             "entry_order_id": entry_order_id,
-            "entry_order_status": str(entry_order_status or "PLACED").upper(),
+            "entry_order_status": normalized_entry_status,
             "entry_order_time": now_iso,
             "entry_filled_quantity": 0.0,
             "open_date": opened_at or "",
@@ -273,7 +278,7 @@ class LiveTradeLedger:
         """Return order IDs for entries awaiting terminal status."""
         pending = []
         for position in self.positions:
-            if position.get("status") != "opening":
+            if str(position.get("status", "")).lower() not in {"opening", "working"}:
                 continue
             order_id = str(position.get("entry_order_id", "")).strip()
             if order_id:
@@ -307,7 +312,7 @@ class LiveTradeLedger:
         for position in self.positions:
             if str(position.get("entry_order_id", "")) != order_id:
                 continue
-            if position.get("status") != "opening":
+            if str(position.get("status", "")).lower() not in {"opening", "working"}:
                 continue
 
             position["entry_order_status"] = normalized
@@ -409,7 +414,7 @@ class LiveTradeLedger:
         for position in self.positions:
             if str(position.get("entry_order_id", "")) != order_id:
                 continue
-            if position.get("status") != "opening":
+            if str(position.get("status", "")).lower() not in {"opening", "working"}:
                 continue
 
             if filled_quantity is not None:
@@ -513,6 +518,7 @@ class LiveTradeLedger:
         out = {
             "total_tracked": len(self.positions),
             "opening": 0,
+            "working": 0,
             "open": 0,
             "closing": 0,
             "closed": 0,
