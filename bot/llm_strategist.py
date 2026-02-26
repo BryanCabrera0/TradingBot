@@ -113,7 +113,7 @@ class LLMStrategist:
         return out
 
     def _query(self, prompt: str) -> str:
-        provider = str(self.config.provider).strip().lower()
+        provider = _normalize_provider_name(self.config.provider)
         if provider == "openai":
             api_key = os.getenv("OPENAI_API_KEY")
             if not _is_configured_secret(api_key):
@@ -146,6 +146,70 @@ class LLMStrategist:
                     "required": ["directives"],
                 },
             )
+        if provider == "google":
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if not _is_configured_secret(api_key):
+                raise RuntimeError("GOOGLE_API_KEY missing for llm_strategist")
+            model_name = str(self.config.model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+            payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": prompt}],
+                    }
+                ],
+                "system_instruction": {
+                    "parts": [
+                        {
+                            "text": "You are a portfolio strategist. Respond ONLY with valid JSON.",
+                        }
+                    ]
+                },
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 500,
+                    "responseMimeType": "application/json",
+                },
+            }
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                params={"key": api_key},
+                json=payload,
+                timeout=self.config.timeout_seconds,
+            )
+            if response.status_code >= 400:
+                detail = ""
+                try:
+                    detail = str((response.json().get("error") or {}).get("message", "")).strip()
+                except Exception:
+                    detail = ""
+                if not detail:
+                    detail = response.text.strip()[:280]
+                raise RuntimeError(
+                    f"Google Gemini request failed ({response.status_code}): "
+                    f"{detail or 'unknown error'}"
+                )
+            data = response.json()
+            candidates = data.get("candidates", []) if isinstance(data, dict) else []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content", {})
+                if not isinstance(content, dict):
+                    continue
+                parts = content.get("parts", [])
+                if not isinstance(parts, list):
+                    continue
+                texts = []
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    text = str(part.get("text", "")).strip()
+                    if text:
+                        texts.append(text)
+                if texts:
+                    return "\n".join(texts).strip()
+            raise RuntimeError("Google Gemini response missing text content")
         if provider == "anthropic":
             api_key = os.getenv("ANTHROPIC_API_KEY")
             if not _is_configured_secret(api_key):
@@ -206,6 +270,13 @@ def _is_configured_secret(value: object) -> bool:
         return False
     lowered = text.lower()
     return not any(marker in lowered for marker in SECRET_PLACEHOLDER_MARKERS)
+
+
+def _normalize_provider_name(value: object) -> str:
+    provider = str(value or "").strip().lower()
+    if provider == "gemini":
+        return "google"
+    return provider
 
 
 def _clamp_float(value: object, minimum: float, maximum: float) -> float:

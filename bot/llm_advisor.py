@@ -120,7 +120,7 @@ class LLMAdvisor:
 
     def health_check(self) -> tuple[bool, str]:
         """Check whether the configured provider is reachable/configured."""
-        provider = self.config.provider.strip().lower()
+        provider = _normalize_provider_name(self.config.provider)
 
         if provider == "ollama":
             url = f"{self.config.base_url.rstrip('/')}/api/tags"
@@ -140,6 +140,11 @@ class LLMAdvisor:
             if not _is_configured_secret(os.getenv("ANTHROPIC_API_KEY")):
                 return False, "ANTHROPIC_API_KEY is missing"
             return True, "Anthropic API key is configured"
+
+        if provider == "google":
+            if not _is_configured_secret(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+                return False, "GOOGLE_API_KEY is missing"
+            return True, "Google API key is configured"
 
         return False, f"Unsupported LLM provider: {self.config.provider}"
 
@@ -501,7 +506,7 @@ class LLMAdvisor:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
     ) -> str:
-        provider_name = str(provider or self.config.provider).strip().lower()
+        provider_name = _normalize_provider_name(provider or self.config.provider)
         model_name = str(model or self.config.model).strip()
         if provider_name == "ollama":
             return self._query_ollama(prompt, model=model_name)
@@ -513,6 +518,12 @@ class LLMAdvisor:
             )
         if provider_name == "anthropic":
             return self._query_anthropic(
+                prompt,
+                model=model_name,
+                system_prompt=system_prompt,
+            )
+        if provider_name == "google":
+            return self._query_google(
                 prompt,
                 model=model_name,
                 system_prompt=system_prompt,
@@ -612,13 +623,83 @@ class LLMAdvisor:
                 chunks.append(text)
         return "\n".join(chunks).strip()
 
+    def _query_google(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not _is_configured_secret(api_key):
+            raise RuntimeError("GOOGLE_API_KEY is missing")
+
+        model_name = str(model or self.config.model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": float(self.config.temperature),
+                "maxOutputTokens": int(self.config.max_output_tokens),
+                "responseMimeType": "application/json",
+            },
+        }
+        sys_prompt = str(system_prompt or self._system_prompt()).strip()
+        if sys_prompt:
+            payload["system_instruction"] = {"parts": [{"text": sys_prompt}]}
+
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+            params={"key": api_key},
+            json=payload,
+            timeout=self.config.timeout_seconds,
+        )
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                detail = str((response.json().get("error") or {}).get("message", "")).strip()
+            except Exception:
+                detail = ""
+            if not detail:
+                detail = response.text.strip()[:280]
+            raise RuntimeError(
+                f"Google Gemini request failed ({response.status_code}): "
+                f"{detail or 'unknown error'}"
+            )
+
+        data = response.json()
+        candidates = data.get("candidates", []) if isinstance(data, dict) else []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content", {})
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts", [])
+            if not isinstance(parts, list):
+                continue
+            texts = []
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = str(part.get("text", "")).strip()
+                if text:
+                    texts.append(text)
+            if texts:
+                return "\n".join(texts).strip()
+        raise RuntimeError("Google Gemini response missing text content")
+
     @staticmethod
     def _extract_response_text(data: dict) -> str:
         """Best-effort extraction of text from Responses API payloads."""
         return extract_responses_output_text(data)
 
     def _review_trade_ensemble(self, prompt: str) -> tuple[LLMDecision, list[dict]]:
-        """Run deep-debate CIO arbitration via a single OpenAI provider path."""
+        """Run deep-debate CIO arbitration via the configured provider path."""
         prompt_payload = self._safe_json_load(prompt)
         prompt_rules = []
         if isinstance(prompt_payload, dict):
@@ -627,12 +708,13 @@ class LLMAdvisor:
                 prompt_rules = [str(item).strip() for item in raw_rules if str(item).strip()]
         if not prompt_rules:
             prompt_rules = load_active_rules(self.learned_rules_path)
+        provider, primary_model, fallback_model = self._debate_model_config()
         debate = MultiAgentCIO(
             query_model=self._query_model,
             parse_decision=self._parse_decision,
-            primary_model="gpt-5.2-pro",
-            fallback_model="gpt-5.2",
-            provider="openai",
+            primary_model=primary_model,
+            fallback_model=fallback_model,
+            provider=provider,
             learned_rules=prompt_rules,
         )
         result = debate.run(prompt)
@@ -683,9 +765,9 @@ class LLMAdvisor:
                 provider, model = raw.split(":", 1)
             else:
                 provider, model = self.config.provider, raw
-            provider = provider.strip().lower()
+            provider = _normalize_provider_name(provider)
             model = model.strip()
-            if provider not in {"openai", "anthropic", "ollama"} or not model:
+            if provider not in {"openai", "anthropic", "ollama", "google"} or not model:
                 continue
             model_id = f"{provider}:{model}"
             if model_id in seen:
@@ -693,14 +775,41 @@ class LLMAdvisor:
             seen.add(model_id)
             specs.append({"provider": provider, "model": model, "model_id": model_id})
         if not specs:
+            fallback_provider = _normalize_provider_name(self.config.provider)
+            fallback_model = str(self.config.model).strip()
             specs = [
                 {
-                    "provider": str(self.config.provider).strip().lower(),
-                    "model": str(self.config.model).strip(),
-                    "model_id": f"{self.config.provider}:{self.config.model}",
+                    "provider": fallback_provider,
+                    "model": fallback_model,
+                    "model_id": f"{fallback_provider}:{fallback_model}",
                 }
             ]
         return specs[:3]
+
+    def _debate_model_config(self) -> tuple[str, str, str]:
+        provider = _normalize_provider_name(self.config.provider)
+        primary_model = str(self.config.model or "").strip()
+
+        if provider == "openai":
+            primary = primary_model or "gpt-5.2-pro"
+            fallback = "gpt-5.2" if primary == "gpt-5.2-pro" else primary
+            return provider, primary, fallback
+
+        if provider == "anthropic":
+            primary = primary_model or "claude-sonnet-4-20250514"
+            return provider, primary, primary
+
+        if provider == "google":
+            primary = primary_model or "gemini-2.5-pro"
+            fallback = primary
+            if "gemini-2.5-pro" in primary:
+                fallback = primary.replace("gemini-2.5-pro", "gemini-2.5-flash")
+            elif primary.endswith("-pro"):
+                fallback = f"{primary[:-4]}-flash"
+            return provider, primary, fallback
+
+        primary = primary_model or "llama3.1"
+        return provider, primary, primary
 
     def _aggregate_ensemble_votes(self, votes: list[dict]) -> LLMDecision:
         threshold = _clamp_float(self.config.ensemble_agreement_threshold, 0.0, 1.0)
@@ -1459,6 +1568,13 @@ def _clamp_float(value: object, minimum: float, maximum: float) -> float:
     except (TypeError, ValueError):
         parsed = minimum
     return max(minimum, min(maximum, parsed))
+
+
+def _normalize_provider_name(value: object) -> str:
+    provider = str(value or "").strip().lower()
+    if provider == "gemini":
+        return "google"
+    return provider
 
 
 def _is_configured_secret(value: object) -> bool:

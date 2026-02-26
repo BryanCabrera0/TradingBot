@@ -253,6 +253,52 @@ class LLMAdvisorTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("missing", message.lower())
 
+    def test_google_uses_generate_content_api(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(enabled=True, provider="google", model="gemini-2.5-pro")
+        )
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": (
+                                    '{"verdict":"approve","confidence":85,'
+                                    '"reasoning":"ok","suggested_adjustment":null}'
+                                )
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+        with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.llm_advisor.requests.post", return_value=response) as post:
+                raw = advisor._query_google("{}")
+
+        self.assertIn('"verdict":"approve"', raw.replace(" ", ""))
+        args, kwargs = post.call_args
+        self.assertIn(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            args[0],
+        )
+        self.assertEqual(kwargs["params"]["key"], "test-key")
+        self.assertEqual(kwargs["json"]["generationConfig"]["responseMimeType"], "application/json")
+
+    def test_google_health_check_rejects_placeholder_key(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="google"))
+        with mock.patch.dict(
+            os.environ, {"GOOGLE_API_KEY": "your_google_key_here"}, clear=True
+        ):
+            ok, message = advisor.health_check()
+
+        self.assertFalse(ok)
+        self.assertIn("missing", message.lower())
+
     def test_retry_when_initial_response_is_not_json(self) -> None:
         advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
         advisor._query_model = mock.Mock(

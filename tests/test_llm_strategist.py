@@ -58,6 +58,33 @@ class LLMStrategistTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 strategist.review_portfolio({"portfolio_greeks": {}})
 
+    def test_google_provider_calls_generate_content(self) -> None:
+        strategist = LLMStrategist(
+            LLMStrategistConfig(enabled=True, provider="google", model="gemini-2.5-pro")
+        )
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": '{"directives":[]}'}],
+                    }
+                }
+            ]
+        }
+        with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.llm_strategist.requests.post", return_value=response) as post:
+                directives = strategist.review_portfolio({"portfolio_greeks": {}})
+
+        self.assertEqual(directives, [])
+        args, kwargs = post.call_args
+        self.assertIn(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            args[0],
+        )
+        self.assertEqual(kwargs["params"]["key"], "test-key")
+
 
 if __name__ == "__main__":
     unittest.main()

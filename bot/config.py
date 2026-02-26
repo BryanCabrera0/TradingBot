@@ -316,7 +316,7 @@ class CooldownConfig:
 @dataclass
 class LLMConfig:
     enabled: bool = False
-    # "ollama" for local models, "openai" for cloud models
+    # "ollama" for local models, "google"/"openai"/"anthropic" for cloud models
     provider: str = "openai"
     model: str = "gpt-5.2-pro"
     base_url: str = "http://127.0.0.1:11434"
@@ -1018,13 +1018,15 @@ def validate_config(cfg: BotConfig) -> ConfigValidationReport:
     for model_ref in list(cfg.llm.ensemble_models or []):
         provider, sep, model = str(model_ref).partition(":")
         provider = provider.strip().lower()
+        if provider == "gemini":
+            provider = "google"
         model = model.strip()
-        if not sep or provider not in {"openai", "anthropic", "ollama"} or not model:
+        if not sep or provider not in {"openai", "anthropic", "ollama", "google"} or not model:
             invalid_models.append(str(model_ref))
     if invalid_models:
         report.failed.append(
             "llm.ensemble_models must use provider:model format with provider in "
-            "{openai, anthropic, ollama}. Invalid: "
+            "{openai, anthropic, ollama, google}. Invalid: "
             + ", ".join(invalid_models)
         )
     else:
@@ -1466,10 +1468,12 @@ def _normalize_config(cfg: BotConfig) -> None:
 
     cfg.llm.provider = _normalize_choice(
         cfg.llm.provider,
-        allowed={"ollama", "openai", "anthropic"},
+        allowed={"ollama", "openai", "anthropic", "google", "gemini"},
         default="ollama",
         field_name="llm.provider",
     )
+    if cfg.llm.provider == "gemini":
+        cfg.llm.provider = "google"
     cfg.llm.mode = _normalize_choice(
         cfg.llm.mode,
         allowed={"advisory", "blocking"},
@@ -1559,6 +1563,10 @@ def _normalize_config(cfg: BotConfig) -> None:
     if cfg.llm.provider == "anthropic":
         if not str(cfg.llm.model).strip() or str(cfg.llm.model).strip().lower().startswith("gpt-"):
             cfg.llm.model = "claude-sonnet-4-20250514"
+    elif cfg.llm.provider == "google":
+        model_key = str(cfg.llm.model).strip().lower()
+        if not model_key or model_key.startswith("gpt-") or model_key.startswith("claude-"):
+            cfg.llm.model = "gemini-2.5-pro"
 
     cfg.news.provider = _normalize_choice(
         cfg.news.provider,
@@ -1847,10 +1855,20 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.hedging.max_hedge_cost_pct = max(0.0, float(cfg.hedging.max_hedge_cost_pct))
     cfg.llm_strategist.provider = _normalize_choice(
         cfg.llm_strategist.provider,
-        allowed={"openai", "anthropic", "ollama"},
+        allowed={"openai", "anthropic", "ollama", "google", "gemini"},
         default="openai",
         field_name="llm_strategist.provider",
     )
+    if cfg.llm_strategist.provider == "gemini":
+        cfg.llm_strategist.provider = "google"
+    if cfg.llm_strategist.provider == "anthropic":
+        model_key = str(cfg.llm_strategist.model).strip().lower()
+        if not model_key or model_key.startswith("gpt-"):
+            cfg.llm_strategist.model = "claude-sonnet-4-20250514"
+    elif cfg.llm_strategist.provider == "google":
+        model_key = str(cfg.llm_strategist.model).strip().lower()
+        if not model_key or model_key.startswith("gpt-") or model_key.startswith("claude-"):
+            cfg.llm_strategist.model = "gemini-2.5-pro"
     cfg.llm_strategist.timeout_seconds = max(1, int(cfg.llm_strategist.timeout_seconds))
     cfg.llm_strategist.max_directives = max(1, int(cfg.llm_strategist.max_directives))
     cfg.circuit_breakers.strategy_loss_streak_limit = max(1, int(cfg.circuit_breakers.strategy_loss_streak_limit))

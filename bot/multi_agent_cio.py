@@ -26,7 +26,7 @@ class DebateResult:
 
 
 class MultiAgentCIO:
-    """Run analyst theses + CIO synthesis using one OpenAI provider path."""
+    """Run analyst theses + CIO synthesis using one configured provider path."""
 
     ANALYSTS: tuple[DebateAgent, ...] = (
         DebateAgent(

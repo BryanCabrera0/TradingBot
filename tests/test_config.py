@@ -64,6 +64,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm.risk_style, "moderate")
         self.assertEqual(cfg.log_level, "INFO")
 
+    def test_load_config_normalizes_google_provider_alias(self) -> None:
+        config_path = self._write_config(
+            """
+            llm:
+              provider: " GEMINI "
+              model: gpt-5.2-pro
+            llm_strategist:
+              provider: " GOOGLE "
+              model: gpt-5.2-pro
+            """
+        )
+
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.llm.provider, "google")
+        self.assertEqual(cfg.llm.model, "gemini-2.5-pro")
+        self.assertEqual(cfg.llm_strategist.provider, "google")
+        self.assertEqual(cfg.llm_strategist.model, "gemini-2.5-pro")
+
     def test_env_overrides_clamp_llm_numeric_settings(self) -> None:
         config_path = self._write_config("llm:\n  enabled: true\n")
 
@@ -669,6 +691,13 @@ class ConfigTests(unittest.TestCase):
 
         self.assertFalse(report.is_valid)
         self.assertTrue(any("ensemble_models" in msg for msg in report.failed))
+
+    def test_validation_accepts_google_ensemble_model_pair(self) -> None:
+        cfg = BotConfig()
+        cfg.llm.ensemble_models = ["google:gemini-2.5-pro"]
+        report = validate_config(cfg)
+
+        self.assertTrue(report.is_valid)
 
     def test_validation_rejects_hedging_budget_above_portfolio_risk(self) -> None:
         cfg = BotConfig()
