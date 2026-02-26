@@ -6,7 +6,7 @@ from typing import Optional
 from bot.analysis import analyze_credit_spread, find_option_by_delta, find_spread_wing
 from bot.dividend_calendar import DividendCalendar
 from bot.iv_history import IVHistory
-from bot.number_utils import safe_int
+from bot.number_utils import safe_float, safe_int
 from bot.strategies.base import BaseStrategy, TradeSignal
 from bot.technicals import TechnicalContext
 
@@ -116,7 +116,14 @@ class CreditSpreadStrategy(BaseStrategy):
                 signals.extend(call_signals)
 
         signals.sort(key=lambda s: s.analysis.score if s.analysis else 0, reverse=True)
-        return signals
+        max_signals = int(
+            (market_context or {}).get(
+                "max_signals_per_symbol_per_strategy",
+                self.config.get("max_signals_per_symbol_per_strategy", 2),
+            )
+            or 2
+        )
+        return signals[: max(1, max_signals)]
 
     def _scan_put_spreads(
         self,
@@ -423,13 +430,17 @@ class CreditSpreadStrategy(BaseStrategy):
     @staticmethod
     def _stop_loss_for_position(position: dict, base_stop_loss_pct: float) -> float:
         details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        override = safe_float(details.get("stop_loss_override_multiple"), 0.0)
         regime = str(position.get("regime", details.get("regime", ""))).upper()
         iv_rank = float(position.get("iv_rank", details.get("iv_rank", 50.0)) or 50.0)
+        result = max(1.0, base_stop_loss_pct)
         if regime in {"CRASH/CRISIS", "CRISIS"}:
-            return 1.5
-        if regime in {"HIGH_VOL_CHOP", "ELEVATED"} or iv_rank >= 70.0:
-            return max(base_stop_loss_pct, 2.5)
-        return max(1.0, base_stop_loss_pct)
+            result = 1.5
+        elif regime in {"HIGH_VOL_CHOP", "ELEVATED"} or iv_rank >= 70.0:
+            result = max(base_stop_loss_pct, 2.5)
+        if override > 0:
+            result = min(result, override)
+        return max(1.0, result)
 
     @staticmethod
     def _is_short_strike_tested(position: dict, underlying_price: float, details: dict) -> bool:

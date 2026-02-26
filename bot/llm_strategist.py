@@ -35,6 +35,45 @@ class LLMStrategist:
         prompt = json.dumps(
             {
                 "task": "Return high-level portfolio directives only.",
+                "directive_categories": {
+                    "reduce_delta": "When net delta > 30, suggest which positions to close.",
+                    "skip_sector": "When one sector is >35% of deployed risk, name the sector to skip.",
+                    "close_long_dte": "When volatility/regime shifts bearish, close high-DTE positions.",
+                    "scale_size": "When risk rises or losses cluster, reduce new-trade size.",
+                    "add_hedge": "When portfolio is large and tail-risk is cheap, suggest protective hedge.",
+                },
+                "examples": [
+                    {
+                        "action": "reduce_delta",
+                        "confidence": 78,
+                        "reason": "Net delta too positive vs regime risk.",
+                        "payload": {"count": 2, "direction": "positive"},
+                    },
+                    {
+                        "action": "skip_sector",
+                        "confidence": 82,
+                        "reason": "Sector concentration too high.",
+                        "payload": {"sector": "Information Technology"},
+                    },
+                    {
+                        "action": "close_long_dte",
+                        "confidence": 74,
+                        "reason": "Regime deteriorating with rising volatility.",
+                        "payload": {"max_dte": 30},
+                    },
+                    {
+                        "action": "scale_size",
+                        "confidence": 76,
+                        "reason": "Consecutive losses and unstable vol require risk reduction.",
+                        "payload": {"factor": 0.8},
+                    },
+                    {
+                        "action": "add_hedge",
+                        "confidence": 68,
+                        "reason": "Tail-risk hedge is cheap and portfolio size is elevated.",
+                        "payload": {"symbol": "SPY", "type": "buy_put"},
+                    },
+                ],
                 "schema": {
                     "directives": [
                         {
@@ -85,7 +124,7 @@ class LLMStrategist:
                 system_prompt="You are a portfolio strategist. Respond ONLY with valid JSON.",
                 user_prompt=prompt,
                 timeout_seconds=self.config.timeout_seconds,
-                temperature=0.0,
+                temperature=0.2,
                 schema_name="portfolio_directives",
                 schema={
                     "type": "object",
@@ -119,7 +158,7 @@ class LLMStrategist:
             response = client.messages.create(
                 model=self.config.model or "claude-sonnet-4-20250514",
                 max_tokens=500,
-                temperature=0.0,
+                temperature=0.2,
                 system="Return JSON only.",
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -136,7 +175,7 @@ class LLMStrategist:
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
-                "options": {"temperature": 0.0},
+                "options": {"temperature": 0.2},
             }
             response = requests.post(url, json=body, timeout=self.config.timeout_seconds)
             response.raise_for_status()
@@ -175,4 +214,3 @@ def _clamp_float(value: object, minimum: float, maximum: float) -> float:
     except (TypeError, ValueError):
         parsed = minimum
     return max(minimum, min(maximum, parsed))
-

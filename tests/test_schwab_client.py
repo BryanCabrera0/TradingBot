@@ -239,6 +239,50 @@ class SchwabClientParserTests(unittest.TestCase):
         self.assertEqual(result["status"], "CANCELED")
         self.assertEqual(client.cancel_order.call_count, 3)
 
+    def test_ladder_uses_step_timeouts_and_fills_on_third_attempt(self) -> None:
+        client = SchwabClient(SchwabConfig())
+        client.place_order = mock.Mock(
+            side_effect=[
+                {"order_id": "B1", "status": "PLACED"},
+                {"order_id": "B2", "status": "PLACED"},
+                {"order_id": "B3", "status": "PLACED"},
+            ]
+        )
+        wait_calls = []
+
+        def _fake_wait(order_id: str, timeout_seconds: int) -> dict:
+            wait_calls.append((order_id, timeout_seconds))
+            if order_id == "B3":
+                return {
+                    "status": "FILLED",
+                    "orderActivityCollection": [
+                        {"executionLegs": [{"price": 0.9}]}
+                    ],
+                }
+            return {"status": "WORKING"}
+
+        client._wait_for_terminal_status = mock.Mock(side_effect=_fake_wait)
+        client.cancel_order = mock.Mock()
+        order_factory = mock.Mock(return_value={"type": "LIMIT"})
+
+        result = client.place_order_with_ladder(
+            order_factory=order_factory,
+            midpoint_price=1.0,
+            spread_width=0.4,
+            side="credit",
+            step_timeout_seconds=90,
+            step_timeouts=[45, 45, 30],
+            max_attempts=4,
+            shifts=[0.0, 0.10, 0.25, 0.40],
+            total_timeout_seconds=300,
+        )
+
+        self.assertEqual(wait_calls, [("B1", 45), ("B2", 45), ("B3", 30)])
+        self.assertEqual(result["status"], "FILLED")
+        self.assertEqual(result["attempt"], 3)
+        self.assertAlmostEqual(float(result["fill_price"]), 0.9, places=4)
+        self.assertIn("fill_improvement_vs_mid", result)
+
 
 if __name__ == "__main__":
     unittest.main()

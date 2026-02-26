@@ -140,6 +140,11 @@ class RiskConfig:
     var_lookback_days: int = 60
     var_limit_pct_95: float = 3.0
     var_limit_pct_99: float = 5.0
+    correlated_loss_threshold: int = 3
+    correlated_loss_pct: float = 0.50
+    correlated_loss_cooldown_hours: int = 2
+    gamma_week_tight_stop: float = 1.5
+    expiration_day_close_pct: float = 0.03
 
 
 @dataclass
@@ -158,11 +163,26 @@ class ExecutionConfig:
     cancel_stale_orders: bool = True
     stale_order_minutes: int = 20
     include_partials_in_ledger: bool = True
-    entry_step_timeout_seconds: int = 90
+    block_first_minutes: int = 15
+    block_last_minutes: int = 10
+    entry_step_timeout_seconds: int = 45
     exit_step_timeout_seconds: int = 60
-    max_ladder_attempts: int = 3
+    max_ladder_attempts: int = 4
+    smart_ladder_enabled: bool = True
+    ladder_width_fractions: list = field(default_factory=lambda: [0.0, 0.10, 0.25, 0.40])
+    ladder_step_timeouts_seconds: list = field(default_factory=lambda: [45, 45, 45, 30])
     entry_ladder_shifts: list = field(default_factory=lambda: [0.0, 0.25, 0.50])
     exit_ladder_shifts: list = field(default_factory=lambda: [0.0, 0.25, 0.50])
+
+
+@dataclass
+class SignalRankingConfig:
+    enabled: bool = True
+    weight_score: float = 0.40
+    weight_pop: float = 0.30
+    weight_credit: float = 0.15
+    weight_vol_premium: float = 0.15
+    top_ranked_to_log: int = 5
 
 
 @dataclass
@@ -180,7 +200,7 @@ class LLMConfig:
     track_record_file: str = "bot/data/llm_track_record.json"
     reasoning_effort: str = "high"
     text_verbosity: str = "low"
-    max_output_tokens: int = 900
+    max_output_tokens: int = 500
     chat_fallback_model: str = "gpt-4.1"
     ensemble_enabled: bool = False
     ensemble_models: list = field(default_factory=lambda: ["openai:gpt-5.2-pro"])
@@ -298,6 +318,10 @@ class SizingConfig:
     kelly_fraction: float = 0.5
     kelly_min_trades: int = 30
     drawdown_decay_threshold: float = 0.05
+    equity_curve_scaling: bool = True
+    equity_curve_lookback: int = 20
+    max_scale_up: float = 1.25
+    max_scale_down: float = 0.50
 
 
 @dataclass
@@ -430,14 +454,27 @@ class BotConfig:
     degradation: DegradationConfig = field(default_factory=DegradationConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    signal_ranking: SignalRankingConfig = field(default_factory=SignalRankingConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    max_signals_per_symbol_per_strategy: int = 2
     risk_profiles: dict[str, RiskConfig] = field(default_factory=_default_risk_profiles)
     log_level: str = "INFO"
     log_file: str = "logs/tradingbot.log"
     log_max_bytes: int = 10_485_760
     log_backup_count: int = 5
+
+
+@dataclass
+class ConfigValidationReport:
+    passed: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def is_valid(self) -> bool:
+        return len(self.failed) == 0
 
 
 def load_config(config_path: str = "config.yaml") -> BotConfig:
@@ -633,6 +670,98 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     return cfg
 
 
+def validate_config(cfg: BotConfig) -> ConfigValidationReport:
+    """Validate cross-field config constraints before trading starts."""
+    report = ConfigValidationReport()
+    if not isinstance(cfg, BotConfig):
+        report.failed.append("Config object is invalid.")
+        return report
+
+    if float(cfg.risk.max_portfolio_risk_pct) < float(cfg.risk.max_position_risk_pct):
+        report.failed.append(
+            "risk.max_portfolio_risk_pct must be >= risk.max_position_risk_pct."
+        )
+    else:
+        report.passed.append("risk budget hierarchy")
+
+    if str(cfg.sizing.method).strip().lower() == "kelly":
+        kelly = float(cfg.sizing.kelly_fraction)
+        if kelly < 0.10 or kelly > 1.0:
+            report.failed.append(
+                "sizing.kelly_fraction must be between 0.10 and 1.0 when sizing.method=kelly."
+            )
+        else:
+            report.passed.append("kelly sizing bounds")
+    else:
+        report.passed.append("sizing method fixed")
+
+    invalid_models: list[str] = []
+    for model_ref in list(cfg.llm.ensemble_models or []):
+        provider, sep, model = str(model_ref).partition(":")
+        provider = provider.strip().lower()
+        model = model.strip()
+        if not sep or provider not in {"openai", "anthropic", "ollama"} or not model:
+            invalid_models.append(str(model_ref))
+    if invalid_models:
+        report.failed.append(
+            "llm.ensemble_models must use provider:model format with provider in "
+            "{openai, anthropic, ollama}. Invalid: "
+            + ", ".join(invalid_models)
+        )
+    else:
+        report.passed.append("ensemble model format")
+
+    if bool(cfg.hedging.enabled):
+        hedge_budget = float(cfg.hedging.max_hedge_cost_pct)
+        portfolio_budget = float(cfg.risk.max_portfolio_risk_pct)
+        if hedge_budget > portfolio_budget:
+            report.failed.append(
+                "hedging.max_hedge_cost_pct cannot exceed risk.max_portfolio_risk_pct."
+            )
+        else:
+            report.passed.append("hedging budget vs risk budget")
+    else:
+        report.passed.append("hedging disabled")
+
+    overlap_pairs = _strategy_dte_overlaps(cfg)
+    if overlap_pairs:
+        joined = ", ".join(overlap_pairs)
+        if int(cfg.risk.max_positions_per_symbol) > 1:
+            report.failed.append(
+                "Overlapping strategy DTE windows may cause double entries: "
+                f"{joined}. Set risk.max_positions_per_symbol=1 or separate DTE ranges."
+            )
+        else:
+            report.warnings.append(
+                "Overlapping strategy DTE windows detected but max_positions_per_symbol=1: "
+                + joined
+            )
+    else:
+        report.passed.append("strategy DTE overlap check")
+
+    return report
+
+
+def format_validation_report(report: ConfigValidationReport) -> str:
+    """Render a human-readable validation report."""
+    lines = [
+        "Configuration validation report:",
+        f"  Passed: {len(report.passed)}",
+        f"  Warnings: {len(report.warnings)}",
+        f"  Failed: {len(report.failed)}",
+    ]
+    if report.passed:
+        lines.append("  Passed checks:")
+        lines.extend(f"    - {item}" for item in report.passed)
+    if report.warnings:
+        lines.append("  Warnings:")
+        lines.extend(f"    - {item}" for item in report.warnings)
+    if report.failed:
+        lines.append("  Failures:")
+        lines.extend(f"    - {item}" for item in report.failed)
+    return "\n".join(lines)
+
+
 def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
     """Apply raw YAML dict onto the BotConfig."""
     cfg.trading_mode = raw.get("trading_mode", cfg.trading_mode)
@@ -806,6 +935,12 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
             if hasattr(cfg.execution, key):
                 setattr(cfg.execution, key, val)
 
+    signal_ranking = raw.get("signal_ranking", {})
+    if signal_ranking:
+        for key, val in signal_ranking.items():
+            if hasattr(cfg.signal_ranking, key):
+                setattr(cfg.signal_ranking, key, val)
+
     llm = raw.get("llm", {})
     if llm:
         for key, val in llm.items():
@@ -823,6 +958,12 @@ def _apply_yaml(cfg: BotConfig, raw: dict) -> None:
         for key, val in alerts.items():
             if hasattr(cfg.alerts, key):
                 setattr(cfg.alerts, key, val)
+
+    if "max_signals_per_symbol_per_strategy" in raw:
+        cfg.max_signals_per_symbol_per_strategy = raw.get(
+            "max_signals_per_symbol_per_strategy",
+            cfg.max_signals_per_symbol_per_strategy,
+        )
 
     risk_profiles = raw.get("risk_profiles", {})
     if isinstance(risk_profiles, dict) and risk_profiles:
@@ -969,6 +1110,8 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.execution.stale_order_minutes = max(1, int(cfg.execution.stale_order_minutes))
     cfg.execution.cancel_stale_orders = bool(cfg.execution.cancel_stale_orders)
     cfg.execution.include_partials_in_ledger = bool(cfg.execution.include_partials_in_ledger)
+    cfg.execution.block_first_minutes = max(0, int(cfg.execution.block_first_minutes))
+    cfg.execution.block_last_minutes = max(0, int(cfg.execution.block_last_minutes))
     cfg.scanner.request_pause_seconds = max(0.0, float(cfg.scanner.request_pause_seconds))
     cfg.scanner.error_backoff_seconds = max(0.1, float(cfg.scanner.error_backoff_seconds))
     cfg.scanner.max_retry_attempts = max(0, int(cfg.scanner.max_retry_attempts))
@@ -1073,6 +1216,16 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.execution.entry_step_timeout_seconds = max(10, int(cfg.execution.entry_step_timeout_seconds))
     cfg.execution.exit_step_timeout_seconds = max(10, int(cfg.execution.exit_step_timeout_seconds))
     cfg.execution.max_ladder_attempts = max(1, int(cfg.execution.max_ladder_attempts))
+    cfg.execution.smart_ladder_enabled = bool(cfg.execution.smart_ladder_enabled)
+    cfg.execution.ladder_width_fractions = _normalize_float_list(
+        cfg.execution.ladder_width_fractions,
+        default=[0.0, 0.10, 0.25, 0.40],
+    )
+    cfg.execution.ladder_step_timeouts_seconds = _normalize_int_list(
+        cfg.execution.ladder_step_timeouts_seconds,
+        default=[45, 45, 45, 30],
+        minimum=5,
+    )
     cfg.execution.entry_ladder_shifts = _normalize_float_list(
         cfg.execution.entry_ladder_shifts,
         default=[0.0, 0.25, 0.50],
@@ -1081,6 +1234,24 @@ def _normalize_config(cfg: BotConfig) -> None:
         cfg.execution.exit_ladder_shifts,
         default=[0.0, 0.25, 0.50],
     )
+    cfg.signal_ranking.enabled = bool(cfg.signal_ranking.enabled)
+    cfg.signal_ranking.weight_score = max(0.0, min(1.0, float(cfg.signal_ranking.weight_score)))
+    cfg.signal_ranking.weight_pop = max(0.0, min(1.0, float(cfg.signal_ranking.weight_pop)))
+    cfg.signal_ranking.weight_credit = max(0.0, min(1.0, float(cfg.signal_ranking.weight_credit)))
+    cfg.signal_ranking.weight_vol_premium = max(0.0, min(1.0, float(cfg.signal_ranking.weight_vol_premium)))
+    cfg.signal_ranking.top_ranked_to_log = max(1, int(cfg.signal_ranking.top_ranked_to_log))
+    total_rank_weight = (
+        cfg.signal_ranking.weight_score
+        + cfg.signal_ranking.weight_pop
+        + cfg.signal_ranking.weight_credit
+        + cfg.signal_ranking.weight_vol_premium
+    )
+    if total_rank_weight <= 0:
+        cfg.signal_ranking.weight_score = 0.40
+        cfg.signal_ranking.weight_pop = 0.30
+        cfg.signal_ranking.weight_credit = 0.15
+        cfg.signal_ranking.weight_vol_premium = 0.15
+    cfg.max_signals_per_symbol_per_strategy = max(1, int(cfg.max_signals_per_symbol_per_strategy))
     cfg.risk = _normalize_risk_config(cfg.risk)
     cfg.risk_profiles = _normalize_risk_profiles(cfg.risk_profiles)
     cfg.schwab.accounts = _normalize_accounts(cfg.schwab.accounts)
@@ -1093,6 +1264,10 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.sizing.kelly_fraction = max(0.0, min(1.0, float(cfg.sizing.kelly_fraction)))
     cfg.sizing.kelly_min_trades = max(1, int(cfg.sizing.kelly_min_trades))
     cfg.sizing.drawdown_decay_threshold = max(0.0, min(1.0, float(cfg.sizing.drawdown_decay_threshold)))
+    cfg.sizing.equity_curve_scaling = bool(cfg.sizing.equity_curve_scaling)
+    cfg.sizing.equity_curve_lookback = max(5, int(cfg.sizing.equity_curve_lookback))
+    cfg.sizing.max_scale_up = max(1.0, float(cfg.sizing.max_scale_up))
+    cfg.sizing.max_scale_down = max(0.1, min(1.0, float(cfg.sizing.max_scale_down)))
     cfg.regime.min_confidence = max(0.0, min(1.0, float(cfg.regime.min_confidence)))
     cfg.regime.uncertain_size_scalar = max(0.1, min(2.0, float(cfg.regime.uncertain_size_scalar)))
     cfg.vol_surface.max_vol_of_vol_for_condors = max(0.0, float(cfg.vol_surface.max_vol_of_vol_for_condors))
@@ -1270,6 +1445,26 @@ def _normalize_positive_float_list(value: object, default: list[float]) -> list[
     return normalized or list(default)
 
 
+def _normalize_int_list(
+    value: object,
+    default: list[int],
+    *,
+    minimum: int = 0,
+) -> list[int]:
+    """Normalize a list of bounded integer values."""
+    if not isinstance(value, list):
+        return list(default)
+
+    normalized: list[int] = []
+    for raw in value:
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            continue
+        normalized.append(max(minimum, parsed))
+    return normalized or list(default)
+
+
 def _normalize_accounts(value: object) -> list[SchwabAccountConfig]:
     """Normalize configured multi-account definitions."""
     if not isinstance(value, list):
@@ -1334,6 +1529,11 @@ def _normalize_risk_config(risk_cfg: RiskConfig) -> RiskConfig:
     risk_cfg.var_lookback_days = max(20, int(risk_cfg.var_lookback_days))
     risk_cfg.var_limit_pct_95 = max(0.0, float(risk_cfg.var_limit_pct_95))
     risk_cfg.var_limit_pct_99 = max(0.0, float(risk_cfg.var_limit_pct_99))
+    risk_cfg.correlated_loss_threshold = max(1, int(risk_cfg.correlated_loss_threshold))
+    risk_cfg.correlated_loss_pct = max(0.0, min(1.0, float(risk_cfg.correlated_loss_pct)))
+    risk_cfg.correlated_loss_cooldown_hours = max(1, int(risk_cfg.correlated_loss_cooldown_hours))
+    risk_cfg.gamma_week_tight_stop = max(1.0, float(risk_cfg.gamma_week_tight_stop))
+    risk_cfg.expiration_day_close_pct = max(0.0, min(0.25, float(risk_cfg.expiration_day_close_pct)))
     return risk_cfg
 
 
@@ -1361,6 +1561,56 @@ def _normalize_risk_profiles(value: object) -> dict[str, RiskConfig]:
     if not normalized:
         return _default_risk_profiles()
     return normalized
+
+
+def _strategy_dte_overlaps(cfg: BotConfig) -> list[str]:
+    """Return overlapping enabled strategy DTE windows."""
+    windows: dict[str, tuple[int, int]] = {}
+    if bool(cfg.credit_spreads.enabled):
+        windows["credit_spreads"] = (
+            int(cfg.credit_spreads.min_dte),
+            int(cfg.credit_spreads.max_dte),
+        )
+    if bool(cfg.iron_condors.enabled):
+        windows["iron_condors"] = (
+            int(cfg.iron_condors.min_dte),
+            int(cfg.iron_condors.max_dte),
+        )
+    if bool(cfg.naked_puts.enabled):
+        windows["naked_puts"] = (
+            int(cfg.naked_puts.min_dte),
+            int(cfg.naked_puts.max_dte),
+        )
+    if bool(cfg.calendar_spreads.enabled):
+        windows["calendar_spreads"] = (
+            int(cfg.calendar_spreads.front_min_dte),
+            int(cfg.calendar_spreads.front_max_dte),
+        )
+    if bool(cfg.strangles.enabled):
+        windows["strangles"] = (
+            int(cfg.strangles.min_dte),
+            int(cfg.strangles.max_dte),
+        )
+    if bool(cfg.broken_wing_butterfly.enabled):
+        windows["broken_wing_butterfly"] = (
+            int(cfg.broken_wing_butterfly.min_dte),
+            int(cfg.broken_wing_butterfly.max_dte),
+        )
+    if bool(cfg.earnings_vol_crush.enabled):
+        windows["earnings_vol_crush"] = (
+            int(cfg.earnings_vol_crush.min_dte),
+            int(cfg.earnings_vol_crush.max_dte),
+        )
+
+    names = sorted(windows.keys())
+    overlaps: list[str] = []
+    for idx, left in enumerate(names):
+        left_min, left_max = windows[left]
+        for right in names[idx + 1 :]:
+            right_min, right_max = windows[right]
+            if max(left_min, right_min) <= min(left_max, right_max):
+                overlaps.append(f"{left}({left_min}-{left_max})~{right}({right_min}-{right_max})")
+    return overlaps
 
 
 def _sanitize_secret(value: object, field_name: str) -> str:

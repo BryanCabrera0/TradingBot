@@ -1,6 +1,9 @@
 import signal
+import tempfile
 import unittest
 from unittest import mock
+from pathlib import Path
+import json
 
 from bot.config import BotConfig
 from bot.orchestrator import TradingBot
@@ -24,13 +27,18 @@ class OrchestratorShutdownTests(unittest.TestCase):
     def test_shutdown_sets_running_false(self) -> None:
         bot = TradingBot(_live_config())
         bot._running = True
+        bot.generate_dashboard = mock.Mock(return_value="logs/dashboard.html")
+        bot.schwab.get_orders = mock.Mock(return_value=[])
+        bot.schwab.get_order = mock.Mock(return_value={"status": "CANCELED"})
         bot.live_ledger = mock.Mock(
             pending_entry_order_ids=mock.Mock(return_value=[]),
             pending_exit_order_ids=mock.Mock(return_value=[]),
             save=mock.Mock(),
         )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bot._runtime_state_path = Path(tmp_dir) / "runtime_state.json"
 
-        bot._handle_shutdown(signal.SIGTERM, None)
+            bot._handle_shutdown(signal.SIGTERM, None)
 
         self.assertFalse(bot._running)
 
@@ -38,18 +46,62 @@ class OrchestratorShutdownTests(unittest.TestCase):
         bot = TradingBot(_live_config())
         bot._running = True
         bot.schwab.cancel_order = mock.Mock()
+        bot.schwab.get_orders = mock.Mock(return_value=[])
+        bot.schwab.get_order = mock.Mock(return_value={"status": "CANCELED"})
+        bot.generate_dashboard = mock.Mock(return_value="logs/dashboard.html")
         bot.live_ledger = mock.Mock(
             pending_entry_order_ids=mock.Mock(return_value=["e1", "e2"]),
             pending_exit_order_ids=mock.Mock(return_value=["x1"]),
             save=mock.Mock(),
         )
 
-        bot._handle_shutdown(signal.SIGTERM, None)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bot._runtime_state_path = Path(tmp_dir) / "runtime_state.json"
+            bot._handle_shutdown(signal.SIGTERM, None)
 
         self.assertEqual(bot.schwab.cancel_order.call_count, 3)
         bot.schwab.cancel_order.assert_any_call("e1")
         bot.schwab.cancel_order.assert_any_call("e2")
         bot.schwab.cancel_order.assert_any_call("x1")
+
+    def test_shutdown_cancels_broker_working_orders_and_sets_clean_flag(self) -> None:
+        bot = TradingBot(_live_config())
+        bot._running = True
+        bot.schwab.cancel_order = mock.Mock()
+        bot.schwab.get_orders = mock.Mock(
+            return_value=[
+                {"orderId": "w1", "status": "WORKING"},
+                {"orderId": "f1", "status": "FILLED"},
+                {"orderId": "w2", "status": "PENDING_CANCEL"},
+            ]
+        )
+        bot.schwab.get_order = mock.Mock(return_value={"status": "CANCELED"})
+        bot.generate_dashboard = mock.Mock(return_value="logs/dashboard.html")
+        bot.live_ledger = mock.Mock(
+            pending_entry_order_ids=mock.Mock(return_value=[]),
+            pending_exit_order_ids=mock.Mock(return_value=[]),
+            save=mock.Mock(),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_path = Path(tmp_dir) / "runtime_state.json"
+            bot._runtime_state_path = state_path
+
+            bot._handle_shutdown(signal.SIGTERM, None)
+
+            bot.schwab.cancel_order.assert_any_call("w1")
+            bot.schwab.cancel_order.assert_any_call("w2")
+            self.assertNotIn(mock.call("f1"), bot.schwab.cancel_order.mock_calls)
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload.get("clean_shutdown"))
+
+    def test_warns_when_clean_shutdown_flag_missing(self) -> None:
+        bot = TradingBot(_live_config())
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bot._runtime_state_path = Path(tmp_dir) / "runtime_state.json"
+            with self.assertLogs("bot.orchestrator", level="WARNING") as captured:
+                bot._warn_if_unclean_previous_shutdown()
+            self.assertTrue(any("clean shutdown flag missing" in line.lower() for line in captured.output))
 
 
 if __name__ == "__main__":

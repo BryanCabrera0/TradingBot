@@ -46,6 +46,10 @@ class RiskManager:
             "kelly_fraction": 0.5,
             "kelly_min_trades": 30,
             "drawdown_decay_threshold": 0.05,
+            "equity_curve_scaling": True,
+            "equity_curve_lookback": 20,
+            "max_scale_up": 1.25,
+            "max_scale_down": 0.50,
         }
         self.portfolio = PortfolioState()
         self.earnings_calendar = EarningsCalendar()
@@ -340,7 +344,9 @@ class RiskManager:
             return 1
 
         balance = self.portfolio.account_balance
-        max_risk_per_trade = balance * (self.config.max_position_risk_pct / 100)
+        risk_scalar = self._equity_curve_risk_scalar()
+        adjusted_max_position_risk_pct = float(self.config.max_position_risk_pct) * risk_scalar
+        max_risk_per_trade = balance * (adjusted_max_position_risk_pct / 100.0)
         risk_per_contract = signal.analysis.max_loss * 100
         if risk_per_contract <= 0:
             return 1
@@ -352,6 +358,37 @@ class RiskManager:
         else:
             contracts = int(max_risk_per_trade / risk_per_contract)
         return max(1, min(contracts, 10))
+
+    def _equity_curve_slope(self) -> float:
+        """Slope of normalized rolling cumulative P&L across recent closed trades."""
+        if not bool(self.sizing_config.get("equity_curve_scaling", True)):
+            return 0.0
+        lookback = max(5, int(self.sizing_config.get("equity_curve_lookback", 20)))
+        if len(self._closed_trades) < 2:
+            return 0.0
+        pnls = [float(item.get("pnl", 0.0) or 0.0) for item in self._closed_trades[-lookback:]]
+        if len(pnls) < 2:
+            return 0.0
+        account = max(1.0, float(self.portfolio.account_balance or 0.0))
+        curve = np.cumsum(np.array(pnls, dtype=float) / account)
+        try:
+            slope = float(np.polyfit(np.arange(len(curve), dtype=float), curve, 1)[0])
+        except Exception:
+            return 0.0
+        return slope
+
+    def _equity_curve_risk_scalar(self) -> float:
+        """Adaptive risk scalar from recent equity-curve slope (anti-fragile sizing)."""
+        if not bool(self.sizing_config.get("equity_curve_scaling", True)):
+            return 1.0
+        slope = self._equity_curve_slope()
+        max_up = max(1.0, float(self.sizing_config.get("max_scale_up", 1.25)))
+        max_down = max(0.1, min(1.0, float(self.sizing_config.get("max_scale_down", 0.50))))
+        if slope > 0:
+            return min(max_up, 1.0 + min(max_up - 1.0, slope * 2.0))
+        if slope < 0:
+            return max(max_down, 1.0 + (slope * 3.0))
+        return 1.0
 
     def get_portfolio_greeks(self) -> dict:
         """Return current net portfolio Greeks."""

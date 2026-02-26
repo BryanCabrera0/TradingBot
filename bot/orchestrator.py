@@ -27,8 +27,9 @@ from zoneinfo import ZoneInfo
 import schedule
 
 from bot.alerts import AlertManager
+from bot.analytics import compute as compute_analytics
 from bot.analysis import SpreadAnalysis
-from bot.config import BotConfig, load_config
+from bot.config import BotConfig, format_validation_report, load_config, validate_config
 from bot.data_store import dump_json, load_json
 from bot.dashboard import generate_dashboard
 from bot.econ_calendar import EconomicCalendar
@@ -105,6 +106,9 @@ UNDERSCORE_OPTION_PATTERN = re.compile(
 )
 HEDGE_COSTS_PATH = Path("bot/data/hedge_costs.json")
 AUDIT_LOG_PATH = Path("bot/data/audit_log.jsonl")
+SLIPPAGE_HISTORY_PATH = Path("bot/data/slippage_history.json")
+STRATEGY_STATS_PATH = Path("bot/data/strategy_stats.json")
+RUNTIME_STATE_PATH = Path("bot/data/runtime_state.json")
 
 
 class TradingBot:
@@ -123,7 +127,12 @@ class TradingBot:
         self._last_stream_retry_time: Optional[datetime] = None
         self._dashboard_generated_date: Optional[str] = None
         self._signal_handlers_ready = False
+        self._shutdown_in_progress = False
         self._cycle_size_scalar: float = 1.0
+        self.signal_queue: list[dict] = []
+        self._last_ranked_signals: list[dict] = []
+        self._strategy_stats: dict = {}
+        self._runtime_state_path = RUNTIME_STATE_PATH
         self.iv_history = IVHistory()
         self.current_regime_state = RegimeState(
             regime=LOW_VOL_GRIND,
@@ -148,6 +157,10 @@ class TradingBot:
         self._llm_timeout_streak: int = 0
 
         self._log_config_overrides()
+        loaded_stats = load_json(STRATEGY_STATS_PATH, {})
+        if isinstance(loaded_stats, dict):
+            self._strategy_stats = loaded_stats
+        self._warn_if_unclean_previous_shutdown()
 
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
@@ -338,6 +351,35 @@ class TradingBot:
         if any(token in lowered for token in ("secret", "token", "hash", "api_key", "webhook")):
             return "<redacted>"
         return value
+
+    def _warn_if_unclean_previous_shutdown(self) -> None:
+        """Log a startup warning when prior runtime did not mark clean shutdown."""
+        state = load_json(self._runtime_state_path, {})
+        if not isinstance(state, dict):
+            logger.warning(
+                "Previous session may have crashed (runtime state unavailable at %s).",
+                self._runtime_state_path,
+            )
+            return
+        if state.get("clean_shutdown") is True:
+            return
+        logger.warning(
+            "Previous session may have crashed; clean shutdown flag missing at %s.",
+            self._runtime_state_path,
+        )
+
+    def _write_runtime_state(self, *, clean_shutdown: bool, note: str = "") -> None:
+        """Persist runtime clean-shutdown heartbeat for crash detection."""
+        payload = {
+            "clean_shutdown": bool(clean_shutdown),
+            "updated_at": self._now_eastern().isoformat(),
+            "mode": self.config.trading_mode,
+            "note": str(note or ""),
+        }
+        try:
+            dump_json(self._runtime_state_path, payload)
+        except Exception as exc:
+            logger.debug("Failed to write runtime state: %s", exc)
 
     def _configure_active_account(self) -> None:
         """Select active account/profile for live mode from config accounts list."""
@@ -709,6 +751,13 @@ class TradingBot:
         if self.is_paper:
             return
 
+        validation = validate_config(self.config)
+        logger.info("%s", format_validation_report(validation))
+        for warning in validation.warnings:
+            logger.warning("Config validation warning: %s", warning)
+        if validation.failed:
+            raise RuntimeError("Config validation failed: " + "; ".join(validation.failed))
+
         if not self.config.schwab.app_key or not self.config.schwab.app_secret:
             raise RuntimeError(
                 "Live mode requires SCHWAB_APP_KEY and SCHWAB_APP_SECRET."
@@ -887,6 +936,17 @@ class TradingBot:
                 if weekly_dt.tzinfo is None:
                     weekly_dt = weekly_dt.replace(tzinfo=EASTERN_TZ)
                 if now < weekly_dt:
+                    return False
+            except ValueError:
+                pass
+
+        correlated_until = self.circuit_state.get("correlated_loss_pause_until")
+        if correlated_until:
+            try:
+                corr_dt = datetime.fromisoformat(str(correlated_until))
+                if corr_dt.tzinfo is None:
+                    corr_dt = corr_dt.replace(tzinfo=EASTERN_TZ)
+                if now < corr_dt:
                     return False
             except ValueError:
                 pass
@@ -1284,6 +1344,9 @@ class TradingBot:
             "sector_concentration": self.risk_manager.portfolio.sector_risk,
             "regime": self.circuit_state.get("regime"),
             "regime_confidence": self.circuit_state.get("regime_confidence"),
+            "recent_regime_states": self._recent_regime_states(limit=3),
+            "strategy_streaks": self._strategy_streak_summary(),
+            "top_risk_contributors": self._top_risk_contributors(limit=3),
             "loss_breakers": {
                 "consecutive": self.circuit_state.get("consecutive_loss_pause_until"),
                 "weekly": self.circuit_state.get("weekly_loss_pause_until"),
@@ -1379,8 +1442,74 @@ class TradingBot:
                                 position_id=position.get("position_id"),
                                 reason=f"LLM strategist directive: {directive.reason}",
                                 quantity=max(1, int(position.get("quantity", 1))),
-                            )
+                    )
                         )
+
+    def _recent_regime_states(self, *, limit: int = 3) -> list[dict]:
+        path = Path(self.config.regime.history_file or "bot/data/regime_history.json")
+        payload = load_json(path, {"entries": []})
+        entries = payload.get("entries", []) if isinstance(payload, dict) else []
+        if not isinstance(entries, list):
+            return []
+        out: list[dict] = []
+        prev_regime = None
+        for row in entries[-max(1, int(limit)):]:
+            if not isinstance(row, dict):
+                continue
+            regime = str(row.get("regime", ""))
+            out.append(
+                {
+                    "timestamp": row.get("timestamp"),
+                    "regime": regime,
+                    "confidence": safe_float(row.get("confidence"), 0.0),
+                    "transition_from": prev_regime,
+                }
+            )
+            prev_regime = regime
+        return out
+
+    def _strategy_streak_summary(self) -> dict:
+        closed = self._recent_closed_trades()
+        streaks: dict[str, dict] = {}
+        for trade in sorted(closed, key=lambda item: str(item.get("close_date", ""))):
+            strategy = self._strategy_group(str(trade.get("strategy", "")).lower())
+            pnl = safe_float(trade.get("pnl"), 0.0)
+            row = streaks.setdefault(strategy, {"streak": 0, "type": "flat"})
+            streak = safe_int(row.get("streak"), 0)
+            if pnl > 0:
+                if row.get("type") == "wins":
+                    streak += 1
+                else:
+                    streak = 1
+                row["type"] = "wins"
+            elif pnl < 0:
+                if row.get("type") == "losses":
+                    streak += 1
+                else:
+                    streak = 1
+                row["type"] = "losses"
+            row["streak"] = streak
+        return streaks
+
+    def _top_risk_contributors(self, *, limit: int = 3) -> list[dict]:
+        rows: list[dict] = []
+        for position in self.risk_manager.portfolio.open_positions:
+            if not isinstance(position, dict):
+                continue
+            qty = max(1, safe_int(position.get("quantity"), 1))
+            max_loss = safe_float(position.get("max_loss"), 0.0)
+            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            rows.append(
+                {
+                    "position_id": position.get("position_id"),
+                    "symbol": position.get("symbol"),
+                    "strategy": position.get("strategy"),
+                    "risk_dollars": round(max_loss * qty * 100.0, 2),
+                    "delta": round(safe_float(details.get("net_delta", position.get("net_delta", 0.0)), 0.0) * qty, 4),
+                }
+            )
+        rows.sort(key=lambda item: float(item.get("risk_dollars", 0.0) or 0.0), reverse=True)
+        return rows[: max(1, int(limit))]
 
     def _apply_hedging_layer(self) -> None:
         """Create optional hedge recommendations and optionally execute."""
@@ -1509,14 +1638,16 @@ class TradingBot:
             quantity=quantity,
             price=price,
         )
+        shifts, step_timeouts, max_attempts = self._execution_ladder_settings(phase="entry")
         result = self.schwab.place_order_with_ladder(
             order_factory=order_factory,
             midpoint_price=debit,
             spread_width=max(0.05, debit * 0.30),
             side="debit",
             step_timeout_seconds=self.config.execution.entry_step_timeout_seconds,
-            max_attempts=self.config.execution.max_ladder_attempts,
-            shifts=list(self.config.execution.entry_ladder_shifts),
+            step_timeouts=step_timeouts,
+            max_attempts=max_attempts,
+            shifts=shifts,
             total_timeout_seconds=300,
         )
         status = str(result.get("status", "")).upper()
@@ -1629,6 +1760,7 @@ class TradingBot:
             for trade in self.paper_trader.closed_trades:
                 if not isinstance(trade, dict):
                     continue
+                details = trade.get("details", {}) if isinstance(trade.get("details"), dict) else {}
                 closed.append(
                     {
                         "strategy": trade.get("strategy", ""),
@@ -1637,6 +1769,7 @@ class TradingBot:
                         "pnl": float(trade.get("pnl", 0.0) or 0.0),
                         "max_loss": float(trade.get("max_loss", 0.0) or 0.0),
                         "quantity": int(trade.get("closed_quantity", trade.get("quantity", 1)) or 1),
+                        "regime": trade.get("regime", details.get("regime", "unknown")),
                     }
                 )
             return sorted(closed, key=lambda t: str(t.get("close_date", "")))
@@ -1659,9 +1792,73 @@ class TradingBot:
                     "pnl": float(pos.get("realized_pnl", 0.0) or 0.0),
                     "max_loss": float(pos.get("max_loss", 0.0) or 0.0),
                     "quantity": int(pos.get("quantity", 1) or 1),
+                    "regime": (
+                        pos.get("regime")
+                        or (
+                            pos.get("details", {}).get("regime")
+                            if isinstance(pos.get("details"), dict)
+                            else "unknown"
+                        )
+                    ),
                 }
             )
         return sorted(normalized, key=lambda t: str(t.get("close_date", "")))
+
+    def _refresh_strategy_stats(self, closed_trades: list[dict]) -> None:
+        """Build per-strategy/per-regime stats used for entry quality gates."""
+        stats: dict[str, dict[str, dict]] = {}
+        for trade in closed_trades:
+            if not isinstance(trade, dict):
+                continue
+            strategy = self._strategy_group(str(trade.get("strategy", "")).lower())
+            regime = str(trade.get("regime", "unknown") or "unknown").upper()
+            pnl = safe_float(trade.get("pnl"), 0.0)
+
+            by_strategy = stats.setdefault(strategy, {})
+            entry = by_strategy.setdefault(
+                regime,
+                {
+                    "wins": 0,
+                    "losses": 0,
+                    "sum_profit": 0.0,
+                    "sum_loss_abs": 0.0,
+                    "avg_profit": 0.0,
+                    "avg_loss": 0.0,
+                    "win_rate": 0.0,
+                },
+            )
+            if pnl > 0:
+                entry["wins"] = safe_int(entry.get("wins"), 0) + 1
+                entry["sum_profit"] = safe_float(entry.get("sum_profit"), 0.0) + pnl
+            elif pnl < 0:
+                entry["losses"] = safe_int(entry.get("losses"), 0) + 1
+                entry["sum_loss_abs"] = safe_float(entry.get("sum_loss_abs"), 0.0) + abs(pnl)
+
+            wins = safe_int(entry.get("wins"), 0)
+            losses = safe_int(entry.get("losses"), 0)
+            total = max(1, wins + losses)
+            entry["avg_profit"] = round(safe_float(entry.get("sum_profit"), 0.0) / max(1, wins), 4)
+            entry["avg_loss"] = round(-safe_float(entry.get("sum_loss_abs"), 0.0) / max(1, losses), 4)
+            entry["win_rate"] = round((wins / total) * 100.0, 4)
+
+        sanitized: dict[str, dict[str, dict]] = {}
+        for strategy, regimes in stats.items():
+            if not isinstance(regimes, dict):
+                continue
+            sanitized[strategy] = {}
+            for regime, entry in regimes.items():
+                if not isinstance(entry, dict):
+                    continue
+                sanitized[strategy][regime] = {
+                    "wins": safe_int(entry.get("wins"), 0),
+                    "losses": safe_int(entry.get("losses"), 0),
+                    "avg_profit": safe_float(entry.get("avg_profit"), 0.0),
+                    "avg_loss": safe_float(entry.get("avg_loss"), 0.0),
+                    "win_rate": safe_float(entry.get("win_rate"), 0.0),
+                }
+
+        self._strategy_stats = sanitized
+        dump_json(STRATEGY_STATS_PATH, sanitized)
 
     # ── Market Hours Check ───────────────────────────────────────────
 
@@ -1741,6 +1938,7 @@ class TradingBot:
 
             # Scan for new entries
             if self._entries_allowed():
+                self._process_signal_queue()
                 self._scan_for_entries()
             else:
                 logger.warning("Entry scanning paused by circuit breaker state.")
@@ -1774,7 +1972,9 @@ class TradingBot:
             daily_pnl = self._compute_live_daily_pnl()
 
         self.risk_manager.update_portfolio(balance, positions, daily_pnl)
-        self.risk_manager.update_trade_history(self._recent_closed_trades())
+        closed_trades = self._recent_closed_trades()
+        self.risk_manager.update_trade_history(closed_trades)
+        self._refresh_strategy_stats(closed_trades)
         drawdown_pct = self.risk_manager._current_drawdown() * 100.0
         self.alerts.drawdown_alert(
             drawdown_pct,
@@ -2435,15 +2635,9 @@ class TradingBot:
         then runs each strategy against the top-ranked tickers.
         """
         targets = self._get_scan_targets()
+        ranked_candidates: list[TradeSignal] = []
 
         for symbol in targets:
-            if not self.risk_manager.can_open_more_positions():
-                logger.info(
-                    "Max open positions reached (%d). Stopping entry scan.",
-                    self.config.risk.max_open_positions,
-                )
-                break
-
             if self._is_symbol_paused(symbol):
                 logger.info("Skipping %s due to symbol circuit breaker pause.", symbol)
                 continue
@@ -2522,6 +2716,7 @@ class TradingBot:
                         signal.metadata.setdefault("vol_surface", market_context.get("vol_surface", {}))
                         signal.metadata.setdefault("options_flow", market_context.get("options_flow", {}))
                         signal.metadata.setdefault("economic_events", market_context.get("economic_events", {}))
+                        signal.metadata.setdefault("apply_timing_blocks", True)
                         if signal.analysis is not None:
                             original = float(signal.analysis.score or 0.0)
                             adjusted = max(0.0, min(100.0, original * regime_weight))
@@ -2586,21 +2781,100 @@ class TradingBot:
                     logger.info("No news-compliant opportunities found on %s.", symbol)
                     continue
 
-                # Sort by score and take the best
-                all_signals.sort(
-                    key=lambda s: s.analysis.score if s.analysis else 0,
-                    reverse=True,
-                )
-
-                # Try to execute the best signal (risk manager may reject)
-                for signal in all_signals[:3]:  # Try top 3 at most
-                    self._try_execute_entry(signal)
-                    if not self.risk_manager.can_open_more_positions():
-                        break
+                for signal in all_signals:
+                    composite = self._composite_signal_score(signal)
+                    signal.metadata["composite_score"] = composite
+                    ranked_candidates.append(signal)
 
             except Exception as e:
                 logger.error("Error scanning %s: %s", symbol, e)
                 logger.debug(traceback.format_exc())
+
+        if not ranked_candidates:
+            self._last_ranked_signals = []
+            return
+
+        if bool(self.config.signal_ranking.enabled):
+            ranked_candidates.sort(
+                key=lambda s: safe_float((s.metadata or {}).get("composite_score"), -1.0),
+                reverse=True,
+            )
+        else:
+            ranked_candidates.sort(
+                key=lambda s: (s.analysis.score if s.analysis else 0.0),
+                reverse=True,
+            )
+        self._last_ranked_signals = self._ranked_signals_snapshot(ranked_candidates)
+        remaining_slots = max(
+            0,
+            int(self.config.risk.max_open_positions) - len(self.risk_manager.portfolio.open_positions),
+        )
+        logger.info(
+            "Ranked %d signals, executing top %d",
+            len(ranked_candidates),
+            min(len(ranked_candidates), remaining_slots),
+        )
+        executed = 0
+        for signal in ranked_candidates:
+            if not self.risk_manager.can_open_more_positions():
+                break
+            score_label = safe_float(signal.metadata.get("composite_score"), 0.0)
+            logger.info(
+                "Rank candidate %s %s composite=%.2f score=%.1f",
+                signal.symbol,
+                signal.strategy,
+                score_label,
+                safe_float(signal.analysis.score if signal.analysis else 0.0, 0.0),
+            )
+            if self._try_execute_entry(signal):
+                executed += 1
+        logger.info("Executed %d ranked signals this cycle.", executed)
+
+    def _composite_signal_score(self, signal: TradeSignal) -> float:
+        """Compute regime-aware composite ranking score for an entry signal."""
+        analysis = signal.analysis
+        if analysis is None:
+            return 0.0
+        cfg = self.config.signal_ranking
+        regime_weight = safe_float(signal.metadata.get("regime_score_weight"), 1.0)
+        base_score = safe_float(signal.metadata.get("original_score"), safe_float(analysis.score, 0.0))
+        score_component = base_score * max(0.0, regime_weight)
+        pop_component = safe_float(analysis.probability_of_profit, 0.0) * 100.0
+        credit_component = safe_float(getattr(analysis, "credit_pct_of_width", 0.0), 0.0) * 100.0
+        vol_surface = signal.metadata.get("vol_surface", {}) if isinstance(signal.metadata, dict) else {}
+        realized_implied_spread = safe_float(
+            (vol_surface or {}).get("realized_implied_spread", 0.0),
+            0.0,
+        )
+        vol_risk_premium_score = max(0.0, min(100.0, realized_implied_spread * 10.0))
+        composite = (
+            score_component * float(cfg.weight_score)
+            + pop_component * float(cfg.weight_pop)
+            + credit_component * float(cfg.weight_credit)
+            + vol_risk_premium_score * float(cfg.weight_vol_premium)
+        )
+        return round(max(0.0, composite), 4)
+
+    def _ranked_signals_snapshot(self, signals: list[TradeSignal]) -> list[dict]:
+        """Build top-ranked signal view for dashboard/debugging."""
+        top_n = max(1, int(self.config.signal_ranking.top_ranked_to_log))
+        rows: list[dict] = []
+        for signal in signals[:top_n]:
+            analysis = signal.analysis
+            rows.append(
+                {
+                    "symbol": signal.symbol,
+                    "strategy": signal.strategy,
+                    "composite_score": safe_float((signal.metadata or {}).get("composite_score"), 0.0),
+                    "score": safe_float(analysis.score if analysis else 0.0, 0.0),
+                    "pop": safe_float(analysis.probability_of_profit if analysis else 0.0, 0.0),
+                    "credit_pct_of_width": safe_float(
+                        getattr(analysis, "credit_pct_of_width", 0.0) if analysis else 0.0,
+                        0.0,
+                    ),
+                }
+            )
+        return rows
 
     def _filter_signals_by_context(
         self,
@@ -2719,6 +2993,8 @@ class TradingBot:
         logger.info("Checking %d open positions for exits...", len(positions))
 
         all_exit_signals: list[TradeSignal] = []
+        all_exit_signals.extend(self._apply_gamma_risk_controls(positions))
+        all_exit_signals.extend(self._apply_correlated_loss_protection(positions))
         for strategy in self.strategies:
             exit_signals = strategy.check_exits(positions, self.schwab)
             all_exit_signals.extend(exit_signals)
@@ -2792,6 +3068,116 @@ class TradingBot:
         for position, plan in adjustment_jobs:
             self._execute_adjustment_plan(position, plan)
 
+    def _apply_correlated_loss_protection(self, positions: list[dict]) -> list[TradeSignal]:
+        """Emergency protection when multiple positions are losing together."""
+        now = self._now_eastern()
+        existing = self.circuit_state.get("correlated_loss_pause_until")
+        if existing:
+            try:
+                until = datetime.fromisoformat(str(existing))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=EASTERN_TZ)
+                if now < until:
+                    return []
+            except ValueError:
+                pass
+
+        threshold = max(1, int(self.config.risk.correlated_loss_threshold))
+        adverse_pct = max(0.0, float(self.config.risk.correlated_loss_pct))
+        cooldown_hours = max(1, int(self.config.risk.correlated_loss_cooldown_hours))
+        losers: list[tuple[float, dict]] = []
+        for position in positions:
+            if str(position.get("status", "open")).lower() != "open":
+                continue
+            entry_credit = safe_float(position.get("entry_credit"), 0.0)
+            current_value = safe_float(position.get("current_value"), 0.0)
+            if entry_credit <= 0:
+                continue
+            adverse_move = (current_value - entry_credit) / entry_credit
+            if adverse_move >= adverse_pct:
+                losers.append((adverse_move, position))
+
+        if len(losers) < threshold:
+            return []
+        losers.sort(key=lambda row: row[0], reverse=True)
+        close_signals: list[TradeSignal] = []
+        for adverse_move, position in losers[:2]:
+            close_signals.append(
+                TradeSignal(
+                    action="close",
+                    strategy=str(position.get("strategy", "")),
+                    symbol=str(position.get("symbol", "")),
+                    position_id=position.get("position_id"),
+                    reason=f"Correlated loss protection ({adverse_move:.1%} adverse)",
+                    quantity=max(1, safe_int(position.get("quantity"), 1)),
+                )
+            )
+
+        pause_until = now + timedelta(hours=cooldown_hours)
+        self.circuit_state["correlated_loss_pause_until"] = pause_until.isoformat()
+        self._cycle_size_scalar *= 0.70
+        logger.warning(
+            "Correlated-loss breaker: %d positions beyond %.1f%% adverse move. Closing 2 worst and pausing entries until %s",
+            len(losers),
+            adverse_pct * 100.0,
+            pause_until.isoformat(),
+        )
+        self._alert(
+            level="ERROR",
+            title="Correlated loss protection triggered",
+            message=(
+                f"{len(losers)} positions exceeded {adverse_pct:.0%} adverse move; "
+                f"paused entries until {pause_until.isoformat()}"
+            ),
+            context={"symbols": [str(p.get("symbol", "")) for _, p in losers[:5]]},
+        )
+        return close_signals
+
+    def _apply_gamma_risk_controls(self, positions: list[dict]) -> list[TradeSignal]:
+        """Annotate gamma-risk positions and force expiration-day defensive exits."""
+        forced_exits: list[TradeSignal] = []
+        close_pct = max(0.0, float(self.config.risk.expiration_day_close_pct))
+        tight_stop = max(1.0, float(self.config.risk.gamma_week_tight_stop))
+        for position in positions:
+            if str(position.get("status", "open")).lower() != "open":
+                continue
+            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            dte = safe_int(position.get("dte_remaining"), 999)
+            underlying = safe_float(position.get("underlying_price"), 0.0)
+            short_candidates = []
+            for key in ("short_strike", "put_short_strike", "call_short_strike"):
+                strike = safe_float(details.get(key), 0.0)
+                if strike > 0:
+                    short_candidates.append(strike)
+            if dte > 5 or underlying <= 0 or not short_candidates:
+                position["gamma_risk_flag"] = False
+                details["gamma_risk_flag"] = False
+                details.pop("stop_loss_override_multiple", None)
+                position["details"] = details
+                continue
+
+            nearest = min(abs(underlying - strike) / underlying for strike in short_candidates)
+            gamma_flag = nearest <= 0.02
+            position["gamma_risk_flag"] = gamma_flag
+            details["gamma_risk_flag"] = gamma_flag
+            if gamma_flag:
+                details["stop_loss_override_multiple"] = tight_stop
+                if dte == 0 and nearest <= close_pct:
+                    forced_exits.append(
+                        TradeSignal(
+                            action="close",
+                            strategy=str(position.get("strategy", "")),
+                            symbol=str(position.get("symbol", "")),
+                            position_id=position.get("position_id"),
+                            reason="Expiration-day gamma/assignment risk",
+                            quantity=max(1, safe_int(position.get("quantity"), 1)),
+                        )
+                    )
+            else:
+                details.pop("stop_loss_override_multiple", None)
+            position["details"] = details
+        return forced_exits
+
     def _persist_runtime_exit_state(self, positions: list[dict]) -> None:
         """Persist mutable trailing/exit fields updated by strategy exit checks."""
         if self.is_paper:
@@ -2814,6 +3200,15 @@ class TradingBot:
             for key in ("trailing_stop_high", "max_profit_pct_seen"):
                 if key in details:
                     detail_fields[key] = safe_float(details.get(key), 0.0)
+            if "gamma_risk_flag" in position:
+                fields["gamma_risk_flag"] = bool(position.get("gamma_risk_flag"))
+            if "gamma_risk_flag" in details:
+                detail_fields["gamma_risk_flag"] = bool(details.get("gamma_risk_flag"))
+            if "stop_loss_override_multiple" in details:
+                detail_fields["stop_loss_override_multiple"] = safe_float(
+                    details.get("stop_loss_override_multiple"),
+                    0.0,
+                )
             if fields or detail_fields:
                 self.live_ledger.update_position_metadata(
                     position_id,
@@ -2965,6 +3360,22 @@ class TradingBot:
         """Attempt to execute an entry trade after risk approval."""
         correlation_id = str(signal.metadata.get("correlation_id", "")).strip() or uuid.uuid4().hex[:12]
         signal.metadata["correlation_id"] = correlation_id
+        if (
+            signal.action == "open"
+            and bool(signal.metadata.get("apply_timing_blocks", False))
+            and not bool(signal.metadata.get("bypass_timing_blocks", False))
+        ):
+            timing = self._entry_timing_state()
+            if not timing["allowed"] or not timing["optimal"]:
+                self._queue_entry_signal(signal, timing.get("reason", "timing_window"))
+                logger.info(
+                    "Queued entry signal %s on %s due to timing window: %s",
+                    signal.strategy,
+                    signal.symbol,
+                    timing.get("reason", "timing_window"),
+                )
+                return False
+
         if self.econ_calendar and signal.analysis is not None:
             allowed, econ_reason = self.econ_calendar.adjust_signal(signal)
             if not allowed:
@@ -2983,6 +3394,54 @@ class TradingBot:
         quantity = self.risk_manager.calculate_position_size(signal)
         size_multiplier = max(0.1, float(signal.size_multiplier or 1.0))
         signal.quantity = max(1, int(round(quantity * size_multiplier)))
+
+        analysis = signal.analysis
+        if analysis is None:
+            logger.warning("Signal %s on %s missing analysis. Skipping.", signal.strategy, signal.symbol)
+            return False
+        if not bool(signal.metadata.get("is_hedge", False)):
+            required_score = self._strategy_regime_min_score(signal)
+            if safe_float(analysis.score, 0.0) < required_score:
+                reason = (
+                    f"Strategy/regime gate: score {safe_float(analysis.score, 0.0):.1f} "
+                    f"< required {required_score:.1f}"
+                )
+                self._append_audit_event(
+                    event_type="risk_check",
+                    correlation_id=correlation_id,
+                    details={
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy,
+                        "approved": False,
+                        "reason": reason,
+                    },
+                )
+                logger.info("Trade REJECTED by strategy-regime gate: %s", reason)
+                return False
+
+        slippage_penalty = self._symbol_slippage_penalty(signal.symbol)
+        if slippage_penalty > 0:
+            width = self._signal_width(signal)
+            base_min_credit_pct = self._strategy_min_credit_pct(signal.strategy)
+            if width > 0 and base_min_credit_pct > 0:
+                required_credit = (base_min_credit_pct * width) + slippage_penalty
+                if float(analysis.credit or 0.0) < required_credit:
+                    reason = (
+                        f"Slippage-adjusted credit gate: credit {float(analysis.credit or 0.0):.2f} "
+                        f"< required {required_credit:.2f} for {signal.symbol}"
+                    )
+                    self._append_audit_event(
+                        event_type="risk_check",
+                        correlation_id=correlation_id,
+                        details={
+                            "symbol": signal.symbol,
+                            "strategy": signal.strategy,
+                            "approved": False,
+                            "reason": reason,
+                        },
+                    )
+                    logger.info("Trade REJECTED by slippage penalty: %s", reason)
+                    return False
 
         # Risk check
         approved, reason = self.risk_manager.approve_trade(signal)
@@ -3016,10 +3475,6 @@ class TradingBot:
         if not self._review_entry_with_llm(signal):
             return False
 
-        analysis = signal.analysis
-        if analysis is None:
-            logger.warning("Signal %s on %s missing analysis. Skipping.", signal.strategy, signal.symbol)
-            return False
         effective_max_loss = self.risk_manager.effective_max_loss_per_contract(signal)
 
         logger.info(
@@ -3130,6 +3585,89 @@ class TradingBot:
                 },
             )
         return opened
+
+    def _entry_timing_state(self, now: Optional[datetime] = None) -> dict:
+        """Return entry timing policy state for current market session."""
+        now_et = now.astimezone(EASTERN_TZ) if isinstance(now, datetime) and now.tzinfo else (now or self._now_eastern())
+        if isinstance(now_et, datetime) and now_et.tzinfo is None:
+            now_et = now_et.replace(tzinfo=EASTERN_TZ)
+
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        first_block_end = market_open + timedelta(minutes=max(0, int(self.config.execution.block_first_minutes)))
+        last_block_start = market_close - timedelta(minutes=max(0, int(self.config.execution.block_last_minutes)))
+        optimal_start = now_et.replace(hour=10, minute=30, second=0, microsecond=0)
+        optimal_end = now_et.replace(hour=14, minute=30, second=0, microsecond=0)
+
+        if now_et < first_block_end:
+            return {"allowed": False, "optimal": False, "reason": "opening_window_block"}
+        if now_et >= last_block_start:
+            return {"allowed": False, "optimal": False, "reason": "closing_window_block"}
+        if not (optimal_start <= now_et <= optimal_end):
+            return {"allowed": True, "optimal": False, "reason": "outside_optimal_window"}
+        return {"allowed": True, "optimal": True, "reason": "optimal_window"}
+
+    @staticmethod
+    def _signal_queue_key(signal: TradeSignal) -> str:
+        analysis = signal.analysis
+        if analysis is None:
+            return f"{signal.strategy}|{signal.symbol}|{signal.action}"
+        return (
+            f"{signal.strategy}|{signal.symbol}|{signal.action}|{analysis.expiration}|"
+            f"{safe_float(analysis.short_strike, 0.0):.3f}|{safe_float(analysis.long_strike, 0.0):.3f}|"
+            f"{safe_float(analysis.put_short_strike, 0.0):.3f}|{safe_float(analysis.call_short_strike, 0.0):.3f}"
+        )
+
+    def _queue_entry_signal(self, signal: TradeSignal, reason: str) -> None:
+        """Queue entry signal for later execution in optimal timing window."""
+        key = self._signal_queue_key(signal)
+        for item in self.signal_queue:
+            if str(item.get("key", "")) == key:
+                return
+        queued_signal = copy.deepcopy(signal)
+        queued_signal.metadata.setdefault("queued", True)
+        queued_signal.metadata.setdefault("queued_reason", reason)
+        self.signal_queue.append(
+            {
+                "key": key,
+                "queued_at": self._now_eastern().isoformat(),
+                "signal": queued_signal,
+                "reason": reason,
+            }
+        )
+
+    def _process_signal_queue(self) -> None:
+        """Attempt queued entry signals when entry timing window is optimal."""
+        if not self.signal_queue:
+            return
+        timing = self._entry_timing_state()
+        if not timing.get("allowed", False) or not timing.get("optimal", False):
+            return
+        if not self._entries_allowed():
+            return
+
+        queued = list(self.signal_queue)
+        self.signal_queue = []
+        executed = 0
+        for row in queued:
+            signal = row.get("signal")
+            if not isinstance(signal, TradeSignal):
+                continue
+            if not self.risk_manager.can_open_more_positions():
+                self.signal_queue.append(row)
+                continue
+            signal.metadata["bypass_timing_blocks"] = True
+            if self._try_execute_entry(signal):
+                executed += 1
+            else:
+                logger.info(
+                    "Queued signal not executed: %s on %s (%s)",
+                    signal.strategy,
+                    signal.symbol,
+                    row.get("reason", ""),
+                )
+        if executed:
+            logger.info("Executed %d queued entry signals in optimal window.", executed)
 
     @staticmethod
     def _build_position_details(analysis) -> dict:
@@ -3403,14 +3941,16 @@ class TradingBot:
                 logger.warning("Live execution not implemented for: %s", signal.strategy)
                 return False
 
+            shifts, step_timeouts, max_attempts = self._execution_ladder_settings(phase="entry")
             result = self.schwab.place_order_with_ladder(
                 order_factory=order_factory,
                 midpoint_price=float(analysis.credit),
                 spread_width=spread_proxy,
                 side="credit",
                 step_timeout_seconds=self.config.execution.entry_step_timeout_seconds,
-                max_attempts=self.config.execution.max_ladder_attempts,
-                shifts=list(self.config.execution.entry_ladder_shifts),
+                step_timeouts=step_timeouts,
+                max_attempts=max_attempts,
+                shifts=shifts,
                 total_timeout_seconds=300,
             )
             logger.info("LIVE order placed: %s", result)
@@ -3418,13 +3958,31 @@ class TradingBot:
             if status in {"CANCELED", "REJECTED", "EXPIRED"}:
                 return False
 
-            self._record_execution_quality(
+            quality_row = self._record_execution_quality(
                 symbol=signal.symbol,
                 strategy=signal.strategy,
                 side="entry",
                 midpoint=float(result.get("midpoint_price", analysis.credit)),
                 fill_price=float(result.get("fill_price", result.get("requested_price", analysis.credit))),
                 status=status,
+                dte=safe_int(analysis.dte, 0),
+            )
+            details_payload = details or self._build_position_details(analysis)
+            details_payload["entry_midpoint"] = quality_row.get("midpoint")
+            details_payload["entry_fill_price"] = quality_row.get("fill_price")
+            details_payload["entry_slippage"] = quality_row.get("slippage")
+            details_payload["entry_slippage_vs_mid"] = quality_row.get("slippage_vs_mid")
+            details_payload["entry_adverse_slippage"] = quality_row.get("adverse_slippage")
+            details_payload["entry_fill_improvement_vs_mid"] = quality_row.get("fill_improvement_vs_mid")
+            self._append_audit_event(
+                event_type="order_filled",
+                correlation_id=str(signal.metadata.get("correlation_id", "")) or None,
+                details={
+                    "symbol": signal.symbol,
+                    "strategy": signal.strategy,
+                    "side": "entry",
+                    "execution_quality": quality_row,
+                },
             )
             if self.live_ledger and analysis is not None:
                 order_id = str(result.get("order_id", "")).strip()
@@ -3435,7 +3993,7 @@ class TradingBot:
                         quantity=quantity,
                         max_loss=max_loss_per_contract if max_loss_per_contract is not None else analysis.max_loss,
                         entry_credit=analysis.credit,
-                        details=details or self._build_position_details(analysis),
+                        details=details_payload,
                         entry_order_id=order_id,
                         entry_order_status=str(result.get("status", "PLACED")),
                     )
@@ -3450,7 +4008,7 @@ class TradingBot:
                         quantity=quantity,
                         max_loss=max_loss_per_contract if max_loss_per_contract is not None else analysis.max_loss,
                         entry_credit=analysis.credit,
-                        details=details or self._build_position_details(analysis),
+                        details=details_payload,
                         entry_order_id="",
                         entry_order_status="FILLED",
                         opened_at=self._now_eastern().isoformat(),
@@ -3684,6 +4242,7 @@ class TradingBot:
                     "roll_count",
                     int(source_details.get("roll_count", 0) or 0) + 1,
                 )
+                candidate.metadata.setdefault("bypass_timing_blocks", True)
                 candidates.append(candidate)
 
         candidates.sort(
@@ -4012,14 +4571,16 @@ class TradingBot:
             quantity=quantity,
             price=price,
         )
+        shifts, step_timeouts, max_attempts = self._execution_ladder_settings(phase="entry")
         result = self.schwab.place_order_with_ladder(
             order_factory=order_factory,
             midpoint_price=debit,
             spread_width=max(0.05, debit * 0.30),
             side="debit",
             step_timeout_seconds=self.config.execution.exit_step_timeout_seconds,
-            max_attempts=self.config.execution.max_ladder_attempts,
-            shifts=list(self.config.execution.exit_ladder_shifts),
+            step_timeouts=step_timeouts,
+            max_attempts=max_attempts,
+            shifts=shifts,
             total_timeout_seconds=180,
         )
         return str(result.get("status", "")).upper() not in {"CANCELED", "REJECTED", "EXPIRED"}
@@ -4064,14 +4625,16 @@ class TradingBot:
             quantity=quantity,
             price=price,
         )
+        shifts, step_timeouts, max_attempts = self._execution_ladder_settings(phase="entry")
         result = self.schwab.place_order_with_ladder(
             order_factory=order_factory,
             midpoint_price=debit,
             spread_width=max(0.05, abs(long_strike - short_strike) * 0.10),
             side="debit",
             step_timeout_seconds=self.config.execution.exit_step_timeout_seconds,
-            max_attempts=self.config.execution.max_ladder_attempts,
-            shifts=list(self.config.execution.exit_ladder_shifts),
+            step_timeouts=step_timeouts,
+            max_attempts=max_attempts,
+            shifts=shifts,
             total_timeout_seconds=180,
         )
         return str(result.get("status", "")).upper() not in {"CANCELED", "REJECTED", "EXPIRED"}
@@ -4201,14 +4764,16 @@ class TradingBot:
                 logger.warning("Live exit not implemented for strategy: %s", strategy)
                 return False
 
+            shifts, step_timeouts, max_attempts = self._execution_ladder_settings(phase="exit")
             result = self.schwab.place_order_with_ladder(
                 order_factory=order_factory,
                 midpoint_price=debit_limit,
                 spread_width=spread_proxy,
                 side="debit",
                 step_timeout_seconds=self.config.execution.exit_step_timeout_seconds,
-                max_attempts=self.config.execution.max_ladder_attempts,
-                shifts=list(self.config.execution.exit_ladder_shifts),
+                step_timeouts=step_timeouts,
+                max_attempts=max_attempts,
+                shifts=shifts,
                 total_timeout_seconds=180,
             )
             logger.info("LIVE exit order placed: %s", result)
@@ -4216,13 +4781,37 @@ class TradingBot:
             if status in {"CANCELED", "REJECTED", "EXPIRED"}:
                 return False
 
-            self._record_execution_quality(
+            quality_row = self._record_execution_quality(
                 symbol=symbol,
                 strategy=strategy,
                 side="exit",
                 midpoint=float(result.get("midpoint_price", debit_limit)),
                 fill_price=float(result.get("fill_price", result.get("requested_price", debit_limit))),
                 status=status,
+                dte=safe_int(tracked.get("dte_remaining"), 0),
+            )
+            if self.live_ledger and signal.position_id:
+                self.live_ledger.update_position_metadata(
+                    str(signal.position_id),
+                    detail_fields={
+                        "exit_midpoint": quality_row.get("midpoint"),
+                        "exit_fill_price": quality_row.get("fill_price"),
+                        "exit_slippage": quality_row.get("slippage"),
+                        "exit_slippage_vs_mid": quality_row.get("slippage_vs_mid"),
+                        "exit_adverse_slippage": quality_row.get("adverse_slippage"),
+                        "exit_fill_improvement_vs_mid": quality_row.get("fill_improvement_vs_mid"),
+                    },
+                )
+            self._append_audit_event(
+                event_type="order_filled",
+                correlation_id=str(signal.metadata.get("correlation_id", "")) or str(signal.position_id or ""),
+                details={
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "side": "exit",
+                    "position_id": signal.position_id,
+                    "execution_quality": quality_row,
+                },
             )
 
             order_id = str(result.get("order_id", "")).strip()
@@ -4321,6 +4910,23 @@ class TradingBot:
 
         return 0.05
 
+    def _execution_ladder_settings(self, *, phase: str) -> tuple[list[float], list[int], int]:
+        """Resolve ladder fractions/timeouts/max attempts for entry/exit phase."""
+        cfg = self.config.execution
+        smart_enabled = bool(getattr(cfg, "smart_ladder_enabled", True))
+        if smart_enabled:
+            shifts = list(getattr(cfg, "ladder_width_fractions", []) or [0.0, 0.10, 0.25, 0.40])
+        elif str(phase).lower() == "exit":
+            shifts = list(getattr(cfg, "exit_ladder_shifts", []) or [0.0, 0.25, 0.50])
+        else:
+            shifts = list(getattr(cfg, "entry_ladder_shifts", []) or [0.0, 0.25, 0.50])
+
+        timeouts = list(getattr(cfg, "ladder_step_timeouts_seconds", []) or [45, 45, 45, 30])
+        if not shifts:
+            shifts = [0.0]
+        max_attempts = max(1, min(int(cfg.max_ladder_attempts), len(shifts)))
+        return shifts, timeouts, max_attempts
+
     def _record_execution_quality(
         self,
         *,
@@ -4330,7 +4936,8 @@ class TradingBot:
         midpoint: float,
         fill_price: float,
         status: str,
-    ) -> None:
+        dte: Optional[int] = None,
+    ) -> dict:
         """Persist per-trade execution quality/slippage stats."""
         path = Path("bot/data/execution_quality.json")
         payload = load_json(path, {"fills": [], "meta": {}})
@@ -4343,24 +4950,43 @@ class TradingBot:
 
         midpoint_value = float(midpoint or 0.0)
         fill_value = float(fill_price or midpoint_value)
+        slippage = fill_value - midpoint_value
+        slippage_vs_mid = slippage
         if side == "entry":
-            slippage = midpoint_value - fill_value
+            # Credit entries improve when fill is above midpoint.
+            fill_improvement = fill_value - midpoint_value
+            adverse_slippage = max(0.0, midpoint_value - fill_value)
         else:
-            slippage = fill_value - midpoint_value
+            # Debit exits improve when fill is below midpoint.
+            fill_improvement = midpoint_value - fill_value
+            adverse_slippage = max(0.0, fill_value - midpoint_value)
 
-        fills.append(
-            {
-                "timestamp": self._now_eastern().isoformat(),
-                "symbol": symbol,
-                "strategy": strategy,
-                "side": side,
-                "midpoint": round(midpoint_value, 4),
-                "fill_price": round(fill_value, 4),
-                "slippage": round(slippage, 4),
-                "status": status,
-            }
-        )
+        row = {
+            "timestamp": self._now_eastern().isoformat(),
+            "symbol": symbol,
+            "strategy": strategy,
+            "side": side,
+            "midpoint": round(midpoint_value, 4),
+            "fill_price": round(fill_value, 4),
+            "slippage": round(slippage, 4),
+            "slippage_vs_mid": round(slippage_vs_mid, 4),
+            "adverse_slippage": round(adverse_slippage, 4),
+            "fill_improvement_vs_mid": round(fill_improvement, 4),
+            "status": status,
+            "dte": safe_int(dte, 0),
+        }
+        fills.append(row)
         payload["fills"] = fills[-5000:]
+        logger.info(
+            "Execution quality %s %s %s: midpoint=%.4f fill=%.4f improvement_vs_mid=%.4f adverse_slippage=%.4f",
+            symbol,
+            strategy,
+            side,
+            midpoint_value,
+            fill_value,
+            fill_improvement,
+            adverse_slippage,
+        )
 
         week_key = self._now_eastern().strftime("%Y-W%W")
         week_fills = []
@@ -4373,14 +4999,17 @@ class TradingBot:
             if ts.strftime("%Y-W%W") == week_key:
                 week_fills.append(item)
         if week_fills:
-            avg = sum(float(item.get("slippage", 0.0) or 0.0) for item in week_fills) / len(week_fills)
+            avg = (
+                sum(float(item.get("adverse_slippage", 0.0) or 0.0) for item in week_fills)
+                / len(week_fills)
+            )
             meta = payload.get("meta")
             if not isinstance(meta, dict):
                 meta = {}
                 payload["meta"] = meta
             if meta.get("last_logged_week") != week_key:
                 logger.info(
-                    "Weekly average slippage: %.4f across %d fills",
+                    "Weekly average adverse slippage: %.4f across %d fills",
                     avg,
                     len(week_fills),
                 )
@@ -4388,6 +5017,133 @@ class TradingBot:
                 meta["last_week_avg_slippage"] = round(avg, 4)
 
         dump_json(path, payload)
+        self._record_slippage_history(row)
+        return row
+
+    def _record_slippage_history(self, row: dict) -> None:
+        """Maintain cumulative slippage stats by strategy/symbol/DTE bucket."""
+        payload = load_json(
+            SLIPPAGE_HISTORY_PATH,
+            {
+                "fills": [],
+                "by_strategy": {},
+                "by_symbol": {},
+                "by_dte_bucket": {},
+            },
+        )
+        if not isinstance(payload, dict):
+            payload = {"fills": [], "by_strategy": {}, "by_symbol": {}, "by_dte_bucket": {}}
+        fills = payload.get("fills")
+        if not isinstance(fills, list):
+            fills = []
+            payload["fills"] = fills
+        fills.append(row)
+        payload["fills"] = fills[-8000:]
+
+        strategy_key = str(row.get("strategy", "")).strip().lower() or "unknown"
+        symbol_key = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
+        bucket = self._dte_bucket(safe_int(row.get("dte"), 0))
+        slippage = safe_float(row.get("slippage"), 0.0)
+        adverse_slippage = safe_float(
+            row.get("adverse_slippage"),
+            max(0.0, slippage),
+        )
+
+        def _bump(section: str, key: str) -> None:
+            area = payload.get(section)
+            if not isinstance(area, dict):
+                area = {}
+                payload[section] = area
+            entry = area.get(key)
+            if not isinstance(entry, dict):
+                entry = {
+                    "count": 0,
+                    "total_slippage": 0.0,
+                    "avg_slippage": 0.0,
+                    "total_adverse_slippage": 0.0,
+                    "avg_adverse_slippage": 0.0,
+                }
+                area[key] = entry
+            entry["count"] = safe_int(entry.get("count"), 0) + 1
+            entry["total_slippage"] = round(safe_float(entry.get("total_slippage"), 0.0) + slippage, 6)
+            entry["avg_slippage"] = round(
+                safe_float(entry.get("total_slippage"), 0.0) / max(1, safe_int(entry.get("count"), 1)),
+                6,
+            )
+            entry["total_adverse_slippage"] = round(
+                safe_float(entry.get("total_adverse_slippage"), 0.0) + adverse_slippage,
+                6,
+            )
+            entry["avg_adverse_slippage"] = round(
+                safe_float(entry.get("total_adverse_slippage"), 0.0)
+                / max(1, safe_int(entry.get("count"), 1)),
+                6,
+            )
+
+        _bump("by_strategy", strategy_key)
+        _bump("by_symbol", symbol_key)
+        _bump("by_dte_bucket", bucket)
+        dump_json(SLIPPAGE_HISTORY_PATH, payload)
+
+    @staticmethod
+    def _dte_bucket(dte: int) -> str:
+        dte_val = max(0, int(dte))
+        if dte_val <= 14:
+            return "0-14"
+        if dte_val <= 30:
+            return "15-30"
+        if dte_val <= 45:
+            return "31-45"
+        return "46+"
+
+    def _symbol_slippage_penalty(self, symbol: str) -> float:
+        """Return average adverse slippage per contract for a symbol."""
+        payload = load_json(SLIPPAGE_HISTORY_PATH, {"by_symbol": {}})
+        by_symbol = payload.get("by_symbol", {}) if isinstance(payload, dict) else {}
+        if not isinstance(by_symbol, dict):
+            return 0.0
+        entry = by_symbol.get(str(symbol).upper(), {})
+        if not isinstance(entry, dict):
+            return 0.0
+        count = safe_int(entry.get("count"), 0)
+        avg = safe_float(
+            entry.get("avg_adverse_slippage"),
+            safe_float(entry.get("avg_slippage"), 0.0),
+        )
+        if count < 5:
+            return 0.0
+        return avg if avg > 0.10 else 0.0
+
+    def _strategy_min_credit_pct(self, strategy_name: str) -> float:
+        group = self._strategy_group(str(strategy_name).lower())
+        for strategy in self.strategies:
+            if strategy.name == group:
+                return float(strategy.config.get("min_credit_pct", 0.0) or 0.0)
+        return 0.0
+
+    def _strategy_regime_min_score(self, signal: TradeSignal) -> float:
+        """Dynamic score floor from historical strategy/regime performance."""
+        base_min = 50.0
+        stats = self._strategy_stats if isinstance(self._strategy_stats, dict) else {}
+        strategy_key = self._strategy_group(str(signal.strategy).lower())
+        regime = str(signal.metadata.get("regime", self.circuit_state.get("regime", "unknown"))).upper() or "UNKNOWN"
+        strategy_stats = stats.get(strategy_key, {})
+        if not isinstance(strategy_stats, dict):
+            return base_min
+        regime_stats = strategy_stats.get(regime, {})
+        if not isinstance(regime_stats, dict):
+            return base_min
+        wins = safe_int(regime_stats.get("wins"), 0)
+        losses = safe_int(regime_stats.get("losses"), 0)
+        trades = wins + losses
+        if trades < 20:
+            return base_min
+        win_rate = safe_float(regime_stats.get("win_rate"), 0.0)
+        if win_rate < 45.0:
+            return base_min + 10.0
+        if win_rate > 65.0:
+            return base_min - 5.0
+        return base_min
 
     # ── Data Fetching ────────────────────────────────────────────────
 
@@ -4401,6 +5157,9 @@ class TradingBot:
             "vix": self.circuit_state.get("vix"),
             "account_balance": float(self.risk_manager.portfolio.account_balance or 0.0),
             "service_degradation": dict(self._service_degradation),
+            "max_signals_per_symbol_per_strategy": int(
+                getattr(self.config, "max_signals_per_symbol_per_strategy", 2) or 2
+            ),
         }
         if self.current_regime_state:
             context["regime_confidence"] = self.current_regime_state.confidence
@@ -5077,6 +5836,7 @@ class TradingBot:
 
     def _daily_report(self) -> None:
         """Log end-of-day performance summary."""
+        analytics_summary = compute_analytics(self._recent_closed_trades()).core_metrics
         if self.is_paper:
             summary = self.paper_trader.get_performance_summary()
             logger.info("=" * 60)
@@ -5096,6 +5856,12 @@ class TradingBot:
                     "total_trades": summary.get("total_trades"),
                     "total_pnl": summary.get("total_pnl"),
                     "regime": self.circuit_state.get("regime", "normal"),
+                    "sharpe": analytics_summary.get("sharpe", 0.0),
+                    "sortino": analytics_summary.get("sortino", 0.0),
+                    "win_rate": analytics_summary.get("win_rate", 0.0),
+                    "calmar": analytics_summary.get("calmar", 0.0),
+                    "profit_factor": analytics_summary.get("profit_factor", 0.0),
+                    "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
                 },
             )
             if self._now_eastern().weekday() == 4:
@@ -5104,6 +5870,11 @@ class TradingBot:
                     context={
                         "balance": summary.get("balance"),
                         "return_pct": summary.get("return_pct"),
+                        "sharpe": analytics_summary.get("sharpe", 0.0),
+                        "sortino": analytics_summary.get("sortino", 0.0),
+                        "calmar": analytics_summary.get("calmar", 0.0),
+                        "profit_factor": analytics_summary.get("profit_factor", 0.0),
+                        "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
                     },
                 )
             if self.llm_advisor:
@@ -5146,6 +5917,12 @@ class TradingBot:
                 "open_positions": ledger_summary.get("open", 0),
                 "realized_pnl_today": ledger_summary.get("realized_pnl_today", 0.0),
                 "regime": self.circuit_state.get("regime", "normal"),
+                "sharpe": analytics_summary.get("sharpe", 0.0),
+                "sortino": analytics_summary.get("sortino", 0.0),
+                "win_rate": analytics_summary.get("win_rate", 0.0),
+                "calmar": analytics_summary.get("calmar", 0.0),
+                "profit_factor": analytics_summary.get("profit_factor", 0.0),
+                "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
             },
         )
         if self._now_eastern().weekday() == 4:
@@ -5154,6 +5931,11 @@ class TradingBot:
                 context={
                     "balance": balance,
                     "daily_pnl": self._compute_live_daily_pnl(),
+                    "sharpe": analytics_summary.get("sharpe", 0.0),
+                    "sortino": analytics_summary.get("sortino", 0.0),
+                    "calmar": analytics_summary.get("calmar", 0.0),
+                    "profit_factor": analytics_summary.get("profit_factor", 0.0),
+                    "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
                 },
             )
         if self.llm_advisor:
@@ -5190,31 +5972,100 @@ class TradingBot:
                 logger.debug("Could not register signal handler for %s: %s", sig, exc)
         self._signal_handlers_ready = True
 
-    def _handle_shutdown(self, signum, frame) -> None:  # pragma: no cover - invoked by OS signals
-        """Gracefully stop loop and cancel pending live orders."""
-        logger.info("Shutdown signal received: %s", signum)
-        self._running = False
-
-        if not self.is_paper and self.live_ledger:
-            order_ids = []
+    def _pending_shutdown_order_ids(self) -> list[str]:
+        """Collect pending/working live order IDs from ledger and broker."""
+        order_ids: set[str] = set()
+        if self.live_ledger:
             try:
-                order_ids.extend(self.live_ledger.pending_entry_order_ids())
-                order_ids.extend(self.live_ledger.pending_exit_order_ids())
+                order_ids.update(str(oid).strip() for oid in self.live_ledger.pending_entry_order_ids())
+                order_ids.update(str(oid).strip() for oid in self.live_ledger.pending_exit_order_ids())
             except Exception as exc:
                 logger.warning("Failed to enumerate pending order IDs on shutdown: %s", exc)
 
-            for order_id in order_ids:
-                try:
-                    self.schwab.cancel_order(order_id)
-                except Exception as exc:
-                    logger.warning("Failed to cancel pending order %s during shutdown: %s", order_id, exc)
+        try:
+            orders = self.schwab.get_orders(days_back=2)
+            for order in orders or []:
+                if not isinstance(order, dict):
+                    continue
+                status = str(order.get("status", "")).upper()
+                if status not in (PENDING_ORDER_STATUSES | PARTIAL_ORDER_STATUSES):
+                    continue
+                order_id = str(order.get("orderId", order.get("order_id", ""))).strip()
+                if order_id:
+                    order_ids.add(order_id)
+        except Exception as exc:
+            logger.warning("Failed to fetch working broker orders on shutdown: %s", exc)
 
-            if hasattr(self.live_ledger, "save"):
-                try:
-                    self.live_ledger.save()
-                except Exception as exc:
-                    logger.warning("Failed to persist live ledger on shutdown: %s", exc)
+        return sorted(oid for oid in order_ids if oid)
 
+    def _cancel_live_orders_for_shutdown(
+        self,
+        *,
+        timeout_seconds: int = 30,
+        poll_interval_seconds: float = 1.0,
+    ) -> None:
+        """Cancel pending/working live orders and wait for broker confirmation."""
+        order_ids = self._pending_shutdown_order_ids()
+        if not order_ids:
+            return
+        outstanding: set[str] = set()
+        for order_id in order_ids:
+            try:
+                self.schwab.cancel_order(order_id)
+                logger.info("Shutdown canceled order %s", order_id)
+                outstanding.add(order_id)
+            except Exception as exc:
+                logger.warning("Failed to cancel pending order %s during shutdown: %s", order_id, exc)
+
+        if not outstanding:
+            return
+        deadline = time.monotonic() + max(1, int(timeout_seconds))
+        poll_interval = max(0.1, float(poll_interval_seconds))
+        while outstanding and time.monotonic() < deadline:
+            finished: set[str] = set()
+            for order_id in list(outstanding):
+                try:
+                    order = self.schwab.get_order(order_id)
+                except Exception:
+                    continue
+                status = str((order or {}).get("status", "")).upper()
+                if status in ENTRY_ORDER_TERMINAL or status in EXIT_ORDER_TERMINAL:
+                    finished.add(order_id)
+            outstanding -= finished
+            if outstanding:
+                time.sleep(poll_interval)
+
+        if outstanding:
+            logger.warning(
+                "Timed out waiting for shutdown cancellations: %s",
+                ", ".join(sorted(outstanding)),
+            )
+
+    def _handle_shutdown(self, signum, frame) -> None:  # pragma: no cover - invoked by OS signals
+        """Gracefully stop loop, cancel pending live orders, and persist final state."""
+        if self._shutdown_in_progress:
+            return
+        self._shutdown_in_progress = True
+        logger.info("Shutdown signal received: %s", signum)
+        self._running = False
+        self._write_runtime_state(clean_shutdown=False, note=f"shutdown_signal:{signum}")
+
+        if not self.is_paper:
+            self._cancel_live_orders_for_shutdown(timeout_seconds=30, poll_interval_seconds=1.0)
+
+        if self.live_ledger and hasattr(self.live_ledger, "save"):
+            try:
+                self.live_ledger.save()
+            except Exception as exc:
+                logger.warning("Failed to persist live ledger on shutdown: %s", exc)
+
+        try:
+            output = self.generate_dashboard()
+            logger.info("Final shutdown dashboard generated: %s", output)
+        except Exception as exc:
+            logger.warning("Failed to generate final shutdown dashboard: %s", exc)
+
+        self._write_runtime_state(clean_shutdown=True, note="shutdown_complete")
         logger.info("Shutdown complete")
 
     def _maybe_log_heartbeat(self) -> None:
@@ -5266,6 +6117,12 @@ class TradingBot:
         else:
             source_positions = self.live_ledger.list_positions(statuses={"open", "opening", "closing"}) if self.live_ledger else []
             closed_source = self.live_ledger.list_positions(statuses={"closed", "closed_external", "rolled"}) if self.live_ledger else []
+        initial_equity = (
+            safe_float(self._equity_history[0].get("equity"), 0.0)
+            if self._equity_history
+            else safe_float(self.risk_manager.portfolio.account_balance, 100_000.0)
+        )
+        analytics_report = compute_analytics(closed_source, initial_equity=max(1.0, initial_equity))
 
         for trade in closed_source:
             pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
@@ -5307,27 +6164,24 @@ class TradingBot:
             if str(trade.get("status", "")).lower() == "rolled" or str(details.get("roll_status", "")).lower() == "rolled":
                 rolled_credits.append(safe_float(trade.get("entry_credit"), 0.0))
 
-        strategy_view = {}
-        for strategy, stats in strategy_breakdown.items():
-            count = max(1, int(stats["count"]))
-            strategy_view[strategy] = {
-                "win_rate": (stats["wins"] / count) * 100.0,
-                "avg_pnl": stats["total_pnl"] / count,
-                "avg_profit": (stats["sum_wins"] / max(1, int(stats["wins"]))),
-                "avg_loss": (stats["sum_losses"] / max(1, int(stats["losses"]))),
-                "total_pnl": stats["total_pnl"],
-            }
-
-        regime_view = {}
-        for regime, stats in regime_breakdown.items():
-            count = max(1, int(stats["count"]))
-            regime_view[regime] = {
-                "trades": int(stats["count"]),
-                "win_rate": (stats["wins"] / count) * 100.0,
-                "total_pnl": stats["total_pnl"],
-            }
+        strategy_view = dict(analytics_report.strategy_metrics)
+        regime_view = dict(analytics_report.regime_metrics)
+        monthly = {
+            key: safe_float(value.get("total_pnl"), 0.0)
+            for key, value in analytics_report.monthly_metrics.items()
+            if isinstance(value, dict)
+        }
+        daily_calendar = dict(analytics_report.daily_pnl)
 
         risk_metrics = self._compute_equity_risk_metrics(self._equity_history)
+        risk_metrics.update(
+            {
+                "calmar": safe_float(analytics_report.core_metrics.get("calmar"), 0.0),
+                "profit_factor": safe_float(analytics_report.core_metrics.get("profit_factor"), 0.0),
+                "expectancy_per_trade": safe_float(analytics_report.core_metrics.get("expectancy_per_trade"), 0.0),
+                "max_drawdown_duration": safe_int(analytics_report.core_metrics.get("max_drawdown_duration"), 0),
+            }
+        )
         sector_total = sum(self.risk_manager.portfolio.sector_risk.values()) or 1.0
         sector_exposure = {
             sector: round(value / sector_total * 100.0, 2)
@@ -5353,6 +6207,9 @@ class TradingBot:
                     "theta": safe_float(details.get("net_theta", position.get("net_theta", 0.0)), 0.0),
                     "gamma": safe_float(details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0),
                     "vega": safe_float(details.get("net_vega", position.get("net_vega", 0.0)), 0.0),
+                    "gamma_risk_flag": bool(
+                        position.get("gamma_risk_flag", details.get("gamma_risk_flag", False))
+                    ),
                 }
             )
 
@@ -5414,6 +6271,8 @@ class TradingBot:
                     4,
                 ),
             },
+            "top_ranked_signals": list(self._last_ranked_signals),
+            "strategy_stats": dict(self._strategy_stats),
             "portfolio_halt_until": self._portfolio_halt_until.isoformat() if self._portfolio_halt_until else None,
             "closed_trades": len(closed_trades),
             "open_positions": len(source_positions),
@@ -5482,6 +6341,7 @@ class TradingBot:
         logger.info("=" * 60)
 
         self._setup_signal_handlers()
+        self._write_runtime_state(clean_shutdown=False, note="starting")
         self.connect()
         self._validate_llm_readiness()
         self.setup_schedule()
@@ -5505,7 +6365,7 @@ class TradingBot:
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
-            self._running = False
+            self._handle_shutdown(signal.SIGINT, None)
 
         # Final report
         self._daily_report()

@@ -59,6 +59,10 @@ def enrich_dashboard_payload(payload: dict) -> dict:
             "reject_accuracy": round((reject_hits / len(rejects)) if rejects else 0.0, 4),
             "reduce_size_accuracy": round((reduce_hits / len(reduces)) if reduces else 0.0, 4),
         }
+        meta = llm_track.get("meta", {}) if isinstance(llm_track, dict) else {}
+        calibration = meta.get("calibration", {}) if isinstance(meta, dict) else {}
+        if isinstance(calibration, dict) and calibration:
+            out["llm_calibration"] = calibration
 
     execution = load_json(EXECUTION_QUALITY_PATH, {"fills": []})
     fills = execution.get("fills", []) if isinstance(execution, dict) else []
@@ -67,10 +71,52 @@ def enrich_dashboard_payload(payload: dict) -> dict:
         for item in fills
         if isinstance(item, dict)
     ]
+    adverse_slippages = [
+        float(item.get("adverse_slippage", max(0.0, float(item.get("slippage", 0.0) or 0.0))))
+        for item in fills
+        if isinstance(item, dict)
+    ]
+    improvements = [
+        float(
+            item.get(
+                "fill_improvement_vs_mid",
+                0.0,
+            )
+        )
+        for item in fills
+        if isinstance(item, dict)
+    ]
+    by_strategy: dict[str, dict] = {}
+    for item in fills:
+        if not isinstance(item, dict):
+            continue
+        strategy = str(item.get("strategy", "unknown")).strip().lower() or "unknown"
+        row = by_strategy.setdefault(
+            strategy,
+            {"slippages": [], "adverse_slippages": []},
+        )
+        row["slippages"].append(float(item.get("slippage", 0.0) or 0.0))
+        row["adverse_slippages"].append(
+            float(item.get("adverse_slippage", max(0.0, float(item.get("slippage", 0.0) or 0.0))))
+        )
     if slippages:
         out["execution_quality"] = {
             "avg_slippage": round(float(np.mean(slippages)), 4),
+            "avg_adverse_slippage": round(float(np.mean(adverse_slippages)), 4) if adverse_slippages else 0.0,
+            "avg_fill_improvement": round(float(np.mean(improvements)), 4) if improvements else 0.0,
             "samples": len(slippages),
+            "by_strategy": {
+                name: {
+                    "avg_slippage": round(float(np.mean(values["slippages"])), 4) if values["slippages"] else 0.0,
+                    "avg_adverse_slippage": (
+                        round(float(np.mean(values["adverse_slippages"])), 4)
+                        if values["adverse_slippages"]
+                        else 0.0
+                    ),
+                    "samples": len(values["slippages"]),
+                }
+                for name, values in by_strategy.items()
+            },
         }
 
     return out
@@ -92,7 +138,9 @@ def _render_html(payload: dict) -> str:
     risk = payload.get("risk_metrics", {})
     greeks = payload.get("portfolio_greeks", {})
     llm_accuracy = payload.get("llm_accuracy", {})
+    llm_calibration = payload.get("llm_calibration", {})
     execution = payload.get("execution_quality", {})
+    execution_by_strategy = execution.get("by_strategy", {}) if isinstance(execution, dict) else {}
     sector_exposure = payload.get("sector_exposure", {})
     breakers = payload.get("circuit_breakers", {})
     regime_state = payload.get("regime_state", {})
@@ -103,6 +151,8 @@ def _render_html(payload: dict) -> str:
     service_degradation = payload.get("service_degradation", {})
     hedge_costs = payload.get("hedge_costs", {})
     roll_metrics = payload.get("roll_metrics", {})
+    top_ranked = payload.get("top_ranked_signals", [])
+    strategy_regime_stats = payload.get("strategy_stats", {})
 
     monthly_rows = "".join(
         f"<tr><td>{month}</td><td>{value:.2f}</td></tr>"
@@ -149,11 +199,12 @@ def _render_html(payload: dict) -> str:
             f"<td>{row.get('theta', 0):.2f}</td>"
             f"<td>{row.get('gamma', 0):.2f}</td>"
             f"<td>{row.get('vega', 0):.2f}</td>"
+            f"<td>{'Yes' if bool(row.get('gamma_risk_flag', False)) else 'No'}</td>"
             "</tr>"
         )
         for row in open_positions[:40]
         if isinstance(row, dict)
-    ) or "<tr><td colspan='9' class='muted'>No open positions</td></tr>"
+    ) or "<tr><td colspan='10' class='muted'>No open positions</td></tr>"
 
     journal_rows = "".join(
         (
@@ -175,6 +226,58 @@ def _render_html(payload: dict) -> str:
     sector_bars = _render_sector_bars(sector_exposure)
     greek_gauges = _render_greek_gauges(greeks)
     month_calendar_html = _render_monthly_calendar(daily_calendar)
+    execution_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{name}</td>"
+            f"<td>{float(values.get('avg_slippage', 0.0) or 0.0):.4f}</td>"
+            f"<td>{float(values.get('avg_adverse_slippage', 0.0) or 0.0):.4f}</td>"
+            f"<td>{int(values.get('samples', 0) or 0)}</td>"
+            "</tr>"
+        )
+        for name, values in sorted(execution_by_strategy.items())
+        if isinstance(values, dict)
+    ) or "<tr><td colspan='4' class='muted'>No execution samples</td></tr>"
+    ranked_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{row.get('symbol', '')}</td>"
+            f"<td>{row.get('strategy', '')}</td>"
+            f"<td>{float(row.get('composite_score', 0.0) or 0.0):.2f}</td>"
+            f"<td>{float(row.get('score', 0.0) or 0.0):.1f}</td>"
+            f"<td>{float(row.get('pop', 0.0) or 0.0):.1%}</td>"
+            "</tr>"
+        )
+        for row in top_ranked[:5]
+        if isinstance(row, dict)
+    ) or "<tr><td colspan='5' class='muted'>No ranked signals this cycle</td></tr>"
+    strategy_regime_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{strategy}</td>"
+            f"<td>{regime}</td>"
+            f"<td>{int(stats.get('wins', 0) or 0)}</td>"
+            f"<td>{int(stats.get('losses', 0) or 0)}</td>"
+            f"<td>{float(stats.get('win_rate', 0.0) or 0.0):.1f}%</td>"
+            "</tr>"
+        )
+        for strategy, regimes in sorted(strategy_regime_stats.items())
+        if isinstance(regimes, dict)
+        for regime, stats in sorted(regimes.items())
+        if isinstance(stats, dict)
+    ) or "<tr><td colspan='5' class='muted'>No strategy/regime stats</td></tr>"
+    calibration_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{bucket}</td>"
+            f"<td>{float(row.get('expected_confidence', 0.0) or 0.0):.2f}</td>"
+            f"<td>{float(row.get('actual_win_rate', 0.0) or 0.0):.2f}</td>"
+            f"<td>{int(row.get('trades', 0) or 0)}</td>"
+            "</tr>"
+        )
+        for bucket, row in sorted(llm_calibration.items())
+        if isinstance(row, dict)
+    ) or "<tr><td colspan='4' class='muted'>No calibration data</td></tr>"
 
     return f"""<!doctype html>
 <html lang="en">
@@ -259,11 +362,29 @@ def _render_html(payload: dict) -> str:
         <div>Max drawdown: {risk.get("max_drawdown", 0):.2%}</div>
         <div>Current drawdown: {risk.get("current_drawdown", 0):.2%}</div>
         <div>Execution avg slippage: {execution.get("avg_slippage", 0):.4f}</div>
+        <div>Execution avg adverse slippage: {execution.get("avg_adverse_slippage", 0):.4f}</div>
+        <div>Avg fill improvement vs mid: {execution.get("avg_fill_improvement", 0):.4f}</div>
         <div>Hedge cost (MTD): {float(hedge_costs.get("month_to_date", 0.0) or 0.0):.2f}</div>
         <div>Hedge cost (lifetime): {float(hedge_costs.get("lifetime", 0.0) or 0.0):.2f}</div>
         <div>Rolled positions: {int(roll_metrics.get("rolled_count", 0) or 0)}</div>
         <div>Avg roll credit captured: {float(roll_metrics.get("avg_roll_credit_captured", 0.0) or 0.0):.4f}</div>
       </div>
+    </section>
+    <section class="card">
+      <h2>Execution Quality</h2>
+      <table><thead><tr><th>Strategy</th><th>Avg Slippage</th><th>Avg Adverse</th><th>Samples</th></tr></thead><tbody>{execution_rows}</tbody></table>
+    </section>
+    <section class="card">
+      <h2>Top Ranked Signals</h2>
+      <table><thead><tr><th>Symbol</th><th>Strategy</th><th>Composite</th><th>Score</th><th>POP</th></tr></thead><tbody>{ranked_rows}</tbody></table>
+    </section>
+    <section class="card">
+      <h2>Strategy Regime Gates</h2>
+      <table><thead><tr><th>Strategy</th><th>Regime</th><th>Wins</th><th>Losses</th><th>Win Rate</th></tr></thead><tbody>{strategy_regime_rows}</tbody></table>
+    </section>
+    <section class="card">
+      <h2>LLM Calibration</h2>
+      <table><thead><tr><th>Bucket</th><th>Expected</th><th>Actual</th><th>Trades</th></tr></thead><tbody>{calibration_rows}</tbody></table>
     </section>
     <section class="card">
       <h2>Portfolio Greeks</h2>
@@ -325,7 +446,7 @@ def _render_html(payload: dict) -> str:
     <section class="card" style="grid-column: 1 / -1;">
       <h2>Open Positions</h2>
       <table>
-        <thead><tr><th>Symbol</th><th>Strategy</th><th>Qty</th><th>DTE</th><th>P&amp;L</th><th>Delta</th><th>Theta</th><th>Gamma</th><th>Vega</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Strategy</th><th>Qty</th><th>DTE</th><th>P&amp;L</th><th>Delta</th><th>Theta</th><th>Gamma</th><th>Vega</th><th>Gamma Risk</th></tr></thead>
         <tbody>{open_rows}</tbody>
       </table>
     </section>

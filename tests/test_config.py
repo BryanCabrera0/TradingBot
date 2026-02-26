@@ -4,7 +4,7 @@ import textwrap
 import unittest
 from unittest import mock
 
-from bot.config import load_config
+from bot.config import BotConfig, format_validation_report, load_config, validate_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -204,6 +204,94 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.log_max_bytes, 1024)
         self.assertEqual(cfg.log_backup_count, 1)
 
+    def test_execution_smart_ladder_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            execution:
+              smart_ladder_enabled: true
+              ladder_width_fractions: [0.0, 0.1, 5.0, -1.0]
+              ladder_step_timeouts_seconds: [45, "x", 3, 30]
+              max_ladder_attempts: 10
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.execution.smart_ladder_enabled)
+        self.assertEqual(cfg.execution.ladder_width_fractions, [0.0, 0.1, 1.0, 0.0])
+        self.assertEqual(cfg.execution.ladder_step_timeouts_seconds, [45, 5, 30])
+        self.assertEqual(cfg.execution.max_ladder_attempts, 10)
+
+    def test_signal_ranking_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            signal_ranking:
+              enabled: true
+              weight_score: 3
+              weight_pop: -1
+              weight_credit: 0.2
+              weight_vol_premium: 0.1
+              top_ranked_to_log: 0
+            max_signals_per_symbol_per_strategy: 0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.signal_ranking.enabled)
+        self.assertEqual(cfg.signal_ranking.weight_score, 1.0)
+        self.assertEqual(cfg.signal_ranking.weight_pop, 0.0)
+        self.assertEqual(cfg.signal_ranking.weight_credit, 0.2)
+        self.assertEqual(cfg.signal_ranking.weight_vol_premium, 0.1)
+        self.assertEqual(cfg.signal_ranking.top_ranked_to_log, 1)
+        self.assertEqual(cfg.max_signals_per_symbol_per_strategy, 1)
+
+    def test_sizing_equity_curve_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            sizing:
+              equity_curve_scaling: true
+              equity_curve_lookback: 0
+              max_scale_up: 0.2
+              max_scale_down: 2.0
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.sizing.equity_curve_scaling)
+        self.assertEqual(cfg.sizing.equity_curve_lookback, 5)
+        self.assertEqual(cfg.sizing.max_scale_up, 1.0)
+        self.assertEqual(cfg.sizing.max_scale_down, 1.0)
+
+    def test_risk_correlated_and_gamma_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            risk:
+              correlated_loss_threshold: 0
+              correlated_loss_pct: 2.0
+              correlated_loss_cooldown_hours: 0
+              gamma_week_tight_stop: 0.5
+              expiration_day_close_pct: 0.8
+            """
+        )
+        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.risk.correlated_loss_threshold, 1)
+        self.assertEqual(cfg.risk.correlated_loss_pct, 1.0)
+        self.assertEqual(cfg.risk.correlated_loss_cooldown_hours, 1)
+        self.assertEqual(cfg.risk.gamma_week_tight_stop, 1.0)
+        self.assertEqual(cfg.risk.expiration_day_close_pct, 0.25)
+
     def test_placeholder_live_secrets_are_treated_as_missing(self) -> None:
         config_path = self._write_config(
             """
@@ -225,6 +313,69 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.schwab.app_key, "")
         self.assertEqual(cfg.schwab.app_secret, "")
         self.assertEqual(cfg.schwab.account_hash, "")
+
+    def test_validation_rejects_portfolio_risk_below_position_risk(self) -> None:
+        cfg = BotConfig()
+        cfg.risk.max_portfolio_risk_pct = 1.0
+        cfg.risk.max_position_risk_pct = 2.0
+        report = validate_config(cfg)
+
+        self.assertFalse(report.is_valid)
+        self.assertTrue(
+            any("max_portfolio_risk_pct" in msg for msg in report.failed)
+        )
+
+    def test_validation_rejects_kelly_fraction_out_of_bounds(self) -> None:
+        cfg = BotConfig()
+        cfg.sizing.method = "kelly"
+        cfg.sizing.kelly_fraction = 0.05
+        report = validate_config(cfg)
+
+        self.assertFalse(report.is_valid)
+        self.assertTrue(any("kelly_fraction" in msg for msg in report.failed))
+
+    def test_validation_rejects_invalid_ensemble_model_pair(self) -> None:
+        cfg = BotConfig()
+        cfg.llm.ensemble_models = ["openai-gpt-5.2-pro", "anthropic:"]
+        report = validate_config(cfg)
+
+        self.assertFalse(report.is_valid)
+        self.assertTrue(any("ensemble_models" in msg for msg in report.failed))
+
+    def test_validation_rejects_hedging_budget_above_portfolio_risk(self) -> None:
+        cfg = BotConfig()
+        cfg.hedging.enabled = True
+        cfg.hedging.max_hedge_cost_pct = 8.0
+        cfg.risk.max_portfolio_risk_pct = 5.0
+        report = validate_config(cfg)
+
+        self.assertFalse(report.is_valid)
+        self.assertTrue(any("hedging.max_hedge_cost_pct" in msg for msg in report.failed))
+
+    def test_validation_rejects_overlapping_dte_windows_when_multiple_symbol_positions_allowed(self) -> None:
+        cfg = BotConfig()
+        cfg.credit_spreads.enabled = True
+        cfg.iron_condors.enabled = True
+        cfg.credit_spreads.min_dte = 20
+        cfg.credit_spreads.max_dte = 45
+        cfg.iron_condors.min_dte = 25
+        cfg.iron_condors.max_dte = 50
+        cfg.risk.max_positions_per_symbol = 2
+        report = validate_config(cfg)
+
+        self.assertFalse(report.is_valid)
+        self.assertTrue(any("Overlapping strategy DTE windows" in msg for msg in report.failed))
+
+    def test_validation_formats_human_readable_report(self) -> None:
+        cfg = BotConfig()
+        cfg.credit_spreads.enabled = True
+        cfg.iron_condors.enabled = True
+        cfg.risk.max_positions_per_symbol = 2
+        report = validate_config(cfg)
+        output = format_validation_report(report)
+
+        self.assertIn("Configuration validation report", output)
+        self.assertIn("Failures:", output)
 
 
 if __name__ == "__main__":

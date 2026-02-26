@@ -204,6 +204,31 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(len(signals), 1)
         self.assertIn("Stop loss", signals[0].reason)
 
+    def test_gamma_override_tightens_stop_loss_threshold(self) -> None:
+        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        positions = [
+            {
+                "position_id": "p_gamma",
+                "strategy": "bull_put_spread",
+                "symbol": "SPY",
+                "entry_credit": 1.0,
+                "current_value": 2.55,  # 1.55x adverse
+                "dte_remaining": 4,
+                "status": "open",
+                "quantity": 1,
+                "underlying_price": 110.0,
+                "details": {
+                    "short_strike": 95.0,  # not tested; relies on explicit override
+                    "stop_loss_override_multiple": 1.5,
+                },
+            }
+        ]
+
+        signals = strategy.check_exits(positions, market_client=None)
+
+        self.assertEqual(len(signals), 1)
+        self.assertIn("Stop loss", signals[0].reason)
+
     def test_strangles_trailing_stop_activation_and_trigger(self) -> None:
         strategy = StranglesStrategy(
             {

@@ -250,6 +250,42 @@ class RiskManagerTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertIn("Correlation guard", reason)
 
+    def test_equity_curve_scaling_positive_slope_scales_up(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.set_sizing_config(
+            {
+                "equity_curve_scaling": True,
+                "equity_curve_lookback": 20,
+                "max_scale_up": 1.25,
+                "max_scale_down": 0.50,
+            }
+        )
+        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_trade_history([{"pnl": 120.0} for _ in range(20)])
+
+        scalar = manager._equity_curve_risk_scalar()
+
+        self.assertGreater(scalar, 1.0)
+        self.assertLessEqual(scalar, 1.25)
+
+    def test_equity_curve_scaling_negative_slope_scales_down(self) -> None:
+        manager = RiskManager(RiskConfig())
+        manager.set_sizing_config(
+            {
+                "equity_curve_scaling": True,
+                "equity_curve_lookback": 20,
+                "max_scale_up": 1.25,
+                "max_scale_down": 0.50,
+            }
+        )
+        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_trade_history([{"pnl": -180.0} for _ in range(20)])
+
+        scalar = manager._equity_curve_risk_scalar()
+
+        self.assertLess(scalar, 1.0)
+        self.assertGreaterEqual(scalar, 0.50)
+
 
 if __name__ == "__main__":
     unittest.main()

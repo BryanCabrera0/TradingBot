@@ -47,7 +47,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from bot.config import load_config
+from bot.config import format_validation_report, load_config, validate_config
 from bot.data_fetcher import HistoricalDataFetcher
 from bot.backtester import Backtester
 from bot.dashboard import generate_dashboard
@@ -244,6 +244,11 @@ def main() -> None:
 
     # Load config
     config = load_config(args.config)
+    validation = validate_config(config)
+    print(format_validation_report(validation))
+    if validation.failed:
+        print("Configuration validation failed. Resolve the failures above before continuing.")
+        sys.exit(2)
 
     if args.fetch_data:
         if not args.start or not args.end:

@@ -325,6 +325,115 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertAlmostEqual(executed_signal.analysis.score, 30.0, places=4)
         self.assertAlmostEqual(executed_signal.size_multiplier, 0.8, places=4)
 
+    def test_scan_ranks_signals_by_composite_score_across_symbols(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.config.watchlist = ["AAA", "BBB"]
+        bot.config.signal_ranking.enabled = True
+        bot.risk_manager.can_open_more_positions = mock.Mock(side_effect=[True, True, True, False])
+        bot._get_chain_data = mock.Mock(
+            return_value=(
+                {"calls": {"2026-03-20": [{}]}, "puts": {"2026-03-20": [{}]}},
+                100.0,
+            )
+        )
+        bot._subscribe_option_stream_for_symbol = mock.Mock()
+        bot.technicals.get_context = mock.Mock(return_value=None)
+        bot._filter_signals_by_context = mock.Mock(side_effect=lambda signals, _ctx: signals)
+
+        def _context_for_symbol(symbol: str, _chain: dict) -> dict:
+            spread = 2.0 if symbol == "AAA" else 3.0
+            return {
+                "regime": "HIGH_VOL_CHOP",
+                "regime_weights": {"credit_spreads": 1.0},
+                "position_size_scalar": 1.0,
+                "vol_surface": {"realized_implied_spread": spread},
+                "max_signals_per_symbol_per_strategy": 2,
+            }
+
+        bot._build_market_context = mock.Mock(side_effect=_context_for_symbol)
+        bot._try_execute_entry = mock.Mock(return_value=True)
+
+        sig_a = make_signal("AAA")
+        sig_a.analysis.score = 50.0
+        sig_a.analysis.probability_of_profit = 0.60
+        sig_a.analysis.credit_pct_of_width = 0.30
+
+        sig_b = make_signal("BBB")
+        sig_b.analysis.score = 45.0
+        sig_b.analysis.probability_of_profit = 0.80
+        sig_b.analysis.credit_pct_of_width = 0.50
+
+        strategy = SimpleNamespace(
+            name="credit_spreads",
+            scan_for_entries=mock.Mock(side_effect=lambda symbol, *_args, **_kwargs: [sig_a] if symbol == "AAA" else [sig_b]),
+        )
+        bot.strategies = [strategy]
+
+        bot._scan_for_entries()
+
+        first = bot._try_execute_entry.call_args_list[0].args[0]
+        second = bot._try_execute_entry.call_args_list[1].args[0]
+        self.assertEqual(first.symbol, "BBB")
+        self.assertEqual(second.symbol, "AAA")
+        self.assertTrue(bot._last_ranked_signals)
+        self.assertEqual(bot._last_ranked_signals[0]["symbol"], "BBB")
+
+    def test_strategy_regime_gate_rejects_when_historical_win_rate_is_weak(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot._strategy_stats = {
+            "credit_spreads": {
+                "HIGH_VOL_CHOP": {"wins": 8, "losses": 14, "win_rate": 36.36}
+            }
+        }
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+
+        signal = make_signal("SPY")
+        signal.analysis.score = 55.0
+        signal.metadata["regime"] = "HIGH_VOL_CHOP"
+
+        executed = bot._try_execute_entry(signal)
+
+        self.assertFalse(executed)
+        bot.risk_manager.approve_trade.assert_not_called()
+
+    def test_strategy_regime_gate_relaxes_when_historical_win_rate_is_strong(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_advisor = None
+        bot._strategy_stats = {
+            "credit_spreads": {
+                "HIGH_VOL_CHOP": {"wins": 15, "losses": 7, "win_rate": 68.18}
+            }
+        }
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.risk_manager.register_open_position = mock.Mock()
+
+        signal = make_signal("SPY")
+        signal.analysis.score = 47.0
+        signal.metadata["regime"] = "HIGH_VOL_CHOP"
+
+        executed = bot._try_execute_entry(signal)
+
+        self.assertTrue(executed)
+        bot.risk_manager.approve_trade.assert_called_once()
+
+    def test_portfolio_strategist_context_includes_regime_streak_and_risk_contributors(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.llm_strategist = mock.Mock()
+        bot.llm_strategist.review_portfolio.return_value = []
+        bot._recent_regime_states = mock.Mock(return_value=[{"regime": "BULL_TREND"}])
+        bot._strategy_streak_summary = mock.Mock(return_value={"credit_spreads": {"streak": 2, "type": "wins"}})
+        bot._top_risk_contributors = mock.Mock(return_value=[{"symbol": "SPY", "risk_dollars": 1200.0}])
+
+        bot._apply_portfolio_strategist()
+
+        context = bot.llm_strategist.review_portfolio.call_args.args[0]
+        self.assertIn("recent_regime_states", context)
+        self.assertIn("strategy_streaks", context)
+        self.assertIn("top_risk_contributors", context)
+
 
 if __name__ == "__main__":
     unittest.main()

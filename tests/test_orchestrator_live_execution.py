@@ -1,5 +1,8 @@
+import json
 import unittest
 from datetime import datetime
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest import mock
 
@@ -32,8 +35,14 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot = TradingBot(make_live_config())
         bot.live_ledger = mock.Mock()
         bot.schwab.build_bull_put_spread = mock.Mock(return_value={"order": "spec"})
-        bot.schwab.place_order = mock.Mock(
-            return_value={"order_id": "abc123", "status": "PLACED"}
+        bot.schwab.place_order_with_ladder = mock.Mock(
+            return_value={
+                "order_id": "abc123",
+                "status": "FILLED",
+                "midpoint_price": 1.4,
+                "fill_price": 1.35,
+                "requested_price": 1.35,
+            }
         )
 
         signal = TradeSignal(
@@ -66,6 +75,49 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
         self.assertTrue(opened)
         bot.live_ledger.register_entry_order.assert_called_once()
+
+    def test_live_entry_uses_smart_ladder_width_fractions(self) -> None:
+        bot = TradingBot(make_live_config())
+        bot.live_ledger = mock.Mock()
+        bot.config.execution.smart_ladder_enabled = True
+        bot.config.execution.ladder_width_fractions = [0.0, 0.10, 0.25, 0.40]
+        bot.config.execution.ladder_step_timeouts_seconds = [45, 45, 45, 30]
+        bot.schwab.build_bull_put_spread = mock.Mock(return_value={"order": "spec"})
+        bot.schwab.place_order_with_ladder = mock.Mock(
+            return_value={
+                "order_id": "abc123",
+                "status": "FILLED",
+                "midpoint_price": 1.4,
+                "fill_price": 1.32,
+                "requested_price": 1.32,
+            }
+        )
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            quantity=1,
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.4,
+                max_loss=3.6,
+                probability_of_profit=0.63,
+                score=58,
+            ),
+        )
+
+        opened = bot._execute_live_entry(signal, details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95})
+
+        self.assertTrue(opened)
+        kwargs = bot.schwab.place_order_with_ladder.call_args.kwargs
+        self.assertEqual(kwargs["shifts"], [0.0, 0.10, 0.25, 0.40])
+        self.assertEqual(kwargs["step_timeouts"], [45, 45, 45, 30])
 
     def test_live_exit_places_close_order_and_marks_closing(self) -> None:
         bot = TradingBot(make_live_config())
@@ -486,6 +538,12 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
         bot.alerts.daily_summary.assert_called_once()
         bot.alerts.weekly_summary.assert_called_once()
+        daily_ctx = bot.alerts.daily_summary.call_args.kwargs.get("context", {})
+        weekly_ctx = bot.alerts.weekly_summary.call_args.kwargs.get("context", {})
+        self.assertIn("calmar", daily_ctx)
+        self.assertIn("profit_factor", daily_ctx)
+        self.assertIn("expectancy_per_trade", daily_ctx)
+        self.assertIn("calmar", weekly_ctx)
 
     def test_persist_runtime_exit_state_writes_trailing_fields_to_live_ledger(self) -> None:
         bot = TradingBot(make_live_config())
@@ -504,6 +562,172 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot._persist_runtime_exit_state(positions)
 
         bot.live_ledger.update_position_metadata.assert_called_once()
+
+    def test_entry_timing_block_queues_signal(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T09:35:00-05:00"))
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.2,
+                max_loss=3.8,
+                probability_of_profit=0.62,
+                score=55,
+            ),
+            metadata={"apply_timing_blocks": True},
+        )
+
+        executed = bot._try_execute_entry(signal)
+
+        self.assertFalse(executed)
+        self.assertEqual(len(bot.signal_queue), 1)
+        bot.paper_trader.execute_open.assert_not_called()
+
+    def test_queued_signal_executes_in_optimal_window(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot._entries_allowed = mock.Mock(return_value=True)
+        bot.risk_manager.can_open_more_positions = mock.Mock(return_value=True)
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "pq1"})
+        bot.risk_manager.register_open_position = mock.Mock()
+        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T11:00:00-05:00"))
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.2,
+                max_loss=3.8,
+                probability_of_profit=0.62,
+                score=55,
+            ),
+            metadata={"apply_timing_blocks": True},
+        )
+        bot._queue_entry_signal(signal, "outside_optimal_window")
+
+        bot._process_signal_queue()
+
+        bot.paper_trader.execute_open.assert_called_once()
+        self.assertEqual(bot.signal_queue, [])
+
+    def test_timing_bypass_allows_priority_entry_outside_window(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T09:35:00-05:00"))
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p2"})
+        bot.risk_manager.register_open_position = mock.Mock()
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.2,
+                max_loss=3.8,
+                probability_of_profit=0.62,
+                score=55,
+            ),
+            metadata={"apply_timing_blocks": True, "bypass_timing_blocks": True},
+        )
+
+        executed = bot._try_execute_entry(signal)
+
+        self.assertTrue(executed)
+        bot.paper_trader.execute_open.assert_called_once()
+
+    def test_record_slippage_history_applies_symbol_penalty_after_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            slippage_path = Path(tmp_dir) / "slippage_history.json"
+            with mock.patch("bot.orchestrator.SLIPPAGE_HISTORY_PATH", slippage_path):
+                bot = TradingBot(make_paper_config())
+                row = {
+                    "symbol": "ILLQ",
+                    "strategy": "bull_put_spread",
+                    "dte": 25,
+                    "slippage": 0.12,
+                    "adverse_slippage": 0.12,
+                }
+                for _ in range(4):
+                    bot._record_slippage_history(dict(row))
+                self.assertEqual(bot._symbol_slippage_penalty("ILLQ"), 0.0)
+
+                bot._record_slippage_history(dict(row))
+                self.assertAlmostEqual(bot._symbol_slippage_penalty("ILLQ"), 0.12, places=4)
+
+    def test_slippage_penalty_rejects_low_credit_signal(self) -> None:
+        bot = TradingBot(make_paper_config())
+        bot._symbol_slippage_penalty = mock.Mock(return_value=0.20)
+        bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
+        bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
+        bot.paper_trader.execute_open = mock.Mock()
+
+        signal = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=25,
+                short_strike=100,
+                long_strike=95,
+                credit=1.40,
+                max_loss=3.6,
+                probability_of_profit=0.62,
+                score=58,
+            ),
+        )
+
+        executed = bot._try_execute_entry(signal)
+
+        self.assertFalse(executed)
+        bot.risk_manager.approve_trade.assert_not_called()
+        bot.paper_trader.execute_open.assert_not_called()
+
+    def test_refresh_strategy_stats_persists_regime_breakdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stats_path = Path(tmp_dir) / "strategy_stats.json"
+            with mock.patch("bot.orchestrator.STRATEGY_STATS_PATH", stats_path):
+                bot = TradingBot(make_paper_config())
+                bot._refresh_strategy_stats(
+                    [
+                        {"strategy": "bull_put_spread", "regime": "BULL_TREND", "pnl": 120.0},
+                        {"strategy": "bear_call_spread", "regime": "BULL_TREND", "pnl": -80.0},
+                    ]
+                )
+
+                payload = json.loads(stats_path.read_text(encoding="utf-8"))
+                self.assertIn("credit_spreads", payload)
+                row = payload["credit_spreads"]["BULL_TREND"]
+                self.assertEqual(row["wins"], 1)
+                self.assertEqual(row["losses"], 1)
+                self.assertAlmostEqual(row["win_rate"], 50.0, places=4)
 
 
 if __name__ == "__main__":

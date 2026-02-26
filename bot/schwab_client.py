@@ -529,13 +529,14 @@ class SchwabClient:
         spread_width: float,
         side: str,
         step_timeout_seconds: int,
-        max_attempts: int = 3,
+        step_timeouts: Optional[list[int]] = None,
+        max_attempts: int = 4,
         shifts: Optional[list[float]] = None,
         total_timeout_seconds: Optional[int] = None,
     ) -> dict:
         """Place an order with a midpoint-to-natural price ladder."""
         if shifts is None or not shifts:
-            shifts = [0.0, 0.25, 0.50]
+            shifts = [0.0, 0.10, 0.25, 0.40]
         shifts = shifts[:max_attempts]
         if not shifts:
             shifts = [0.0]
@@ -552,21 +553,30 @@ class SchwabClient:
         start_clock = time.time()
 
         for attempt_index, shift in enumerate(shifts, start=1):
+            timeout_from_steps = None
+            if isinstance(step_timeouts, list) and step_timeouts:
+                if attempt_index - 1 < len(step_timeouts):
+                    timeout_from_steps = max(5, int(step_timeouts[attempt_index - 1]))
+                else:
+                    timeout_from_steps = max(5, int(step_timeouts[-1]))
             if total_timeout is not None:
                 elapsed = max(0.0, time.time() - start_clock)
                 remaining_total = total_timeout - elapsed
                 if remaining_total <= 0:
                     break
-                if attempt_index < len(shifts):
-                    wait_timeout = min(
-                        max(5, int(step_timeout_seconds)),
-                        max(5, int(remaining_total)),
-                    )
+                if timeout_from_steps is not None:
+                    wait_timeout = min(timeout_from_steps, max(5, int(remaining_total)))
+                elif attempt_index < len(shifts):
+                    wait_timeout = min(max(5, int(step_timeout_seconds)), max(5, int(remaining_total)))
                 else:
                     # Final attempt receives remaining time budget.
                     wait_timeout = max(5, int(remaining_total))
             else:
-                wait_timeout = max(5, int(step_timeout_seconds))
+                wait_timeout = (
+                    timeout_from_steps
+                    if timeout_from_steps is not None
+                    else max(5, int(step_timeout_seconds))
+                )
 
             candidate_price = _ladder_price(
                 midpoint=midpoint,
@@ -607,10 +617,17 @@ class SchwabClient:
                 return last_result
             status = str(terminal.get("status", "")).upper()
             if status == "FILLED":
+                fill_price = _extract_fill_price(terminal) or candidate_price
+                fill_improvement_vs_mid = _fill_improvement_vs_mid(
+                    midpoint=midpoint,
+                    fill_price=fill_price,
+                    side=side,
+                )
                 last_result.update(
                     {
                         "status": "FILLED",
-                        "fill_price": _extract_fill_price(terminal) or candidate_price,
+                        "fill_price": fill_price,
+                        "fill_improvement_vs_mid": round(fill_improvement_vs_mid, 4),
                         "order_id": order_id,
                     }
                 )
@@ -1093,6 +1110,14 @@ def _ladder_price(*, midpoint: float, spread: float, shift: float, side: str) ->
     else:
         value = midpoint + (shift * spread)
     return round(max(0.01, value), 2)
+
+
+def _fill_improvement_vs_mid(*, midpoint: float, fill_price: float, side: str) -> float:
+    """Return positive numbers when fill is better than midpoint."""
+    side_key = str(side).lower().strip()
+    if side_key == "credit":
+        return float(fill_price) - float(midpoint)
+    return float(midpoint) - float(fill_price)
 
 
 def _extract_fill_price(order: dict) -> Optional[float]:

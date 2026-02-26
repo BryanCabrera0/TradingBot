@@ -55,9 +55,9 @@ class DashboardTests(unittest.TestCase):
                 json.dumps(
                     {
                         "fills": [
-                            {"slippage": 0.10},
-                            {"slippage": -0.20},
-                            {"slippage": 0.30},
+                            {"slippage": 0.10, "fill_improvement_vs_mid": -0.10},
+                            {"slippage": -0.20, "fill_improvement_vs_mid": 0.20},
+                            {"slippage": 0.30, "fill_improvement_vs_mid": -0.30},
                         ]
                     }
                 ),
@@ -69,7 +69,59 @@ class DashboardTests(unittest.TestCase):
 
             self.assertIn("execution_quality", enriched)
             self.assertAlmostEqual(enriched["execution_quality"]["avg_slippage"], 0.0667, places=4)
+            self.assertAlmostEqual(enriched["execution_quality"]["avg_adverse_slippage"], 0.1333, places=4)
+            self.assertAlmostEqual(enriched["execution_quality"]["avg_fill_improvement"], -0.0667, places=4)
             self.assertEqual(enriched["execution_quality"]["samples"], 3)
+            self.assertIn("by_strategy", enriched["execution_quality"])
+
+    def test_execution_quality_by_strategy_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            execution_path = Path(tmp_dir) / "execution_quality.json"
+            execution_path.write_text(
+                json.dumps(
+                    {
+                        "fills": [
+                            {"strategy": "bull_put_spread", "slippage": 0.12, "adverse_slippage": 0.12},
+                            {"strategy": "bull_put_spread", "slippage": 0.08, "adverse_slippage": 0.08},
+                            {"strategy": "iron_condor", "slippage": -0.05, "adverse_slippage": 0.00},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("bot.dashboard.EXECUTION_QUALITY_PATH", execution_path):
+                enriched = enrich_dashboard_payload({})
+
+            by_strategy = enriched["execution_quality"]["by_strategy"]
+            self.assertAlmostEqual(by_strategy["bull_put_spread"]["avg_slippage"], 0.10, places=4)
+            self.assertAlmostEqual(by_strategy["bull_put_spread"]["avg_adverse_slippage"], 0.10, places=4)
+            self.assertEqual(by_strategy["bull_put_spread"]["samples"], 2)
+            self.assertAlmostEqual(by_strategy["iron_condor"]["avg_adverse_slippage"], 0.0, places=4)
+
+    def test_llm_calibration_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            llm_path = Path(tmp_dir) / "llm_track.json"
+            trades = [{"verdict": "approve", "outcome": 10.0, "confidence": 85.0} for _ in range(55)]
+            llm_path.write_text(
+                json.dumps(
+                    {
+                        "trades": trades,
+                        "meta": {
+                            "calibration": {
+                                "80-90": {"actual_win_rate": 0.56, "expected_confidence": 0.85, "trades": 55}
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch("bot.dashboard.LLM_TRACK_RECORD_PATH", llm_path):
+                enriched = enrich_dashboard_payload({})
+
+            self.assertIn("llm_calibration", enriched)
+            self.assertIn("80-90", enriched["llm_calibration"])
 
     def test_html_contains_sections(self) -> None:
         payload = {

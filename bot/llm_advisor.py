@@ -16,6 +16,7 @@ import requests
 
 from bot.config import LLMConfig
 from bot.data_store import dump_json, load_json
+from bot.number_utils import safe_float
 from bot.openai_compat import extract_responses_output_text, request_openai_json
 from bot.strategies.base import TradeSignal
 
@@ -158,6 +159,12 @@ class LLMAdvisor:
                 raw_response = self._query_model(retry_prompt)
                 decision, _ = self._parse_decision(raw_response)
 
+        raw_confidence_pct = decision.confidence_pct
+        adjusted_confidence_pct = self._calibrated_confidence_pct(raw_confidence_pct)
+        decision.confidence = round(max(0.0, min(1.0, adjusted_confidence_pct / 100.0)), 4)
+        decision.raw_response = raw_response
+        signal.metadata["llm_raw_confidence"] = raw_confidence_pct
+        signal.metadata["llm_adjusted_confidence"] = adjusted_confidence_pct
         decision.raw_response = raw_response
         decision.review_id = self._record_review(signal, decision, context or {}, model_votes=model_votes)
         return decision
@@ -198,6 +205,7 @@ class LLMAdvisor:
             break
         if updated_trade:
             self._update_model_accuracy(payload, updated_trade)
+            self._recompute_calibration(payload)
         dump_json(self.track_record_path, payload)
         if updated_trade:
             self._append_trade_journal(updated_trade)
@@ -256,12 +264,21 @@ class LLMAdvisor:
                 "strategy": signal.strategy,
                 "verdict": decision.verdict,
                 "confidence": decision.confidence_pct,
+                "raw_confidence": safe_float(signal.metadata.get("llm_raw_confidence"), decision.confidence_pct),
                 "reasoning": decision.reasoning,
                 "suggested_adjustment": decision.suggested_adjustment,
                 "risk_adjustment": decision.risk_adjustment,
                 "position_id": None,
                 "outcome": None,
                 "model_votes": model_votes or [],
+                "trade_snapshot": {
+                    "expiration": getattr(signal.analysis, "expiration", None),
+                    "dte": getattr(signal.analysis, "dte", None),
+                    "score": getattr(signal.analysis, "score", None),
+                    "probability_of_profit": getattr(signal.analysis, "probability_of_profit", None),
+                    "credit": getattr(signal.analysis, "credit", None),
+                    "max_loss": getattr(signal.analysis, "max_loss", None),
+                },
                 "context": {
                     "portfolio_exposure": context.get("portfolio_exposure"),
                     "earnings_proximity": context.get("earnings_proximity"),
@@ -272,6 +289,73 @@ class LLMAdvisor:
         )
         dump_json(self.track_record_path, payload)
         return review_id
+
+    def _recompute_calibration(self, payload: dict) -> None:
+        """Recompute confidence calibration buckets from closed outcomes."""
+        trades = payload.get("trades", []) if isinstance(payload, dict) else []
+        closed = [
+            row
+            for row in trades
+            if isinstance(row, dict)
+            and _coerce_float(row.get("outcome")) is not None
+            and _coerce_float(row.get("raw_confidence", row.get("confidence"))) is not None
+        ]
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            payload["meta"] = meta
+
+        if len(closed) < 50:
+            meta.pop("calibration", None)
+            return
+
+        buckets: dict[str, dict[str, float]] = {}
+        for row in closed:
+            conf = _clamp_float(row.get("raw_confidence", row.get("confidence")), 0.0, 100.0)
+            if conf <= 1.0:
+                conf *= 100.0
+            bucket = _confidence_bucket(conf)
+            entry = buckets.setdefault(bucket, {"trades": 0.0, "hits": 0.0})
+            entry["trades"] += 1
+            if _is_hit(row):
+                entry["hits"] += 1
+
+        calibration = {}
+        for bucket, entry in buckets.items():
+            trades_n = int(entry.get("trades", 0) or 0)
+            hits_n = int(entry.get("hits", 0) or 0)
+            if trades_n <= 0:
+                continue
+            calibration[bucket] = {
+                "trades": trades_n,
+                "actual_win_rate": round(hits_n / trades_n, 4),
+                "expected_confidence": _bucket_expected_confidence(bucket),
+            }
+        meta["calibration"] = calibration
+
+    def _calibrated_confidence_pct(self, confidence_pct: float) -> float:
+        """Apply stored calibration curve to confidence once enough samples exist."""
+        payload = load_json(self.track_record_path, {"trades": [], "meta": {}})
+        trades = payload.get("trades", []) if isinstance(payload, dict) else []
+        closed = [
+            row
+            for row in trades
+            if isinstance(row, dict) and _coerce_float(row.get("outcome")) is not None
+        ]
+        if len(closed) < 50:
+            return confidence_pct
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        calibration = meta.get("calibration", {}) if isinstance(meta, dict) else {}
+        if not isinstance(calibration, dict):
+            return confidence_pct
+        bucket = _confidence_bucket(confidence_pct)
+        row = calibration.get(bucket, {})
+        if not isinstance(row, dict):
+            return confidence_pct
+        actual = _coerce_float(row.get("actual_win_rate"))
+        if actual is None:
+            return confidence_pct
+        return max(0.0, min(100.0, actual * 100.0))
 
     def _query_model(
         self,
@@ -602,19 +686,44 @@ class LLMAdvisor:
                 4,
             )
 
-    def _journal_context(self) -> list[dict]:
+    def _journal_context(self, signal: Optional[TradeSignal] = None) -> list[dict]:
         if not self.config.journal_enabled:
             return []
         payload = load_json(self.config.journal_file, {"entries": []})
         entries = payload.get("entries", []) if isinstance(payload, dict) else []
         if not isinstance(entries, list):
             return []
-        limit = max(1, int(self.config.journal_context_entries))
-        out = []
-        for item in entries[-limit:]:
-            if not isinstance(item, dict):
+        symbol = str(signal.symbol or "").upper() if signal else ""
+        strategy = str(signal.strategy or "") if signal else ""
+        selected: list[dict] = []
+        if symbol:
+            selected.extend(
+                [
+                    item
+                    for item in reversed(entries)
+                    if isinstance(item, dict) and str(item.get("symbol", "")).upper() == symbol
+                ][:5]
+            )
+        if strategy:
+            selected.extend(
+                [
+                    item
+                    for item in reversed(entries)
+                    if isinstance(item, dict) and str(item.get("strategy", "")) == strategy
+                ][:5]
+            )
+        if not selected:
+            limit = max(1, min(10, int(self.config.journal_context_entries)))
+            selected = [item for item in entries[-limit:] if isinstance(item, dict)]
+
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for item in selected:
+            key = str(item.get("review_id", "")) or f"{item.get('timestamp')}|{item.get('symbol')}|{item.get('strategy')}"
+            if key in seen:
                 continue
-            out.append(
+            seen.add(key)
+            deduped.append(
                 {
                     "symbol": item.get("symbol"),
                     "strategy": item.get("strategy"),
@@ -623,7 +732,9 @@ class LLMAdvisor:
                     "analysis": item.get("analysis"),
                 }
             )
-        return out
+            if len(deduped) >= 10:
+                break
+        return deduped
 
     def _append_trade_journal(self, trade: dict) -> None:
         if not self.config.journal_enabled:
@@ -700,10 +811,121 @@ class LLMAdvisor:
             f"Few-shot examples: {examples}"
         )
 
+    def _relevant_history_context(self, signal: TradeSignal) -> dict:
+        """Collect concise, high-signal historical context for prompt quality."""
+        payload = load_json(self.track_record_path, {"trades": []})
+        trades = payload.get("trades", []) if isinstance(payload, dict) else []
+        if not isinstance(trades, list):
+            trades = []
+        ordered = [item for item in trades if isinstance(item, dict)]
+        ordered.sort(key=lambda row: str(row.get("timestamp", "")))
+
+        symbol = str(signal.symbol or "").upper()
+        strategy = str(signal.strategy or "")
+        same_symbol = [row for row in reversed(ordered) if str(row.get("symbol", "")).upper() == symbol][:5]
+        same_strategy = [row for row in reversed(ordered) if str(row.get("strategy", "")) == strategy][:5]
+
+        mistakes: list[dict] = []
+        for row in reversed(ordered):
+            outcome = _coerce_float(row.get("outcome"))
+            if outcome is None:
+                continue
+            verdict = str(row.get("verdict", "")).lower()
+            is_mistake = (verdict == "approve" and outcome < 0) or (verdict == "reject" and outcome > 0)
+            if is_mistake:
+                mistakes.append(row)
+            if len(mistakes) >= 3:
+                break
+
+        similar = self._similar_trades(signal, ordered)
+        summary = self._success_rate_summary(ordered, symbol=symbol, strategy=strategy)
+        return {
+            "same_symbol_recent": [self._compact_trade_row(row) for row in same_symbol],
+            "same_strategy_recent": [self._compact_trade_row(row) for row in same_strategy],
+            "recent_mistakes": [self._compact_trade_row(row) for row in mistakes],
+            "similar_trades": [self._compact_trade_row(row) for row in similar[:3]],
+            "success_rate_summary": summary,
+        }
+
+    def _similar_trades(self, signal: TradeSignal, trades: list[dict]) -> list[dict]:
+        """Find the closest historical trades to current setup."""
+        analysis = signal.analysis
+        if analysis is None:
+            return []
+        cur_dte = _coerce_float(getattr(analysis, "dte", None), 0.0)
+        cur_pop = _coerce_float(getattr(analysis, "probability_of_profit", None), 0.0)
+        cur_score = _coerce_float(getattr(analysis, "score", None), 0.0)
+        symbol = str(signal.symbol or "").upper()
+        strategy = str(signal.strategy or "")
+        scored: list[tuple[float, dict]] = []
+        for row in trades:
+            if not isinstance(row, dict):
+                continue
+            outcome = _coerce_float(row.get("outcome"))
+            if outcome is None:
+                continue
+            snapshot = row.get("trade_snapshot", {}) if isinstance(row.get("trade_snapshot"), dict) else {}
+            hist_dte = _coerce_float(snapshot.get("dte"), cur_dte)
+            hist_pop = _coerce_float(snapshot.get("probability_of_profit"), cur_pop)
+            hist_score = _coerce_float(snapshot.get("score"), cur_score)
+            score = 0.0
+            if str(row.get("symbol", "")).upper() == symbol:
+                score += 2.0
+            if str(row.get("strategy", "")) == strategy:
+                score += 2.0
+            score -= abs((hist_dte or 0.0) - (cur_dte or 0.0)) / 30.0
+            score -= abs((hist_pop or 0.0) - (cur_pop or 0.0)) * 2.0
+            score -= abs((hist_score or 0.0) - (cur_score or 0.0)) / 50.0
+            scored.append((score, row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in scored[:3]]
+
+    def _success_rate_summary(self, trades: list[dict], *, symbol: str, strategy: str) -> str:
+        closed = [
+            row
+            for row in trades
+            if isinstance(row, dict) and _coerce_float(row.get("outcome")) is not None
+        ]
+        approves = [row for row in closed if str(row.get("verdict", "")).lower() == "approve"]
+        rejects = [row for row in closed if str(row.get("verdict", "")).lower() == "reject"]
+        approve_hits = sum(1 for row in approves if _is_hit(row))
+        reject_hits = sum(1 for row in rejects if _is_hit(row))
+        same = [
+            row
+            for row in closed
+            if str(row.get("symbol", "")).upper() == symbol and str(row.get("strategy", "")) == strategy
+        ]
+        same_wins = sum(1 for row in same if _coerce_float(row.get("outcome"), 0.0) > 0)
+        return (
+            f"Your approval accuracy: "
+            f"{(approve_hits / len(approves) * 100.0) if approves else 0.0:.0f}% "
+            f"({approve_hits}/{len(approves)}). "
+            f"Your reject accuracy: "
+            f"{(reject_hits / len(rejects) * 100.0) if rejects else 0.0:.0f}% "
+            f"({reject_hits}/{len(rejects)}). "
+            f"For {symbol} {strategy}: {same_wins}/{len(same)} wins."
+        )
+
+    @staticmethod
+    def _compact_trade_row(row: dict) -> dict:
+        snapshot = row.get("trade_snapshot", {}) if isinstance(row.get("trade_snapshot"), dict) else {}
+        return {
+            "timestamp": row.get("timestamp"),
+            "symbol": row.get("symbol"),
+            "strategy": row.get("strategy"),
+            "verdict": row.get("verdict"),
+            "confidence": row.get("confidence"),
+            "outcome": row.get("outcome"),
+            "dte": snapshot.get("dte"),
+            "score": snapshot.get("score"),
+            "probability_of_profit": snapshot.get("probability_of_profit"),
+        }
+
     def _build_prompt(self, signal: TradeSignal, context: Optional[dict]) -> str:
         analysis = signal.analysis
         risk_style = self._get_risk_style()
         risk_policy = RISK_POLICIES[risk_style]
+        history_context = self._relevant_history_context(signal)
         analysis_data = {
             "strategy": signal.strategy,
             "symbol": signal.symbol,
@@ -755,7 +977,9 @@ class LLMAdvisor:
                 "economic_events": (context or {}).get("economic_events", {}),
                 "trade_parameters": analysis_data,
                 "portfolio_exposure": (context or {}).get("portfolio_exposure", {}),
-                "recent_trade_journal": self._journal_context(),
+                "recent_trade_journal": self._journal_context(signal),
+                "historical_context": history_context,
+                "similar_trades": history_context.get("similar_trades", []),
             },
         }
         return json.dumps(payload, separators=(",", ":"))
@@ -898,3 +1122,27 @@ def _is_configured_secret(value: object) -> bool:
         return False
     lowered = text.lower()
     return not any(marker in lowered for marker in SECRET_PLACEHOLDER_MARKERS)
+
+
+def _confidence_bucket(confidence_pct: float) -> str:
+    value = max(0.0, min(100.0, float(confidence_pct)))
+    if value < 60.0:
+        return "50-60"
+    if value < 70.0:
+        return "60-70"
+    if value < 80.0:
+        return "70-80"
+    if value < 90.0:
+        return "80-90"
+    return "90-100"
+
+
+def _bucket_expected_confidence(bucket: str) -> float:
+    mapping = {
+        "50-60": 0.55,
+        "60-70": 0.65,
+        "70-80": 0.75,
+        "80-90": 0.85,
+        "90-100": 0.95,
+    }
+    return mapping.get(str(bucket), 0.0)

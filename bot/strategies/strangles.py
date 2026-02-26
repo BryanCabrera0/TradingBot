@@ -162,7 +162,14 @@ class StranglesStrategy(BaseStrategy):
                             )
 
         signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
-        return signals
+        max_signals = int(
+            (market_context or {}).get(
+                "max_signals_per_symbol_per_strategy",
+                self.config.get("max_signals_per_symbol_per_strategy", 2),
+            )
+            or 2
+        )
+        return signals[: max(1, max_signals)]
 
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
         out: list[TradeSignal] = []
@@ -181,13 +188,17 @@ class StranglesStrategy(BaseStrategy):
             dte_remaining = int(pos.get("dte_remaining", 999) or 999)
             if entry_credit <= 0:
                 continue
+            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            stop_override = float(details.get("stop_loss_override_multiple", 0.0) or 0.0)
+            effective_stop_multiple = stop_multiple
+            if stop_override > 0:
+                effective_stop_multiple = min(effective_stop_multiple, stop_override)
             pnl_pct = (entry_credit - current_value) / entry_credit
             target = (
                 self._profit_target_for_dte(dte_remaining)
                 if adaptive_targets
                 else float(self.config.get("profit_target_pct", 0.50))
             )
-            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
             trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
             if trailing_enabled and pnl_pct >= trail_activation:
                 trailing_high = max(trailing_high, pnl_pct)
@@ -200,7 +211,7 @@ class StranglesStrategy(BaseStrategy):
                 and trailing_high > 0
                 and pnl_pct <= max(0.0, trailing_high - trail_floor)
             )
-            if pnl_pct >= target or trailing_triggered or current_value >= entry_credit * stop_multiple:
+            if pnl_pct >= target or trailing_triggered or current_value >= entry_credit * effective_stop_multiple:
                 if trailing_triggered:
                     reason = "Trailing stop"
                 elif pnl_pct >= target:

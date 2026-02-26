@@ -334,6 +334,49 @@ class LLMAdvisorTests(unittest.TestCase):
             payload = json.loads(prompt)
             self.assertTrue(payload["sections"]["recent_trade_journal"])
 
+    def test_prompt_builds_relevant_bounded_history_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            track_path = Path(tmp_dir) / "track.json"
+            trades = []
+            for idx in range(20):
+                symbol = "SPY" if idx % 2 == 0 else "QQQ"
+                strategy = "bull_put_spread" if idx % 3 else "iron_condor"
+                verdict = "approve" if idx % 2 == 0 else "reject"
+                outcome = -50.0 if idx in {2, 4, 6} else (80.0 if verdict == "approve" else -40.0)
+                trades.append(
+                    {
+                        "timestamp": f"2026-02-{idx+1:02d}",
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "verdict": verdict,
+                        "confidence": 70,
+                        "outcome": outcome,
+                        "trade_snapshot": {
+                            "dte": 30,
+                            "score": 60 + (idx % 5),
+                            "probability_of_profit": 0.60,
+                        },
+                    }
+                )
+            dump_json(track_path, {"trades": trades, "meta": {}})
+            advisor = LLMAdvisor(
+                LLMConfig(
+                    enabled=True,
+                    provider="ollama",
+                    track_record_file=str(track_path),
+                )
+            )
+
+            prompt = advisor._build_prompt(make_signal(), {"account_balance": 100000})
+            payload = json.loads(prompt)
+            hist = payload["sections"]["historical_context"]
+
+            self.assertLessEqual(len(hist["same_symbol_recent"]), 5)
+            self.assertLessEqual(len(hist["same_strategy_recent"]), 5)
+            self.assertLessEqual(len(hist["recent_mistakes"]), 3)
+            self.assertLessEqual(len(payload["sections"]["similar_trades"]), 3)
+            self.assertIn("approval accuracy", hist["success_rate_summary"].lower())
+
     def test_model_weight_uses_accuracy_after_minimum_reviews(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             track = Path(tmp_dir) / "llm_track.json"
@@ -355,6 +398,48 @@ class LLMAdvisorTests(unittest.TestCase):
             weight = advisor._model_weight("openai:gpt-5.2-pro")
 
             self.assertAlmostEqual(weight, 1.5, places=4)
+
+    def test_calibrated_confidence_uses_calibration_curve_after_50_trades(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            track = Path(tmp_dir) / "llm_track.json"
+            trades = []
+            for idx in range(55):
+                trades.append(
+                    {
+                        "verdict": "approve",
+                        "outcome": 10.0 if idx % 2 == 0 else -5.0,
+                        "confidence": 85.0,
+                    }
+                )
+            dump_json(
+                track,
+                {
+                    "trades": trades,
+                    "meta": {
+                        "calibration": {
+                            "80-90": {"actual_win_rate": 0.55, "expected_confidence": 0.85, "trades": 55}
+                        }
+                    },
+                },
+            )
+            advisor = LLMAdvisor(
+                LLMConfig(enabled=True, provider="ollama", track_record_file=str(track))
+            )
+
+            adjusted = advisor._calibrated_confidence_pct(84.0)
+
+            self.assertAlmostEqual(adjusted, 55.0, places=4)
+
+    def test_review_trade_applies_confidence_calibration(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
+        advisor._query_model = mock.Mock(
+            return_value='{"verdict":"approve","confidence":84,"reasoning":"ok","suggested_adjustment":null}'
+        )
+        advisor._calibrated_confidence_pct = mock.Mock(return_value=55.0)
+
+        decision = advisor.review_trade(make_signal(), {})
+
+        self.assertAlmostEqual(decision.confidence, 0.55, places=4)
 
     def test_update_model_accuracy_tracks_model_id_votes(self) -> None:
         advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))

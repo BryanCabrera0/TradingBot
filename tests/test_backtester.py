@@ -255,6 +255,32 @@ class BacktesterTests(unittest.TestCase):
             if backtester.closed_trades:
                 self.assertIn("regime", backtester.closed_trades[0])
 
+    def test_backtester_report_includes_analytics_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir)
+            _write_snapshot(data_dir / "SPY_2026-02-20.parquet.csv.gz", "2026-02-20", short_mid=1.2, long_mid=0.2)
+            _write_snapshot(data_dir / "SPY_2026-02-23.parquet.csv.gz", "2026-02-23", short_mid=0.4, long_mid=0.1)
+
+            cfg = BotConfig()
+            cfg.scanner.enabled = False
+            cfg.iron_condors.enabled = False
+            cfg.covered_calls.enabled = False
+            cfg.credit_spreads.enabled = True
+            cfg.credit_spreads.min_dte = 1
+            cfg.credit_spreads.max_dte = 45
+
+            backtester = Backtester(cfg, data_dir=data_dir, initial_balance=100_000.0)
+            backtester.risk_manager.earnings_calendar = mock.Mock(
+                earnings_within_window=mock.Mock(return_value=(False, None))
+            )
+
+            result = backtester.run(start="2026-02-20", end="2026-02-23")
+
+            self.assertIn("analytics", result.report)
+            self.assertIn("analytics_core", result.report)
+            self.assertIn("risk_adjusted_return", result.report)
+            self.assertIn("expectancy_per_trade", result.report)
+
 
 if __name__ == "__main__":
     unittest.main()

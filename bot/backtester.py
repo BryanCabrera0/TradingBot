@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from bot.config import BotConfig, load_config
+from bot.analytics import compute as compute_analytics
 from bot.data_store import dump_json, ensure_data_dir
 from bot.regime_detector import LOW_VOL_GRIND, MarketRegimeDetector
 from bot.risk_manager import RiskManager
@@ -369,6 +370,11 @@ class Backtester:
         return snapshots
 
     def _build_report(self, start_date: date, end_date: date) -> dict:
+        analytics_report = compute_analytics(
+            self.closed_trades,
+            initial_equity=max(1.0, float(self.initial_balance)),
+        )
+        analytics_core = analytics_report.core_metrics
         equities = [point["equity"] for point in self.equity_curve]
         total_return = (
             ((equities[-1] - self.initial_balance) / self.initial_balance)
@@ -414,6 +420,8 @@ class Backtester:
             "monthly_returns": monthly,
             "strategy_performance": strategy_performance,
             "regime_performance": regime_performance,
+            "analytics": analytics_report.to_dict(),
+            "analytics_core": dict(analytics_core),
             "walk_forward": walk_forward,
             "monte_carlo": monte_carlo,
             "transaction_costs": {
@@ -426,6 +434,17 @@ class Backtester:
             "open_positions": len(self.positions),
             "equity_curve": self.equity_curve,
         }
+        if analytics_core:
+            report["sharpe_ratio"] = round(float(analytics_core.get("sharpe", sharpe)), 4)
+            report["sortino_ratio"] = round(float(analytics_core.get("sortino", sortino)), 4)
+            report["calmar_ratio"] = round(float(analytics_core.get("calmar", calmar)), 4)
+            report["max_drawdown"] = round(float(analytics_core.get("max_drawdown", max_drawdown)), 6)
+            report["max_drawdown_duration"] = int(analytics_core.get("max_drawdown_duration", 0) or 0)
+            report["win_rate"] = round(float(analytics_core.get("win_rate", report["win_rate"])), 4)
+            raw_pf = analytics_core.get("profit_factor", report["profit_factor"])
+            report["profit_factor"] = raw_pf if raw_pf == float("inf") else round(float(raw_pf), 4)
+            report["expectancy_per_trade"] = round(float(analytics_core.get("expectancy_per_trade", 0.0)), 4)
+            report["risk_adjusted_return"] = round(float(analytics_core.get("risk_adjusted_return", 0.0)), 6)
         return report
 
     def _write_report(self, report: dict) -> str:

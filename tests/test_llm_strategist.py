@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from unittest import mock
 
@@ -32,6 +33,25 @@ class LLMStrategistTests(unittest.TestCase):
         self.assertEqual(directives, [])
         self.assertTrue(req.called)
 
+    def test_openai_prompt_uses_enhanced_directives_and_temperature(self) -> None:
+        strategist = LLMStrategist(LLMStrategistConfig(enabled=True, provider="openai", model="gpt-4.1"))
+        context = {
+            "portfolio_greeks": {"delta": 35},
+            "recent_regime_states": [{"regime": "BULL_TREND"}],
+            "strategy_streaks": {"credit_spreads": {"streak": 3, "type": "losses"}},
+            "top_risk_contributors": [{"symbol": "SPY", "risk_dollars": 1200}],
+        }
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.llm_strategist.request_openai_json", return_value='{"directives":[]}') as req:
+                strategist.review_portfolio(context)
+
+        kwargs = req.call_args.kwargs
+        self.assertEqual(kwargs["temperature"], 0.2)
+        user_prompt = json.loads(kwargs["user_prompt"])
+        self.assertIn("directive_categories", user_prompt)
+        self.assertIn("examples", user_prompt)
+        self.assertIn("recent_regime_states", user_prompt["context"])
+
     def test_openai_missing_key_raises(self) -> None:
         strategist = LLMStrategist(LLMStrategistConfig(enabled=True, provider="openai"))
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -41,4 +61,3 @@ class LLMStrategistTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

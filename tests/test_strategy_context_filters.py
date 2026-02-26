@@ -1,10 +1,12 @@
 import unittest
 from unittest import mock
 
+from bot.analysis import SpreadAnalysis
 from bot.strategies.broken_wing_butterfly import BrokenWingButterflyStrategy
 from bot.strategies.calendar_spreads import CalendarSpreadStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
+from bot.strategies.base import TradeSignal
 from bot.strategies.strangles import StranglesStrategy
 
 
@@ -147,6 +149,142 @@ class StrategyContextFilterTests(unittest.TestCase):
 
         self.assertTrue(signals)
         self.assertEqual(signals[0].metadata["position_details"]["direction"], "bearish")
+
+    def test_credit_spreads_limits_signals_per_symbol(self) -> None:
+        strategy = CreditSpreadStrategy({"direction": "bull_put", "min_credit_pct": 0.1})
+        strategy.iv_history = mock.Mock(update_and_rank=mock.Mock(return_value=50.0))
+        base = SpreadAnalysis(
+            symbol="SPY",
+            strategy="bull_put_spread",
+            expiration="2026-03-20",
+            dte=30,
+            short_strike=95,
+            long_strike=90,
+            credit=1.2,
+            max_loss=3.8,
+            probability_of_profit=0.62,
+            score=55.0,
+        )
+        signal_a = TradeSignal(action="open", strategy="bull_put_spread", symbol="SPY", analysis=base)
+        signal_b = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(**{**base.__dict__, "score": 65.0}),
+        )
+        signal_c = TradeSignal(
+            action="open",
+            strategy="bull_put_spread",
+            symbol="SPY",
+            analysis=SpreadAnalysis(**{**base.__dict__, "score": 75.0}),
+        )
+        strategy._scan_put_spreads = mock.Mock(return_value=[signal_a, signal_b, signal_c])
+        strategy._scan_call_spreads = mock.Mock(return_value=[])
+        chain = {
+            "calls": {"2026-03-20": [{"dte": 30}]},
+            "puts": {"2026-03-20": [{"dte": 30}]},
+        }
+
+        signals = strategy.scan_for_entries(
+            "SPY",
+            chain,
+            100.0,
+            market_context={"max_signals_per_symbol_per_strategy": 2},
+        )
+
+        self.assertEqual(len(signals), 2)
+        self.assertGreaterEqual(signals[0].analysis.score, signals[1].analysis.score)
+
+    def test_iron_condors_limits_signals_per_symbol(self) -> None:
+        strategy = IronCondorStrategy(
+            {"min_dte": 20, "max_dte": 45, "short_delta": 0.16, "spread_width": 5, "min_credit_pct": 0.10}
+        )
+        strategy.iv_history = mock.Mock(update_and_rank=mock.Mock(return_value=50.0))
+        chain = {
+            "calls": {
+                "2026-03-20": [
+                    {"dte": 25, "strike": 105.0, "mid": 1.2, "delta": 0.16, "theta": -0.03, "gamma": 0.01, "vega": 0.04, "iv": 30.0},
+                    {"dte": 25, "strike": 110.0, "mid": 0.6, "delta": 0.08, "theta": -0.02, "gamma": 0.01, "vega": 0.03, "iv": 29.0},
+                ],
+                "2026-04-17": [
+                    {"dte": 35, "strike": 105.0, "mid": 1.3, "delta": 0.16, "theta": -0.03, "gamma": 0.01, "vega": 0.04, "iv": 30.0},
+                    {"dte": 35, "strike": 110.0, "mid": 0.6, "delta": 0.08, "theta": -0.02, "gamma": 0.01, "vega": 0.03, "iv": 29.0},
+                ],
+                "2026-05-15": [
+                    {"dte": 40, "strike": 105.0, "mid": 1.1, "delta": 0.16, "theta": -0.03, "gamma": 0.01, "vega": 0.04, "iv": 30.0},
+                    {"dte": 40, "strike": 110.0, "mid": 0.6, "delta": 0.08, "theta": -0.02, "gamma": 0.01, "vega": 0.03, "iv": 29.0},
+                ],
+            },
+            "puts": {
+                "2026-03-20": [
+                    {"dte": 25, "strike": 95.0, "mid": 1.2, "delta": -0.16, "theta": -0.03, "gamma": 0.01, "vega": 0.04, "iv": 31.0},
+                    {"dte": 25, "strike": 90.0, "mid": 0.6, "delta": -0.08, "theta": -0.02, "gamma": 0.01, "vega": 0.03, "iv": 30.0},
+                ],
+                "2026-04-17": [
+                    {"dte": 35, "strike": 95.0, "mid": 1.3, "delta": -0.16, "theta": -0.03, "gamma": 0.01, "vega": 0.04, "iv": 31.0},
+                    {"dte": 35, "strike": 90.0, "mid": 0.6, "delta": -0.08, "theta": -0.02, "gamma": 0.01, "vega": 0.03, "iv": 30.0},
+                ],
+                "2026-05-15": [
+                    {"dte": 40, "strike": 95.0, "mid": 1.1, "delta": -0.16, "theta": -0.03, "gamma": 0.01, "vega": 0.04, "iv": 31.0},
+                    {"dte": 40, "strike": 90.0, "mid": 0.6, "delta": -0.08, "theta": -0.02, "gamma": 0.01, "vega": 0.03, "iv": 30.0},
+                ],
+            },
+        }
+
+        signals = strategy.scan_for_entries(
+            "SPY",
+            chain,
+            100.0,
+            market_context={"max_signals_per_symbol_per_strategy": 2},
+        )
+
+        self.assertLessEqual(len(signals), 2)
+
+    def test_strangles_limits_signals_per_symbol(self) -> None:
+        strategy = StranglesStrategy({"min_iv_rank": 70, "short_delta": 0.16, "min_dte": 20, "max_dte": 45})
+        chain = {
+            "calls": {
+                "2026-03-20": [
+                    {"dte": 25, "strike": 105.0, "mid": 1.2, "delta": 0.16},
+                    {"dte": 25, "strike": 100.0, "mid": 2.2, "delta": 0.50},
+                ],
+                "2026-04-17": [
+                    {"dte": 35, "strike": 105.0, "mid": 1.2, "delta": 0.16},
+                    {"dte": 35, "strike": 100.0, "mid": 2.2, "delta": 0.50},
+                ],
+                "2026-05-15": [
+                    {"dte": 40, "strike": 105.0, "mid": 1.2, "delta": 0.16},
+                    {"dte": 40, "strike": 100.0, "mid": 2.2, "delta": 0.50},
+                ],
+            },
+            "puts": {
+                "2026-03-20": [
+                    {"dte": 25, "strike": 95.0, "mid": 1.3, "delta": -0.16},
+                    {"dte": 25, "strike": 100.0, "mid": 2.3, "delta": -0.50},
+                ],
+                "2026-04-17": [
+                    {"dte": 35, "strike": 95.0, "mid": 1.3, "delta": -0.16},
+                    {"dte": 35, "strike": 100.0, "mid": 2.3, "delta": -0.50},
+                ],
+                "2026-05-15": [
+                    {"dte": 40, "strike": 95.0, "mid": 1.3, "delta": -0.16},
+                    {"dte": 40, "strike": 100.0, "mid": 2.3, "delta": -0.50},
+                ],
+            },
+        }
+        signals = strategy.scan_for_entries(
+            "SPY",
+            chain,
+            100.0,
+            market_context={
+                "iv_rank": 80.0,
+                "regime": "HIGH_VOL_CHOP",
+                "account_balance": 100_000,
+                "max_signals_per_symbol_per_strategy": 2,
+            },
+        )
+
+        self.assertLessEqual(len(signals), 2)
 
 
 if __name__ == "__main__":

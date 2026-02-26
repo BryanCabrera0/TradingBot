@@ -78,6 +78,58 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         self.assertEqual(pause_dt.weekday(), 0)
         self.assertGreater(pause_dt, now)
 
+    def test_correlated_loss_breaker_closes_two_worst_and_pauses(self) -> None:
+        bot = TradingBot(_config())
+        positions = [
+            {"position_id": "p1", "status": "open", "symbol": "AAPL", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.8},
+            {"position_id": "p2", "status": "open", "symbol": "MSFT", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.7},
+            {"position_id": "p3", "status": "open", "symbol": "NVDA", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.6},
+            {"position_id": "p4", "status": "open", "symbol": "JPM", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.1},
+        ]
+        bot.alerts = mock.Mock()
+
+        signals = bot._apply_correlated_loss_protection(positions)
+
+        self.assertEqual(len(signals), 2)
+        self.assertIn("correlated_loss_pause_until", bot.circuit_state)
+        self.assertLessEqual(bot._cycle_size_scalar, 0.7)
+        self.assertTrue(all(sig.action == "close" for sig in signals))
+
+    def test_gamma_risk_flagging_and_expiration_day_force_close(self) -> None:
+        bot = TradingBot(_config())
+        positions = [
+            {
+                "position_id": "g1",
+                "status": "open",
+                "symbol": "SPY",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "dte_remaining": 4,
+                "underlying_price": 99.0,
+                "details": {"short_strike": 100.0},
+            },
+            {
+                "position_id": "g2",
+                "status": "open",
+                "symbol": "QQQ",
+                "strategy": "bear_call_spread",
+                "quantity": 1,
+                "dte_remaining": 0,
+                "underlying_price": 103.0,
+                "details": {"short_strike": 105.0},
+            },
+        ]
+
+        exits = bot._apply_gamma_risk_controls(positions)
+
+        self.assertTrue(positions[0]["gamma_risk_flag"])
+        self.assertEqual(
+            float(positions[0]["details"].get("stop_loss_override_multiple", 0.0)),
+            bot.config.risk.gamma_week_tight_stop,
+        )
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0].position_id, "g2")
+
 
 if __name__ == "__main__":
     unittest.main()
