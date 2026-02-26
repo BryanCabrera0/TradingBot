@@ -554,10 +554,22 @@ class LLMAdvisor:
         api_key = os.getenv("OPENAI_API_KEY")
         if not _is_configured_secret(api_key):
             raise RuntimeError("OPENAI_API_KEY is missing")
+        model_name = str(model or self.config.model or "").strip()
+        model_key = model_name.lower()
+        if not model_key or model_key.startswith("gemini-") or model_key.startswith("claude-"):
+            model_name = "gpt-5.2-pro"
+        chat_fallback = str(self.config.chat_fallback_model or "").strip()
+        chat_fallback_key = chat_fallback.lower()
+        if (
+            not chat_fallback_key
+            or chat_fallback_key.startswith("gemini-")
+            or chat_fallback_key.startswith("claude-")
+        ):
+            chat_fallback = "gpt-4.1"
 
         return request_openai_json(
             api_key=api_key,
-            model=model or self.config.model,
+            model=model_name,
             system_prompt=system_prompt or self._system_prompt(),
             user_prompt=prompt,
             timeout_seconds=self.config.timeout_seconds,
@@ -565,7 +577,7 @@ class LLMAdvisor:
             reasoning_effort=self.config.reasoning_effort,
             text_verbosity=self.config.text_verbosity,
             max_output_tokens=self.config.max_output_tokens,
-            chat_fallback_model=self.config.chat_fallback_model,
+            chat_fallback_model=chat_fallback,
             schema_name="trade_review",
             schema={
                 "type": "object",
@@ -791,7 +803,11 @@ class LLMAdvisor:
         primary_model = str(self.config.model or "").strip()
 
         if provider == "openai":
-            primary = primary_model or "gpt-5.2-pro"
+            primary_key = primary_model.lower()
+            if (not primary_key) or primary_key.startswith("gemini-") or primary_key.startswith("claude-"):
+                primary = "gpt-5.2-pro"
+            else:
+                primary = primary_model
             fallback = "gpt-5.2" if primary == "gpt-5.2-pro" else primary
             return provider, primary, fallback
 

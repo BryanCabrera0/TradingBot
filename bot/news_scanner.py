@@ -15,7 +15,6 @@ import requests
 from defusedxml import ElementTree as DET
 
 from bot.config import NewsConfig
-from bot.openai_compat import request_openai_json
 
 logger = logging.getLogger(__name__)
 
@@ -273,9 +272,10 @@ class NewsScanner:
         return items
 
     def _score_sentiment_with_llm(self, symbol: str, headlines: list[str], *, model: Optional[str] = None) -> dict:
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not _is_configured_secret(api_key):
             return self._fallback_sentiment(headlines)
+        model_name = str(model or self.config.llm_model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
 
         prompt = {
             "symbol": symbol,
@@ -289,31 +289,35 @@ class NewsScanner:
             },
         }
         try:
-            raw = request_openai_json(
-                api_key=api_key,
-                model=str(model or self.config.llm_model),
-                system_prompt="You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
-                user_prompt=json.dumps(prompt, separators=(",", ":")),
-                timeout_seconds=self.config.request_timeout_seconds,
-                temperature=0.0,
-                reasoning_effort=self.config.llm_reasoning_effort,
-                text_verbosity=self.config.llm_text_verbosity,
-                max_output_tokens=self.config.llm_max_output_tokens,
-                chat_fallback_model=self.config.llm_chat_fallback_model,
-                schema_name="news_sentiment",
-                schema={
-                    "type": "object",
-                    "properties": {
-                        "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
-                        "score": {"type": "number", "minimum": -1, "maximum": 1},
-                        "catalyst": {"type": ["string", "null"]},
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                params={"key": api_key},
+                json={
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": json.dumps(prompt, separators=(",", ":"))}],
+                        }
+                    ],
+                    "system_instruction": {
+                        "parts": [
+                            {
+                                "text": "You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
+                            }
+                        ]
                     },
-                    "required": ["sentiment", "score", "catalyst", "confidence"],
-                    "additionalProperties": False,
+                    "generationConfig": {
+                        "temperature": 0.0,
+                        "maxOutputTokens": int(self.config.llm_max_output_tokens),
+                        "responseMimeType": "application/json",
+                    },
                 },
+                timeout=self.config.request_timeout_seconds,
             )
-            parsed = json.loads(raw) if raw else {}
+            if response.status_code >= 400:
+                raise RuntimeError(f"gemini_error_{response.status_code}: {response.text[:240]}")
+            raw = _extract_gemini_text(response.json())
+            parsed = _safe_json_object(raw)
             score = float(parsed.get("score", 0.0) or 0.0)
             confidence = float(parsed.get("confidence", 0.5) or 0.5)
             if confidence > 1.0:
@@ -439,6 +443,52 @@ def _dedupe_news(items: list[NewsItem]) -> list[NewsItem]:
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def _extract_gemini_text(payload: object) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    candidates = data.get("candidates", [])
+    if not isinstance(candidates, list):
+        return ""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content", {})
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            continue
+        texts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = str(part.get("text", "")).strip()
+            if text:
+                texts.append(text)
+        if texts:
+            return "\n".join(texts).strip()
+    return ""
+
+
+def _safe_json_object(text: str) -> dict:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 def date_str(dt: datetime) -> str:

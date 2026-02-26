@@ -40,7 +40,7 @@ Production-grade automated options trading bot for Charles Schwab (`schwab-py`) 
 - Startup reconciliation (orphan/phantom detection)
 
 ### LLM Layer
-- Google / OpenAI / Anthropic / Ollama providers
+- Google / Anthropic / Ollama providers
 - Default cloud model: `gemini-2.5-pro`
 - Responses API with Chat Completions fallback
 - Ensemble voting + model-accuracy weighting
@@ -103,7 +103,6 @@ cp .env.example .env
 - `SCHWAB_APP_SECRET`
 - `SCHWAB_ACCOUNT_HASH` (or `SCHWAB_ACCOUNT_INDEX`)
 - `GOOGLE_API_KEY` (if `LLM_PROVIDER=google`)
-- `OPENAI_API_KEY` (if `LLM_PROVIDER=openai`)
 4. Run paper bot:
 ```bash
 python3 main.py
@@ -250,7 +249,7 @@ python3 main.py --live-readiness-only
 - Fix reported `Configuration validation report` failures before live mode.
 
 ### LLM provider failures or timeouts
-- Verify `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`.
+- Verify `GOOGLE_API_KEY`.
 - If unavailable, set `llm.enabled: false` or keep advisory mode + degradation fallback.
 
 ### No entries despite scans

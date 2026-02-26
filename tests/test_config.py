@@ -59,7 +59,7 @@ class ConfigTests(unittest.TestCase):
             cfg = load_config(config_path)
 
         self.assertEqual(cfg.trading_mode, "paper")
-        self.assertEqual(cfg.llm.provider, "ollama")
+        self.assertEqual(cfg.llm.provider, "google")
         self.assertEqual(cfg.llm.mode, "advisory")
         self.assertEqual(cfg.llm.risk_style, "moderate")
         self.assertEqual(cfg.log_level, "INFO")
@@ -143,7 +143,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.llm.reasoning_effort, "high")
         self.assertEqual(cfg.llm.text_verbosity, "low")
-        self.assertEqual(cfg.llm.chat_fallback_model, "gpt-4.1")
+        self.assertEqual(cfg.llm.chat_fallback_model, "gemini-2.5-flash")
 
     def test_news_config_normalizes_and_clamps(self) -> None:
         config_path = self._write_config(
@@ -189,7 +189,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.news.llm_reasoning_effort, "medium")
         self.assertEqual(cfg.news.llm_text_verbosity, "low")
         self.assertEqual(cfg.news.llm_max_output_tokens, 64)
-        self.assertEqual(cfg.news.llm_chat_fallback_model, "gpt-4.1")
+        self.assertEqual(cfg.news.llm_chat_fallback_model, "gemini-2.5-flash")
 
     def test_execution_and_alert_env_overrides(self) -> None:
         config_path = self._write_config(
@@ -419,7 +419,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.rl_prompt_optimizer.rolling_window_size, 20)
 
         self.assertEqual(cfg.alt_data.social_sentiment_cache_minutes, 1)
-        self.assertEqual(cfg.alt_data.social_sentiment_model, "gpt-5.2")
+        self.assertEqual(cfg.alt_data.social_sentiment_model, "gemini-2.5-pro")
 
         self.assertTrue(cfg.execution_algos.enabled)
         self.assertEqual(cfg.execution_algos.algo_type, "smart_ladder")

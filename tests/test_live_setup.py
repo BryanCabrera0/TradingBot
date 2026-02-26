@@ -15,7 +15,8 @@ class LiveSetupTests(unittest.TestCase):
                 "\n".join(
                     [
                         "LLM_ENABLED=true",
-                        "OPENAI_API_KEY=",
+                        "LLM_PROVIDER=google",
+                        "GOOGLE_API_KEY=",
                         "ALERTS_REQUIRE_IN_LIVE=true",
                         "ALERTS_WEBHOOK_URL=",
                     ]

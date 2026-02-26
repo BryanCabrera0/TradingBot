@@ -174,9 +174,17 @@ def _ensure_optional_runtime_defaults(env_path: Path) -> None:
     """Apply sane runtime defaults when optional integrations are not configured."""
     env_values = dotenv_values(str(env_path))
 
-    openai_key = str(env_values.get("OPENAI_API_KEY", "")).strip()
-    if _is_missing_value(openai_key):
-        set_key(str(env_path), "LLM_ENABLED", "false", quote_mode="never")
+    provider = _normalize_provider_name(env_values.get("LLM_PROVIDER", "google"))
+    key_names = _provider_key_names(provider)
+    if key_names:
+        configured = False
+        for key_name in key_names:
+            key_value = str(env_values.get(key_name, "")).strip()
+            if not _is_missing_value(key_value):
+                configured = True
+                break
+        if not configured:
+            set_key(str(env_path), "LLM_ENABLED", "false", quote_mode="never")
 
     webhook = str(env_values.get("ALERTS_WEBHOOK_URL", "")).strip()
     if not webhook:
@@ -191,7 +199,9 @@ def _seed_env_from_process(env_path: Path) -> None:
         "SCHWAB_APP_SECRET",
         "SCHWAB_ACCOUNT_HASH",
         "SCHWAB_ACCOUNT_INDEX",
+        "GOOGLE_API_KEY",
         "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
         "ALERTS_ENABLED",
         "ALERTS_WEBHOOK_URL",
         "ALERTS_REQUIRE_IN_LIVE",
@@ -252,40 +262,55 @@ def _ensure_live_alerts(env_path: Path, cfg) -> None:
 
 
 def _ensure_llm_provider_readiness(env_path: Path, cfg) -> None:
-    """Ensure OpenAI-backed LLM mode has a key, or disable LLM gracefully."""
+    """Ensure configured LLM provider has required credentials, or disable gracefully."""
     if not cfg.llm.enabled:
         return
-    if str(cfg.llm.provider).strip().lower() != "openai":
+    provider = _normalize_provider_name(getattr(cfg.llm, "provider", ""))
+    key_names = _provider_key_names(provider)
+    if not key_names:
         return
 
     env_values = dotenv_values(str(env_path))
-    key = str(env_values.get("OPENAI_API_KEY", "")).strip()
-    if not _is_missing_value(key):
+    key_name = ""
+    key = ""
+    for candidate in key_names:
+        value = str(env_values.get(candidate, "")).strip()
+        if not _is_missing_value(value):
+            key_name = candidate
+            key = value
+            break
+    if key_name and key:
         return
 
-    process_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
-    if process_key and not _is_missing_value(process_key):
-        set_key(str(env_path), "OPENAI_API_KEY", process_key, quote_mode="never")
-        print("Loaded OPENAI_API_KEY from environment.")
-        return
+    for candidate in key_names:
+        process_key = str(os.getenv(candidate, "")).strip()
+        if process_key and not _is_missing_value(process_key):
+            set_key(str(env_path), candidate, process_key, quote_mode="never")
+            print(f"Loaded {candidate} from environment.")
+            return
 
     if not sys.stdin.isatty():
         # Keep setup non-interactive and predictable: disable LLM when no key is available.
         set_key(str(env_path), "LLM_ENABLED", "false", quote_mode="never")
-        print("OPENAI_API_KEY missing; set LLM_ENABLED=false for now.")
+        print(
+            f"{'/'.join(key_names)} missing for llm.provider={provider}; "
+            "set LLM_ENABLED=false for now."
+        )
         return
 
-    print("OPENAI_API_KEY is missing while llm.provider=openai.")
-    entered = input(
-        "  Enter OPENAI_API_KEY (leave blank to disable LLM): "
-    ).strip()
+    if len(key_names) == 1:
+        key_prompt = key_names[0]
+    else:
+        key_prompt = f"{key_names[0]} (or {key_names[1]})"
+    print(f"{'/'.join(key_names)} is missing while llm.provider={provider}.")
+    entered = input(f"  Enter {key_prompt} (leave blank to disable LLM): ").strip()
     if entered:
-        set_key(str(env_path), "OPENAI_API_KEY", entered, quote_mode="never")
-        print("Saved OPENAI_API_KEY.")
+        set_key(str(env_path), key_names[0], entered, quote_mode="never")
+        print(f"Saved {key_names[0]}.")
         return
 
     set_key(str(env_path), "LLM_ENABLED", "false", quote_mode="never")
-    print("LLM disabled until OPENAI_API_KEY is configured.")
+    print(f"LLM disabled until {'/'.join(key_names)} is configured.")
 
 
 def _is_missing_value(value: Optional[str]) -> bool:
@@ -294,6 +319,24 @@ def _is_missing_value(value: Optional[str]) -> bool:
         return True
     lowered = text.lower()
     return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
+
+
+def _normalize_provider_name(value: object) -> str:
+    provider = str(value or "").strip().lower()
+    if provider == "gemini":
+        return "google"
+    return provider
+
+
+def _provider_key_names(provider: str) -> tuple[str, ...]:
+    name = _normalize_provider_name(provider)
+    if name == "google":
+        return ("GOOGLE_API_KEY", "GEMINI_API_KEY")
+    if name == "openai":
+        return ("OPENAI_API_KEY",)
+    if name == "anthropic":
+        return ("ANTHROPIC_API_KEY",)
+    return ()
 
 
 def _resolve_or_select_account_hash(

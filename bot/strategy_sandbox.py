@@ -9,13 +9,13 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+import requests
 import yaml
 
 from bot.backtester import Backtester
 from bot.config import StrategySandboxConfig
 from bot.data_store import dump_json, ensure_data_dir, load_json
 from bot.number_utils import safe_float
-from bot.openai_compat import request_openai_json
 
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
@@ -42,6 +42,7 @@ class StrategySandboxManager:
         config_path: str | Path = DEFAULT_CONFIG_PATH,
         base_strategy_path: str | Path = DEFAULT_BASE_STRATEGY_PATH,
         openai_api_key: Optional[str] = None,
+        google_api_key: Optional[str] = None,
         backtester_factory: Optional[Callable[[], Backtester]] = None,
     ):
         self.config = config
@@ -49,7 +50,14 @@ class StrategySandboxManager:
         ensure_data_dir(self.state_path.parent)
         self.config_path = Path(config_path)
         self.base_strategy_path = Path(base_strategy_path)
-        self.openai_api_key = str(openai_api_key or os.getenv("OPENAI_API_KEY") or "").strip()
+        self.google_api_key = str(
+            google_api_key
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+            or ""
+        ).strip()
+        # Preserve backwards-compatible constructor arg; this manager now uses Google only.
+        _ = openai_api_key
         self.backtester_factory = backtester_factory or (lambda: Backtester())
         self._state = self._load_state()
 
@@ -176,7 +184,7 @@ class StrategySandboxManager:
         market_context: dict,
     ) -> Optional[dict]:
         """Request a sandbox proposal from the CIO model and parse normalized JSON."""
-        if not self.openai_api_key:
+        if not self.google_api_key:
             return None
 
         base_template = ""
@@ -209,56 +217,42 @@ class StrategySandboxManager:
         }
 
         try:
-            raw = request_openai_json(
-                api_key=self.openai_api_key,
-                model="gpt-5.2-pro",
-                system_prompt=(
-                    "You are the CIO for an options desk. Return ONLY valid JSON and no markdown."
-                ),
-                user_prompt=json.dumps(payload, separators=(",", ":")),
-                timeout_seconds=20,
-                temperature=0.0,
-                reasoning_effort="medium",
-                text_verbosity="low",
-                max_output_tokens=450,
-                chat_fallback_model="gpt-5.2",
-                schema_name="sandbox_strategy_proposal",
-                schema={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "type": {"type": "string"},
-                        "direction": {"type": "string"},
-                        "dte_range": {
-                            "type": "array",
-                            "items": {"type": "number"},
-                            "minItems": 2,
-                            "maxItems": 2,
-                        },
-                        "delta_range": {
-                            "type": "array",
-                            "items": {"type": "number"},
-                            "minItems": 2,
-                            "maxItems": 2,
-                        },
-                        "max_risk_per_trade": {"type": "number"},
-                    },
-                    "required": [
-                        "name",
-                        "type",
-                        "direction",
-                        "dte_range",
-                        "delta_range",
-                        "max_risk_per_trade",
+            response = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+                params={"key": self.google_api_key},
+                json={
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": json.dumps(payload, separators=(",", ":"))}],
+                        }
                     ],
-                    "additionalProperties": True,
+                    "system_instruction": {
+                        "parts": [
+                            {
+                                "text": (
+                                    "You are the CIO for an options desk. "
+                                    "Return ONLY valid JSON and no markdown."
+                                )
+                            }
+                        ]
+                    },
+                    "generationConfig": {
+                        "temperature": 0.0,
+                        "maxOutputTokens": 450,
+                        "responseMimeType": "application/json",
+                    },
                 },
+                timeout=20,
             )
+            if response.status_code >= 400:
+                return None
+            raw = _extract_gemini_text(response.json())
         except Exception:
             return None
 
         try:
-            parsed = json.loads(raw) if raw else {}
+            parsed = _safe_json_object(raw)
         except Exception:
             parsed = {}
         if not isinstance(parsed, dict):
@@ -453,3 +447,49 @@ class StrategySandboxManager:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _extract_gemini_text(payload: object) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    candidates = data.get("candidates", [])
+    if not isinstance(candidates, list):
+        return ""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content", {})
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            continue
+        texts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = str(part.get("text", "")).strip()
+            if text:
+                texts.append(text)
+        if texts:
+            return "\n".join(texts).strip()
+    return ""
+
+
+def _safe_json_object(text: str) -> dict:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(raw[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}

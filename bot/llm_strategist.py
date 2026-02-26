@@ -118,9 +118,13 @@ class LLMStrategist:
             api_key = os.getenv("OPENAI_API_KEY")
             if not _is_configured_secret(api_key):
                 raise RuntimeError("OPENAI_API_KEY missing for llm_strategist")
+            model_name = str(self.config.model or "").strip()
+            model_key = model_name.lower()
+            if not model_key or model_key.startswith("gemini-") or model_key.startswith("claude-"):
+                model_name = "gpt-5.2-pro"
             return request_openai_json(
                 api_key=api_key,
-                model=self.config.model,
+                model=model_name,
                 system_prompt="You are a portfolio strategist. Respond ONLY with valid JSON.",
                 user_prompt=prompt,
                 timeout_seconds=self.config.timeout_seconds,

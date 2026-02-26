@@ -240,7 +240,7 @@ class AltDataConfig:
     dark_pool_proxy_enabled: bool = True
     social_sentiment_enabled: bool = True
     social_sentiment_cache_minutes: int = 30
-    social_sentiment_model: str = "gpt-5.2"
+    social_sentiment_model: str = "gemini-2.5-pro"
 
 
 @dataclass
@@ -317,8 +317,8 @@ class CooldownConfig:
 class LLMConfig:
     enabled: bool = False
     # "ollama" for local models, "google"/"openai"/"anthropic" for cloud models
-    provider: str = "openai"
-    model: str = "gpt-5.2-pro"
+    provider: str = "google"
+    model: str = "gemini-2.5-pro"
     base_url: str = "http://127.0.0.1:11434"
     mode: str = "advisory"  # "advisory" or "blocking"
     risk_style: str = "moderate"  # "conservative" | "moderate" | "aggressive"
@@ -329,9 +329,9 @@ class LLMConfig:
     reasoning_effort: str = "high"
     text_verbosity: str = "low"
     max_output_tokens: int = 500
-    chat_fallback_model: str = "gpt-4.1"
+    chat_fallback_model: str = "gemini-2.5-flash"
     ensemble_enabled: bool = False
-    ensemble_models: list = field(default_factory=lambda: ["openai:gpt-5.2-pro"])
+    ensemble_models: list = field(default_factory=lambda: ["google:gemini-2.5-pro"])
     ensemble_agreement_threshold: float = 0.66
     multi_turn_enabled: bool = True
     multi_turn_confidence_threshold: float = 70.0
@@ -356,11 +356,11 @@ class NewsConfig:
     finnhub_api_key: str = ""
     llm_sentiment_enabled: bool = True
     llm_sentiment_cache_seconds: int = 1800
-    llm_model: str = "gpt-5.2-pro"
+    llm_model: str = "gemini-2.5-pro"
     llm_reasoning_effort: str = "medium"
     llm_text_verbosity: str = "low"
     llm_max_output_tokens: int = 400
-    llm_chat_fallback_model: str = "gpt-4.1"
+    llm_chat_fallback_model: str = "gemini-2.5-flash"
     market_queries: list = field(
         default_factory=lambda: [
             "stock market",
@@ -495,8 +495,8 @@ class HedgingConfig:
 @dataclass
 class LLMStrategistConfig:
     enabled: bool = False
-    provider: str = "openai"
-    model: str = "gpt-5.2-pro"
+    provider: str = "google"
+    model: str = "gemini-2.5-pro"
     timeout_seconds: int = 20
     max_directives: int = 3
 
@@ -1469,7 +1469,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.llm.provider = _normalize_choice(
         cfg.llm.provider,
         allowed={"ollama", "openai", "anthropic", "google", "gemini"},
-        default="ollama",
+        default="google",
         field_name="llm.provider",
     )
     if cfg.llm.provider == "gemini":
@@ -1536,7 +1536,14 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.llm.max_output_tokens = max(64, int(cfg.llm.max_output_tokens))
     cfg.llm.track_record_file = str(cfg.llm.track_record_file or "bot/data/llm_track_record.json")
     llm_chat_fallback = str(cfg.llm.chat_fallback_model or "").strip()
-    cfg.llm.chat_fallback_model = llm_chat_fallback or "gpt-4.1"
+    if llm_chat_fallback:
+        cfg.llm.chat_fallback_model = llm_chat_fallback
+    elif cfg.llm.provider == "google":
+        cfg.llm.chat_fallback_model = "gemini-2.5-flash"
+    elif cfg.llm.provider == "openai":
+        cfg.llm.chat_fallback_model = "gpt-4.1"
+    else:
+        cfg.llm.chat_fallback_model = ""
     cfg.llm.ensemble_enabled = bool(cfg.llm.ensemble_enabled)
     cfg.llm.ensemble_agreement_threshold = max(
         0.0,
@@ -1544,7 +1551,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.llm.ensemble_models = _normalize_string_list(
         cfg.llm.ensemble_models,
-        default=["openai:gpt-5.2-pro"],
+        default=["google:gemini-2.5-pro"],
     )
     cfg.llm.multi_turn_enabled = bool(cfg.llm.multi_turn_enabled)
     cfg.llm.multi_turn_confidence_threshold = max(
@@ -1561,8 +1568,21 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.llm.journal_context_entries = max(1, int(cfg.llm.journal_context_entries))
     cfg.llm.explanations_file = str(cfg.llm.explanations_file or "bot/data/trade_explanations.json")
     if cfg.llm.provider == "anthropic":
-        if not str(cfg.llm.model).strip() or str(cfg.llm.model).strip().lower().startswith("gpt-"):
+        model_key = str(cfg.llm.model).strip().lower()
+        if (
+            not model_key
+            or model_key.startswith("gpt-")
+            or model_key.startswith("gemini-")
+        ):
             cfg.llm.model = "claude-sonnet-4-20250514"
+    elif cfg.llm.provider == "openai":
+        model_key = str(cfg.llm.model).strip().lower()
+        if (
+            not model_key
+            or model_key.startswith("gemini-")
+            or model_key.startswith("claude-")
+        ):
+            cfg.llm.model = "gpt-5.2-pro"
     elif cfg.llm.provider == "google":
         model_key = str(cfg.llm.model).strip().lower()
         if not model_key or model_key.startswith("gpt-") or model_key.startswith("claude-"):
@@ -1585,7 +1605,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.news.llm_sentiment_enabled = bool(cfg.news.llm_sentiment_enabled)
     cfg.news.llm_sentiment_cache_seconds = max(0, int(cfg.news.llm_sentiment_cache_seconds))
-    cfg.news.llm_model = str(cfg.news.llm_model or "gpt-5.2-pro").strip()
+    cfg.news.llm_model = str(cfg.news.llm_model or "gemini-2.5-pro").strip()
     cfg.news.llm_reasoning_effort = _normalize_choice(
         cfg.news.llm_reasoning_effort,
         allowed={"none", "low", "medium", "high", "xhigh"},
@@ -1600,7 +1620,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.news.llm_max_output_tokens = max(64, int(cfg.news.llm_max_output_tokens))
     news_chat_fallback = str(cfg.news.llm_chat_fallback_model or "").strip()
-    cfg.news.llm_chat_fallback_model = news_chat_fallback or "gpt-4.1"
+    cfg.news.llm_chat_fallback_model = news_chat_fallback or "gemini-2.5-flash"
     cfg.news.market_queries = _normalize_string_list(
         cfg.news.market_queries,
         default=[
@@ -1726,7 +1746,9 @@ def _normalize_config(cfg: BotConfig) -> None:
         1,
         int(cfg.alt_data.social_sentiment_cache_minutes),
     )
-    cfg.alt_data.social_sentiment_model = str(cfg.alt_data.social_sentiment_model or "gpt-5.2").strip()
+    cfg.alt_data.social_sentiment_model = str(
+        cfg.alt_data.social_sentiment_model or "gemini-2.5-pro"
+    ).strip()
     cfg.execution_algos.enabled = bool(cfg.execution_algos.enabled)
     cfg.execution_algos.algo_type = _normalize_choice(
         cfg.execution_algos.algo_type,
@@ -1856,15 +1878,23 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.llm_strategist.provider = _normalize_choice(
         cfg.llm_strategist.provider,
         allowed={"openai", "anthropic", "ollama", "google", "gemini"},
-        default="openai",
+        default="google",
         field_name="llm_strategist.provider",
     )
     if cfg.llm_strategist.provider == "gemini":
         cfg.llm_strategist.provider = "google"
     if cfg.llm_strategist.provider == "anthropic":
         model_key = str(cfg.llm_strategist.model).strip().lower()
-        if not model_key or model_key.startswith("gpt-"):
+        if not model_key or model_key.startswith("gpt-") or model_key.startswith("gemini-"):
             cfg.llm_strategist.model = "claude-sonnet-4-20250514"
+    elif cfg.llm_strategist.provider == "openai":
+        model_key = str(cfg.llm_strategist.model).strip().lower()
+        if (
+            not model_key
+            or model_key.startswith("gemini-")
+            or model_key.startswith("claude-")
+        ):
+            cfg.llm_strategist.model = "gpt-5.2-pro"
     elif cfg.llm_strategist.provider == "google":
         model_key = str(cfg.llm_strategist.model).strip().lower()
         if not model_key or model_key.startswith("gpt-") or model_key.startswith("claude-"):

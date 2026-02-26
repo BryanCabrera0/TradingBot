@@ -118,7 +118,7 @@ class NewsScannerTests(unittest.TestCase):
         self.assertEqual(items[0].source, "Finnhub")
         self.assertTrue(items[0].link.startswith("https://example.com/"))
 
-    def test_llm_sentiment_uses_chat_completion_fallback(self) -> None:
+    def test_llm_sentiment_uses_gemini_generate_content(self) -> None:
         scanner = NewsScanner(
             NewsConfig(
                 enabled=True,
@@ -126,25 +126,20 @@ class NewsScannerTests(unittest.TestCase):
                 llm_sentiment_cache_seconds=0,
             )
         )
-        responses_404 = mock.Mock(status_code=404)
-        responses_404.raise_for_status.side_effect = Exception("not used")
-        chat_resp = mock.Mock()
-        chat_resp.raise_for_status.return_value = None
-        chat_resp.json.return_value = {
-            "choices": [
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "candidates": [
                 {
-                    "message": {
-                        "content": '{"sentiment":"bullish","confidence":78,"key_event":null}'
+                    "content": {
+                        "parts": [{"text": '{"sentiment":"bullish","confidence":78,"key_event":null}'}]
                     }
                 }
             ]
         }
 
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
-            with mock.patch(
-                "bot.openai_compat.requests.post",
-                side_effect=[responses_404, chat_resp],
-            ):
+        with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.news_scanner.requests.post", return_value=response):
                 sentiment = scanner.get_symbol_sentiment(
                     "AAPL",
                     headlines=[mock.Mock(title="AAPL jumps on guidance raise")],
@@ -152,41 +147,48 @@ class NewsScannerTests(unittest.TestCase):
 
         self.assertEqual(sentiment["sentiment"], "bullish")
 
-    def test_llm_sentiment_uses_gpt52pro_capability_payload(self) -> None:
+    def test_llm_sentiment_uses_gemini_payload(self) -> None:
         scanner = NewsScanner(
             NewsConfig(
                 enabled=True,
                 llm_sentiment_enabled=True,
                 llm_sentiment_cache_seconds=0,
-                llm_model="gpt-5.2-pro",
+                llm_model="gemini-2.5-pro",
                 llm_reasoning_effort="medium",
                 llm_text_verbosity="low",
                 llm_max_output_tokens=256,
-                llm_chat_fallback_model="gpt-4.1",
+                llm_chat_fallback_model="gemini-2.5-flash",
             )
         )
         response = mock.Mock()
         response.status_code = 200
-        response.raise_for_status.return_value = None
         response.json.return_value = {
-            "output_text": '{"sentiment":"neutral","confidence":61,"key_event":null}'
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": '{"sentiment":"neutral","confidence":61,"key_event":null}'}]
+                    }
+                }
+            ]
         }
 
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.openai_compat.requests.post", return_value=response) as post:
+        with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            with mock.patch("bot.news_scanner.requests.post", return_value=response) as post:
                 sentiment = scanner.get_symbol_sentiment(
                     "AAPL",
                     headlines=[mock.Mock(title="AAPL announces new AI roadmap")],
                 )
 
         self.assertEqual(sentiment["sentiment"], "neutral")
-        payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "gpt-5.2-pro")
-        self.assertEqual(payload["reasoning"]["effort"], "medium")
-        self.assertEqual(payload["text"]["verbosity"], "low")
-        self.assertEqual(payload["max_output_tokens"], 256)
-        self.assertNotIn("temperature", payload)
-        self.assertNotIn("format", payload["text"])
+        args, kwargs = post.call_args
+        self.assertIn(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            args[0],
+        )
+        self.assertEqual(kwargs["params"]["key"], "test-key")
+        payload = kwargs["json"]
+        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 256)
+        self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
 
 
 if __name__ == "__main__":
