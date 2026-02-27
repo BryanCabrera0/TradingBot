@@ -15,37 +15,29 @@ automatically trades options strategies including:
   - Earnings volatility-crush plays
 
 Usage:
-    # Paper trading (default — no real money)
+    # With no command, an interactive menu appears to pick a run mode
     python3 main.py
+    python3 main.py run paper
 
-    # Paper trading with custom config
-    python3 main.py --config my_config.yaml
+    # Run one paper scan cycle and exit
+    python3 main.py run paper once
 
-    # Live trading (requires Schwab API credentials in .env)
-    python3 main.py --live
+    # Run continuous live mode (non-interactive confirmation bypass shown)
+    python3 main.py run live --yes
 
-    # Live trading (non-interactive confirmation bypass)
-    python3 main.py --live --yes
-
-    # Validate live configuration without broker connectivity
-    python3 main.py --live-readiness-only
-
-    # Prepare all local live runtime files/settings before broker access is active
-    python3 main.py --prepare-live
-
-    # Run a single scan (no continuous loop)
-    python3 main.py --once
-
-    # Show performance report
-    python3 main.py --report
+    # Run one live scan cycle and exit
+    python3 main.py run live once --yes
 """
 
 import argparse
 import json
 import logging
+import select
 import sys
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
 from bot.config import format_validation_report, load_config, validate_config
 from bot.data_fetcher import HistoricalDataFetcher
@@ -61,6 +53,7 @@ from bot.schwab_client import SchwabClient
 
 def setup_logging(
     level: str = "INFO",
+    console_level: Optional[str] = None,
     log_file: str = "logs/tradingbot.log",
     max_bytes: int = 10_485_760,
     backup_count: int = 5,
@@ -70,6 +63,11 @@ def setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     log_level = getattr(logging, level.upper(), logging.INFO)
+    resolved_console_level = getattr(
+        logging,
+        (console_level or level).upper(),
+        log_level,
+    )
 
     # Root logger
     root_logger = logging.getLogger()
@@ -78,7 +76,7 @@ def setup_logging(
 
     # Console handler
     console = logging.StreamHandler(sys.stdout)
-    console.setLevel(log_level)
+    console.setLevel(resolved_console_level)
     console_fmt = logging.Formatter(
         "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
         datefmt="%H:%M:%S",
@@ -103,10 +101,10 @@ def setup_logging(
 
 def print_banner() -> None:
     print("""
-╔══════════════════════════════════════════════════════════╗
-║           OPTIONS TRADING BOT                            ║
-║           Fully Automated • Risk Managed                 ║
-╚══════════════════════════════════════════════════════════╝
+╭──────────────────────────────────────────────────────────╮
+│              TradingBot                                  │
+│              Fully Automated · Risk Managed              │
+╰──────────────────────────────────────────────────────────╯
     """)
 
 
@@ -131,6 +129,139 @@ def show_report() -> None:
     print("=" * 50 + "\n")
 
 
+def _run_inline_auth() -> None:
+    """Run the Schwab OAuth re-authorization flow inline."""
+    from bot.auth import run_auth_flow
+
+    print("\n╭──────────────────────────────────────────────────────╮")
+    print("│  Schwab Token Re-Authorization                      │")
+    print("╰──────────────────────────────────────────────────────╯\n")
+    try:
+        run_auth_flow()
+        print("\n✓ Token refreshed successfully.\n")
+    except Exception as exc:
+        print(f"\n✗ Re-authorization failed: {exc}\n")
+
+
+def prompt_run_menu() -> tuple[str, bool]:
+    """Prompt for one of the four supported run modes (or re-auth)."""
+    options = {
+        "1": ("paper", False),
+        "2": ("paper", True),
+        "3": ("live", False),
+        "4": ("live", True),
+        "5": ("auth", False),
+    }
+    aliases = {
+        "run paper": ("paper", False),
+        "run paper once": ("paper", True),
+        "run live": ("live", False),
+        "run live once": ("live", True),
+        "auth": ("auth", False),
+        "reauth": ("auth", False),
+        "re-auth": ("auth", False),
+        "token": ("auth", False),
+    }
+
+    print("\nSelect TradingBot mode:")
+    print("  1) run paper")
+    print("  2) run paper once")
+    print("  3) run live")
+    print("  4) run live once")
+    print("  5) re-authorize Schwab token")
+
+    while True:
+        try:
+            raw = input("Choose 1-5: ").strip().lower()
+        except KeyboardInterrupt:
+            print("\nAborted.")
+            sys.exit(130)
+        except EOFError:
+            print("\nNo selection received. Aborted.")
+            sys.exit(2)
+
+        if raw in options:
+            return options[raw]
+        if raw in aliases:
+            return aliases[raw]
+        print("Invalid selection. Enter 1, 2, 3, 4, or 5.")
+
+
+def prompt_after_run_menu() -> bool:
+    """Prompt whether to return to the mode menu after a run exits."""
+    print("\nRun ended.")
+    print("  1) Return to mode menu")
+    print("  2) Exit")
+    while True:
+        try:
+            raw = input("Choose 1-2: ").strip().lower()
+        except KeyboardInterrupt:
+            print("\nAborted.")
+            return False
+        except EOFError:
+            print("\nNo selection received. Exiting.")
+            return False
+
+        if raw in {"1", "return", "menu", "m"}:
+            return True
+        if raw in {"2", "exit", "quit", "q"}:
+            return False
+        print("Invalid selection. Enter 1 or 2.")
+
+
+def start_dashboard_command_listener(bot: TradingBot) -> tuple[dict, threading.Event, threading.Thread]:
+    """Listen for menu commands while the bot is running.
+
+    When the TUI is active the keybinding footer already shows the
+    options and the TUI's own stdin listener handles input.  When
+    running without the TUI we fall back to a plain stdin reader.
+    """
+    action: dict[str, Optional[str]] = {"selection": None}
+    stop_event = threading.Event()
+
+    def _on_command(cmd: str) -> None:
+        action["selection"] = cmd
+        stop_event.set()
+        bot.stop()
+
+    # Prefer the TUI's built-in listener (it shows a visible [m] Menu · [q] Quit bar)
+    if bot.ui is not None:
+        bot.ui.start_command_listener(_on_command)
+        # Return a no-op thread so the caller API stays the same
+        noop = threading.Thread(target=lambda: None, daemon=True)
+        noop.start()
+        return action, stop_event, noop
+
+    # Fallback: plain stdin listener when TUI is disabled
+    def _listen() -> None:
+        print("Commands: [m] Return to mode menu  [q] Exit")
+        while not stop_event.is_set():
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
+            raw = sys.stdin.readline()
+            if raw == "":
+                return
+            choice = raw.strip().lower()
+            if choice in {"1", "menu", "return", "m"}:
+                _on_command("menu")
+                return
+            if choice in {"2", "exit", "quit", "q"}:
+                _on_command("exit")
+                return
+
+    listener = threading.Thread(
+        target=_listen,
+        name="dashboard-command-listener",
+        daemon=True,
+    )
+    listener.start()
+    return action, stop_event, listener
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Fully automated options trading bot for ThinkorSwim/Schwab"
@@ -140,72 +271,86 @@ def main() -> None:
         help="Path to YAML config file (default: config.yaml)",
     )
     parser.add_argument(
-        "--live", action="store_true",
-        help="Enable live trading (default is paper trading)",
-    )
-    parser.add_argument(
-        "--once", action="store_true",
-        help="Run a single scan cycle and exit (no continuous loop)",
-    )
-    parser.add_argument(
-        "--report", action="store_true",
-        help="Show paper trading performance report and exit",
-    )
-    parser.add_argument(
-        "--dashboard", action="store_true",
-        help="Generate HTML dashboard and exit",
-    )
-    parser.add_argument(
-        "--backtest", action="store_true",
-        help="Run historical backtest and exit",
-    )
-    parser.add_argument(
-        "--fetch-data", action="store_true",
-        help="Fetch historical option-chain snapshots and exit",
-    )
-    parser.add_argument(
-        "--update-econ-calendar", action="store_true",
-        help="Refresh static 2025-2026 economic event calendar and exit",
-    )
-    parser.add_argument(
-        "--audit-trail", default="",
-        help="Print audit trail events for a symbol and exit (e.g. --audit-trail SPY)",
-    )
-    parser.add_argument(
-        "--start", default="",
-        help="Start date for backtest/fetch in YYYY-MM-DD",
-    )
-    parser.add_argument(
-        "--end", default="",
-        help="End date for backtest/fetch in YYYY-MM-DD",
-    )
-    parser.add_argument(
-        "--preflight-only", action="store_true",
-        help="Run startup checks and exit without starting the bot",
-    )
-    parser.add_argument(
-        "--setup-live", action="store_true",
-        help="Run guided live setup (credentials, OAuth token, account selection) and exit",
-    )
-    parser.add_argument(
-        "--prepare-live", action="store_true",
-        help="Prepare local live runtime (env defaults + rendered service files) without broker connectivity",
-    )
-    parser.add_argument(
-        "--live-readiness-only", action="store_true",
-        help="Validate live configuration prerequisites without broker API calls",
-    )
-    parser.add_argument(
         "--yes", action="store_true",
-        help="Acknowledge live-trading confirmation prompt (useful for non-interactive runs)",
+        help="Acknowledge live-trading confirmation prompt (useful for non-interactive live runs)",
     )
     parser.add_argument(
         "--log-level", default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level from config",
     )
+    parser.add_argument(
+        "--quiet",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Suppress routine console logs (warnings/errors still shown). "
+            "Full logs remain in log file. Enabled by default; use --no-quiet to show routine logs."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    run_parser = subparsers.add_parser("run", help="Run trading bot")
+    run_parser.set_defaults(mode="paper", once_token=None)
+    run_subparsers = run_parser.add_subparsers(dest="mode")
+
+    run_paper = run_subparsers.add_parser("paper", help="Run in paper mode")
+    run_paper.add_argument(
+        "once_token",
+        nargs="?",
+        choices=["once"],
+        help="Run one scan cycle and exit",
+    )
+    run_paper.set_defaults(mode="paper")
+
+    run_live = run_subparsers.add_parser("live", help="Run in live mode")
+    run_live.add_argument(
+        "once_token",
+        nargs="?",
+        choices=["once"],
+        help="Run one scan cycle and exit",
+    )
+    run_live.set_defaults(mode="live")
+
+    subparsers.add_parser("auth", help="Re-authorize Schwab OAuth token")
 
     args = parser.parse_args()
+    interactive_menu_requested = not args.command
+    # Default no-command invocation to interactive mode selection.
+    if interactive_menu_requested:
+        args.command = "run"
+        if sys.stdin.isatty():
+            mode, once = prompt_run_menu()
+            # Handle re-auth selection: run auth flow, then loop back
+            while mode == "auth":
+                _run_inline_auth()
+                mode, once = prompt_run_menu()
+            args.mode = mode
+            args.once_token = "once" if once else None
+        else:
+            # Avoid hanging in non-interactive contexts (scripts/services).
+            args.mode = "paper"
+            args.once_token = None
+
+    args.live = str(getattr(args, "mode", "paper") or "paper") == "live"
+    args.once = str(getattr(args, "once_token", "") or "") == "once"
+    args.report = False
+    # Keep advanced execution paths disabled in the simplified 4-command CLI.
+    args.dashboard = False
+    args.backtest = False
+    args.fetch_data = False
+    args.update_econ_calendar = False
+    args.audit_trail = ""
+    args.start = ""
+    args.end = ""
+    args.preflight_only = False
+    args.setup_live = False
+    args.prepare_live = False
+    args.live_readiness_only = False
+
+    # Handle `python3 main.py auth` subcommand
+    if args.command == "auth":
+        _run_inline_auth()
+        return
 
     if args.report:
         show_report()
@@ -244,6 +389,8 @@ def main() -> None:
 
     # Load config
     config = load_config(args.config)
+    # Always enable the live terminal dashboard for the simplified run commands.
+    config.terminal_ui.enabled = True
     validation = validate_config(config)
     print(format_validation_report(validation))
     if validation.failed:
@@ -390,13 +537,15 @@ def main() -> None:
         if not config.schwab.app_key or not config.schwab.app_secret:
             print("ERROR: Live trading requires SCHWAB_APP_KEY and SCHWAB_APP_SECRET")
             print("       Set them in your .env file. See .env.example.")
-            print("       Or run: python3 main.py --setup-live")
+            print("       Then run: python3 main.py run live")
             sys.exit(1)
 
     log_level = args.log_level or config.log_level
+    console_level = "WARNING" if args.quiet else log_level
     setup_logging(
         log_level,
-        config.log_file,
+        console_level=console_level,
+        log_file=config.log_file,
         max_bytes=config.log_max_bytes,
         backup_count=config.log_backup_count,
     )
@@ -439,6 +588,9 @@ def main() -> None:
     # Create and run the bot
     bot = TradingBot(config)
     preflight_message = "Preflight checks passed."
+    dashboard_action: dict[str, Optional[str]] = {"selection": None}
+    dashboard_listener_stop: Optional[threading.Event] = None
+    dashboard_listener: Optional[threading.Thread] = None
 
     if args.live_readiness_only:
         logger.info(
@@ -507,15 +659,36 @@ def main() -> None:
         print(preflight_message)
         return
 
-    if args.once:
-        logger.info("Running single scan cycle...")
-        bot.connect()
-        bot.validate_llm_readiness()
-        bot.scan_and_trade()
-        if config.trading_mode == "paper":
-            show_report()
-    else:
-        bot.run()
+    try:
+        if args.once:
+            logger.info("Running single scan cycle...")
+            bot.connect()
+            bot.validate_llm_readiness()
+            bot.scan_and_trade()
+            if config.trading_mode == "paper":
+                show_report()
+        else:
+            if interactive_menu_requested and sys.stdin.isatty():
+                dashboard_action, dashboard_listener_stop, dashboard_listener = (
+                    start_dashboard_command_listener(bot)
+                )
+            bot.run()
+    except KeyboardInterrupt:
+        print("\nRun interrupted by user.")
+    finally:
+        if dashboard_listener_stop:
+            dashboard_listener_stop.set()
+        if dashboard_listener and dashboard_listener.is_alive():
+            dashboard_listener.join(timeout=0.2)
+
+    if interactive_menu_requested and sys.stdin.isatty():
+        if dashboard_action.get("selection") == "menu":
+            main()
+            return
+        if dashboard_action.get("selection") == "exit":
+            return
+        if prompt_after_run_menu():
+            main()
 
 
 if __name__ == "__main__":

@@ -139,9 +139,9 @@ class TerminalUITests(unittest.TestCase):
 
     def test_color_logic_for_pnl_and_dte_thresholds(self) -> None:
         ui = TerminalUI(make_config())
-        self.assertEqual(ui._pnl_color(10.0), "green")
-        self.assertEqual(ui._pnl_color(-1.0), "red")
-        self.assertEqual(ui._dte_color(5), "red")
+        self.assertEqual(ui._pnl_color(10.0), "bright_green")
+        self.assertEqual(ui._pnl_color(-1.0), "#ff6b6b")
+        self.assertEqual(ui._dte_color(5), "#ff6b6b")
         self.assertEqual(ui._dte_color(10), "yellow")
         self.assertEqual(ui._dte_color(25), "white")
 

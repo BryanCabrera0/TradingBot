@@ -1,4 +1,8 @@
-"""Rich-based terminal UI dashboard for real-time bot monitoring."""
+"""Claude CLI-inspired terminal UI dashboard for real-time bot monitoring.
+
+Uses Rich with rounded borders, muted lavender/cyan palette, braille spinners,
+and clean dot-prefixed activity indicators.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +10,10 @@ from collections import deque
 from datetime import datetime
 import io
 import logging
+import select
+import sys
 import threading
-from typing import Optional
+from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from rich.console import Console, Group
@@ -18,11 +24,27 @@ from rich.panel import Panel
 from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
+from rich import box
 
 logger = logging.getLogger(__name__)
 EASTERN_TZ = ZoneInfo("America/New_York")
 
+# ── Claude-style palette ──────────────────────────────────────────────
+BORDER = "dim"
+ACCENT = "#a78bfa"          # lavender
+ACCENT_DIM = "#818cf8"      # indigo
+LABEL = "dim cyan"
+POS_COLOR = "bright_green"
+NEG_COLOR = "#ff6b6b"
+MUTED = "dim white"
+HEADER_BG = "bold white"
+BADGE_PAPER = "bold black on bright_green"
+BADGE_LIVE = "bold white on red"
 
+SPINNER_FRAMES = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+
+# ── Logging bridge ────────────────────────────────────────────────────
 class _ActivityRichHandler(RichHandler):
     """Log bridge that feeds warning/error records into the terminal activity feed."""
 
@@ -44,28 +66,46 @@ class _ActivityRichHandler(RichHandler):
             event_type = "circuit_breaker" if record.levelno >= logging.ERROR else "warning"
             self.ui.add_event(event_type, f"{record.name}: {message}")
         except Exception:
-            # Logging handlers must never raise into application code.
             return
 
 
+# ── Main TUI class ────────────────────────────────────────────────────
 class TerminalUI:
-    """Fire-and-forget state sink + rich Live renderer."""
+    """Fire-and-forget state sink + Rich Live renderer — Claude CLI aesthetic."""
 
+    # Dot-based event indicators (replaces emoji clutter)
     _EVENT_STYLES = {
-        "opened": ("✅", "green"),
-        "closed_profit": ("💰", "green"),
-        "closed_loss": ("🔴", "red"),
-        "closed": ("💰", "green"),
-        "rejected": ("❌", "dim"),
-        "rolled": ("🔄", "bright_blue"),
-        "adjusted": ("🔧", "bright_blue"),
-        "hedged": ("🛡️", "cyan"),
-        "llm": ("🤖", "magenta"),
-        "regime": ("📊", "yellow"),
-        "warning": ("⚠️", "yellow"),
-        "circuit_breaker": ("🚨", "bold red"),
-        "paused": ("⏸️", "yellow"),
-        "resumed": ("▶️", "green"),
+        "opened":          ("●", POS_COLOR),
+        "closed_profit":   ("●", POS_COLOR),
+        "closed_loss":     ("●", NEG_COLOR),
+        "closed":          ("●", POS_COLOR),
+        "rejected":        ("○", "dim"),
+        "rolled":          ("●", ACCENT),
+        "adjusted":        ("●", ACCENT_DIM),
+        "hedged":          ("●", "cyan"),
+        "llm":             ("●", ACCENT),
+        "regime":          ("●", "yellow"),
+        "warning":         ("▲", "yellow"),
+        "circuit_breaker": ("▲", "bold red"),
+        "paused":          ("‖", "yellow"),
+        "resumed":         ("▶", POS_COLOR),
+    }
+
+    _EVENT_LABELS = {
+        "opened":          "OPENED",
+        "closed_profit":   "PROFIT",
+        "closed_loss":     "LOSS",
+        "closed":          "CLOSED",
+        "rejected":        "SKIP",
+        "rolled":          "ROLLED",
+        "adjusted":        "ADJUST",
+        "hedged":          "HEDGE",
+        "llm":             "LLM",
+        "regime":          "REGIME",
+        "warning":         "WARN",
+        "circuit_breaker": "ALERT",
+        "paused":          "PAUSE",
+        "resumed":         "RESUME",
     }
 
     def __init__(self, config):
@@ -82,6 +122,15 @@ class TerminalUI:
         self._live: Optional[Live] = None
         self._log_handler: Optional[logging.Handler] = None
         self._started_at = datetime.now(EASTERN_TZ)
+
+        # Spinner state
+        self._spinner_idx = 0
+        self._scan_active = False
+
+        # Command listener state
+        self._command_listener: Optional[threading.Thread] = None
+        self._on_command: Optional[Callable[[str], None]] = None
+        self._last_command: Optional[str] = None
 
         self._portfolio = {
             "balance": 0.0,
@@ -110,20 +159,21 @@ class TerminalUI:
         self._positions: list[dict] = []
         self._events: deque[dict] = deque(maxlen=self.max_activity_events)
         self._system_status: dict = {
-            "scanner": "⏸️ Paused",
-            "llm": "⏳ Initializing",
-            "streaming": "⏳ Initializing",
-            "api": "⏳ Initializing",
-            "kill_switch": "🟢 Ready",
+            "scanner": "Initializing",
+            "llm": "Initializing",
+            "streaming": "Initializing",
+            "api": "Initializing",
+            "kill_switch": "Ready",
             "breakers": 0,
             "regime": "normal",
             "regime_confidence": None,
+            "regime_duration": "",
             "correlation": "normal",
             "econ": "N/A",
             "uptime": "0m",
             "last_scan": "N/A",
-            "reconciliation": "⏳ Pending",
-            "ml_scorer": "⏳ Pending",
+            "reconciliation": "Pending",
+            "ml_scorer": "Pending",
             "theta_harvest": {"earned": 0.0, "target": 80.0},
             "next_scan": "N/A",
         }
@@ -132,6 +182,8 @@ class TerminalUI:
     def event_mapping(cls) -> dict[str, tuple[str, str]]:
         """Expose event type mapping for tests."""
         return dict(cls._EVENT_STYLES)
+
+    # ── Lifecycle ─────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Start the Live renderer in a daemon thread."""
@@ -154,6 +206,8 @@ class TerminalUI:
         if thread and thread.is_alive():
             thread.join(timeout=2.0)
         self._remove_logging_bridge()
+
+    # ── Public state setters (API contract) ───────────────────────────
 
     def update_portfolio(
         self,
@@ -240,6 +294,60 @@ class TerminalUI:
         with self._lock:
             self._system_status.update(kwargs)
 
+    def set_scan_active(self, active: bool = True):
+        """Toggle the header spinner for active scanning."""
+        with self._lock:
+            self._scan_active = bool(active)
+
+    def start_command_listener(self, on_command: Callable[[str], None]) -> None:
+        """Start a stdin listener that displays keybindings in the footer.
+
+        ``on_command`` is called with ``"menu"`` or ``"exit"`` when the
+        user presses the corresponding key.
+        """
+        self._on_command = on_command
+        if self._command_listener and self._command_listener.is_alive():
+            return
+        self._command_listener = threading.Thread(
+            target=self._stdin_loop,
+            name="tui-command-listener",
+            daemon=True,
+        )
+        self._command_listener.start()
+
+    @property
+    def last_command(self) -> Optional[str]:
+        """Return the last command the user entered, or None."""
+        return self._last_command
+
+    def _stdin_loop(self) -> None:
+        """Read stdin in a non-blocking loop; dispatch recognised commands."""
+        while not self._stop_event.is_set():
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
+            raw = sys.stdin.readline()
+            if raw == "":
+                return
+            choice = raw.strip().lower()
+            if choice in {"1", "menu", "return", "m"}:
+                self._last_command = "menu"
+                self.add_event("regime", "Returning to mode menu…")
+                if self._on_command:
+                    self._on_command("menu")
+                return
+            if choice in {"2", "exit", "quit", "q"}:
+                self._last_command = "exit"
+                self.add_event("regime", "Shutting down…")
+                if self._on_command:
+                    self._on_command("exit")
+                return
+
+    # ── Layout builder ────────────────────────────────────────────────
+
     def _build_layout(self) -> Layout:
         """Construct the full screen layout from current state."""
         with self._lock:
@@ -248,25 +356,31 @@ class TerminalUI:
             positions = list(self._positions)
             events = list(self._events)
             status = dict(self._system_status)
+            self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
+            spinner = SPINNER_FRAMES[self._spinner_idx] if self._scan_active else ""
 
         layout = Layout(name="root")
+        keyhint = self._build_keyhint_bar()
+
         if self.compact_mode:
             layout.split_column(
-                Layout(self._build_header_panel(status), name="header", size=3),
+                Layout(self._build_title_bar(status, spinner), name="header", size=3),
                 Layout(self._build_positions_panel(positions), name="positions", ratio=2),
-                Layout(name="footer", ratio=1),
+                Layout(name="panels", ratio=1),
+                Layout(keyhint, name="keyhint", size=1),
             )
-            layout["footer"].split_row(
+            layout["panels"].split_row(
                 Layout(self._build_activity_panel(events), name="activity"),
-                Layout(self._build_system_status_panel(status), name="system"),
+                Layout(self._build_system_panel(status), name="system"),
             )
             return layout
 
         layout.split_column(
-            Layout(self._build_header_panel(status), name="header", size=3),
+            Layout(self._build_title_bar(status, spinner), name="header", size=3),
             Layout(name="top", size=12),
             Layout(self._build_positions_panel(positions), name="positions", ratio=2),
             Layout(name="bottom", size=14),
+            Layout(keyhint, name="keyhint", size=1),
         )
         layout["top"].split_row(
             Layout(self._build_portfolio_panel(portfolio), name="portfolio"),
@@ -274,9 +388,25 @@ class TerminalUI:
         )
         layout["bottom"].split_row(
             Layout(self._build_activity_panel(events), name="activity"),
-            Layout(self._build_system_status_panel(status), name="system"),
+            Layout(self._build_system_panel(status), name="system"),
         )
         return layout
+
+    @staticmethod
+    def _build_keyhint_bar() -> Text:
+        """Render the bottom keybinding hint bar."""
+        bar = Text.assemble(
+            ("  [", MUTED),
+            ("m", ACCENT),
+            ("] Menu", MUTED),
+            ("  ·  ", BORDER),
+            ("[", MUTED),
+            ("q", ACCENT),
+            ("] Quit", MUTED),
+            ("  ", ""),
+        )
+        bar.justify = "center"
+        return bar
 
     def _run_live_loop(self) -> None:
         refresh_per_second = max(0.1, self.refresh_rate)
@@ -301,8 +431,10 @@ class TerminalUI:
         finally:
             self._live = None
 
+    # ── Logging bridge ────────────────────────────────────────────────
+
     def _install_logging_bridge(self) -> None:
-        """Keep file handlers; replace stream handlers with a warning/error feed bridge."""
+        """Keep file handlers; replace stream handlers with a warning/error bridge."""
         root = logging.getLogger()
         for handler in list(root.handlers):
             if isinstance(handler, logging.FileHandler):
@@ -329,36 +461,46 @@ class TerminalUI:
             pass
         self._log_handler = None
 
-    def _build_header_panel(self, status: dict) -> Panel:
+    # ── Panel builders ────────────────────────────────────────────────
+
+    def _build_title_bar(self, status: dict, spinner: str) -> Panel:
+        """Claude-style minimal title bar with mode/regime badges."""
         now_et = datetime.now(EASTERN_TZ).strftime("%H:%M:%S ET")
         mode = str(getattr(self.config, "trading_mode", "paper")).upper()
-        mode_style = "green" if mode == "PAPER" else "red"
+        mode_style = BADGE_PAPER if mode == "PAPER" else BADGE_LIVE
         regime = str(status.get("regime", "normal")).upper()
         regime_conf = status.get("regime_confidence")
-        conf_text = (
-            f" ({float(regime_conf) * 100.0:.0f}%)"
-            if isinstance(regime_conf, (int, float)) and float(regime_conf) <= 1.0
-            else (f" ({float(regime_conf):.0f}%)" if isinstance(regime_conf, (int, float)) else "")
-        )
-        correlation = str(status.get("correlation", "normal"))
+        conf_text = ""
+        if isinstance(regime_conf, (int, float)):
+            val = float(regime_conf)
+            conf_text = f" {val * 100.0:.0f}%" if val <= 1.0 else f" {val:.0f}%"
+        correlation = str(status.get("correlation", "normal")).upper()
 
-        title = Text("⚡ OPTIONS TRADING BOT ⚡", style="bold white", justify="center")
+        spinner_text = f"[{ACCENT_DIM}]{spinner}[/] " if spinner else "  "
+
+        title = Text.assemble(
+            (spinner_text, ""),
+            ("TradingBot", HEADER_BG),
+            ("  ", ""),
+            (f" {mode} ", mode_style),
+            ("  ", ""),
+        )
         subtitle = Text.assemble(
-            "Mode: ",
-            (mode, mode_style),
-            " | Regime: ",
+            ("Regime ", LABEL),
             (regime + conf_text, self._regime_color(regime)),
-            " | Correlation: ",
+            ("  │  ", BORDER),
+            ("Correlation ", LABEL),
             (correlation, self._correlation_color(correlation)),
-            " | ⏱ ",
-            (now_et, "cyan"),
+            ("  │  ", BORDER),
+            (now_et, MUTED),
         )
         subtitle.justify = "center"
-        return Panel(Group(title, subtitle), border_style="bright_black")
+        title.justify = "center"
+        return Panel(Group(title, subtitle), box=box.ROUNDED, border_style=BORDER)
 
     def _build_portfolio_panel(self, portfolio: dict) -> Panel:
         table = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        table.add_column(style="cyan", no_wrap=True)
+        table.add_column(style=LABEL, no_wrap=True)
         table.add_column(justify="right")
 
         balance = float(portfolio.get("balance", 0.0) or 0.0)
@@ -377,34 +519,34 @@ class TerminalUI:
         vega = float(greeks.get("vega", 0.0) or 0.0)
         gamma = float(greeks.get("gamma", 0.0) or 0.0)
 
-        table.add_row("Balance", f"${balance:,.2f}")
+        table.add_row("Balance", f"[white]${balance:,.2f}[/]")
         table.add_row(
             "Buying Power",
-            "N/A" if buying_power is None else f"${float(buying_power):,.2f}",
+            "[white]N/A[/]" if buying_power is None else f"[white]${float(buying_power):,.2f}[/]",
         )
         table.add_row(
-            "Open Positions",
+            "Positions",
             f"[{self._utilization_color(open_ratio)}]{open_count}/{max_positions}[/]",
         )
         table.add_row(
-            "Daily Risk Used",
+            "Daily Risk",
             f"[{self._utilization_color(risk_ratio)}]{daily_risk_used:.2f}% / {max_daily_risk:.2f}%[/]",
         )
         table.add_row(
-            "Portfolio Delta",
+            "Δ Delta",
             f"[{'yellow' if abs(delta) > 40 else 'white'}]{delta:+.2f}[/]",
         )
         table.add_row(
-            "Portfolio Theta",
-            f"[{'green' if theta >= 0 else 'red'}]${theta:+.2f}/day[/]",
+            "Θ Theta",
+            f"[{POS_COLOR if theta >= 0 else NEG_COLOR}]${theta:+.2f}/day[/]",
         )
-        table.add_row("Portfolio Vega", f"{vega:+.2f}")
-        table.add_row("Portfolio Gamma", f"{gamma:+.2f}")
-        return Panel(table, title="PORTFOLIO OVERVIEW", border_style="bright_black")
+        table.add_row("ν Vega", f"[white]{vega:+.2f}[/]")
+        table.add_row("Γ Gamma", f"[white]{gamma:+.2f}[/]")
+        return Panel(table, title="[dim]Portfolio[/]", box=box.ROUNDED, border_style=BORDER)
 
     def _build_metrics_panel(self, metrics: dict, portfolio: dict) -> Panel:
         table = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        table.add_column(style="cyan", no_wrap=True)
+        table.add_column(style=LABEL, no_wrap=True)
         table.add_column(justify="right")
 
         balance = max(1.0, float(portfolio.get("balance", 0.0) or 0.0))
@@ -430,7 +572,7 @@ class TerminalUI:
         table.add_row("Sharpe", f"[{self._ratio_color(sharpe)}]{sharpe:.2f}[/]")
         table.add_row("Sortino", f"[{self._ratio_color(sortino)}]{sortino:.2f}[/]")
         table.add_row("Calmar", f"[{self._ratio_color(calmar)}]{calmar:.2f}[/]")
-        table.add_row("Win Rate", f"{win_rate * 100.0:.1f}% ({wins}/{total})")
+        table.add_row("Win Rate", f"[white]{win_rate * 100.0:.1f}%[/] [{MUTED}]({wins}/{total})[/]")
         table.add_row(
             "Profit Factor",
             f"[{self._profit_factor_color(profit_factor)}]{profit_factor:.2f}[/]",
@@ -439,11 +581,11 @@ class TerminalUI:
             "Max Drawdown",
             f"[{self._drawdown_color(max_drawdown)}]-{max_drawdown * 100.0:.2f}%[/]",
         )
-        table.add_row("Expectancy", f"${expectancy:+,.2f}/trade")
-        return Panel(table, title="PERFORMANCE METRICS", border_style="bright_black")
+        table.add_row("Expectancy", f"[white]${expectancy:+,.2f}/trade[/]")
+        return Panel(table, title="[dim]Performance[/]", box=box.ROUNDED, border_style=BORDER)
 
     def _build_positions_panel(self, positions: list[dict]) -> Panel:
-        table = Table(expand=True)
+        table = Table(expand=True, box=box.SIMPLE_HEAVY, header_style="dim bold")
         table.add_column("Symbol", no_wrap=True)
         table.add_column("Strategy", overflow="fold")
         table.add_column("Qty", justify="right")
@@ -455,7 +597,12 @@ class TerminalUI:
         table.add_column("Δ", justify="right")
 
         if not positions:
-            return Panel(Text("No open positions", style="dim", justify="center"), title="OPEN POSITIONS")
+            return Panel(
+                Text("No open positions", style=MUTED, justify="center"),
+                title="[dim]Positions[/]",
+                box=box.ROUNDED,
+                border_style=BORDER,
+            )
 
         for row in positions:
             symbol = str(row.get("symbol", "")).upper()
@@ -477,75 +624,104 @@ class TerminalUI:
             pct_max = float(pct_max or 0.0)
 
             delta = float(row.get("delta", 0.0) or 0.0)
-            dte_style = self._dte_color(dte)
-            pct_style = self._pct_max_color(pct_max)
             table.add_row(
-                symbol,
-                strategy,
-                str(qty),
-                f"[{dte_style}]{dte}[/]",
-                f"${entry:.2f}",
-                f"${current:.2f}",
+                f"[white]{symbol}[/]",
+                f"[{MUTED}]{strategy}[/]",
+                f"[white]{qty}[/]",
+                f"[{self._dte_color(dte)}]{dte}[/]",
+                f"[{MUTED}]${entry:.2f}[/]",
+                f"[white]${current:.2f}[/]",
                 f"[{self._pnl_color(pnl)}]{pnl:+,.0f}[/]",
-                f"[{pct_style}]{pct_max:.0f}%[/]",
-                f"{delta:+.2f}",
+                f"[{self._pct_max_color(pct_max)}]{pct_max:.0f}%[/]",
+                f"[white]{delta:+.2f}[/]",
             )
 
-        return Panel(table, title="OPEN POSITIONS", border_style="bright_black")
+        return Panel(table, title="[dim]Positions[/]", box=box.ROUNDED, border_style=BORDER)
 
     def _build_activity_panel(self, events: list[dict]) -> Panel:
+        """Clean dot-prefixed activity feed."""
         lines: list[Text] = []
         for item in reversed(events[-12:]):
             event_type = str(item.get("type", "warning"))
-            emoji, style = self._EVENT_STYLES.get(event_type, ("•", "white"))
+            dot, style = self._EVENT_STYLES.get(event_type, ("●", "white"))
+            label = self._EVENT_LABELS.get(event_type, "EVENT")
             stamp = str(item.get("time", "--:--"))
             message = str(item.get("message", ""))
             line = Text.assemble(
-                (stamp, "cyan"),
-                " ",
-                (emoji, style),
-                " ",
-                (message, style),
+                (stamp, MUTED),
+                ("  ", ""),
+                (dot, style),
+                (" ", ""),
+                (f"{label:<7}", style),
+                ("  ", ""),
+                (message, "white"),
             )
             lines.append(line)
         if not lines:
-            lines = [Text("No recent activity", style="dim")]
-        return Panel(Group(*lines), title="RECENT ACTIVITY", border_style="bright_black")
+            lines = [Text("Waiting for activity…", style=MUTED)]
+        return Panel(Group(*lines), title="[dim]Activity[/]", box=box.ROUNDED, border_style=BORDER)
 
-    def _build_system_status_panel(self, status: dict) -> Panel:
+    def _build_system_panel(self, status: dict) -> Panel:
+        """Two-column system status with dot indicators."""
         table = Table(show_header=False, box=None, expand=True, pad_edge=False)
-        table.add_column(style="cyan", no_wrap=True)
+        table.add_column(style=LABEL, no_wrap=True)
         table.add_column(justify="left")
 
-        table.add_row("Scanner", str(status.get("scanner", "N/A")))
-        table.add_row("LLM", str(status.get("llm", "N/A")))
-        table.add_row("Streaming", str(status.get("streaming", "N/A")))
-        table.add_row("Schwab API", str(status.get("api", "N/A")))
-        table.add_row("Kill Switch", str(status.get("kill_switch", "N/A")))
+        # Status helpers
+        table.add_row("Scanner", self._dot_status(status.get("scanner", "N/A")))
+        table.add_row("LLM", self._dot_status(status.get("llm", "N/A")))
+        table.add_row("Streaming", self._dot_status(status.get("streaming", "N/A")))
+        table.add_row("Schwab API", self._dot_status(status.get("api", "N/A")))
+        table.add_row("Kill Switch", self._dot_status(status.get("kill_switch", "N/A")))
 
         breakers = int(status.get("breakers", 0) or 0)
-        breaker_color = "green" if breakers == 0 else ("yellow" if breakers <= 2 else "red")
-        table.add_row("Circuit Breakers", f"[{breaker_color}]{breakers} tripped[/]")
+        bc_color = POS_COLOR if breakers == 0 else ("yellow" if breakers <= 2 else NEG_COLOR)
+        table.add_row("Breakers", f"[{bc_color}]{breakers} tripped[/]")
 
         regime = str(status.get("regime", "normal")).upper()
         regime_dur = str(status.get("regime_duration", ""))
-        table.add_row("Regime", f"[{self._regime_color(regime)}]{regime}[/] {regime_dur}")
-        table.add_row("Next Econ Event", str(status.get("econ", "N/A")))
+        table.add_row("Regime", f"[{self._regime_color(regime)}]{regime}[/] [{MUTED}]{regime_dur}[/]")
+        table.add_row("Econ Event", f"[white]{str(status.get('econ', 'N/A'))}[/]")
 
         uptime = status.get("uptime") or self._format_uptime()
-        table.add_row("Uptime", str(uptime))
-        table.add_row("Last Scan", str(status.get("last_scan", "N/A")))
-        table.add_row("Reconciliation", str(status.get("reconciliation", "N/A")))
-        table.add_row("ML Scorer", str(status.get("ml_scorer", "N/A")))
+        table.add_row("Uptime", f"[white]{uptime}[/]")
+        table.add_row("Last Scan", f"[white]{str(status.get('last_scan', 'N/A'))}[/]")
+        table.add_row("Recon", self._dot_status(status.get("reconciliation", "N/A")))
+        table.add_row("ML Scorer", self._dot_status(status.get("ml_scorer", "N/A")))
 
         theta = status.get("theta_harvest", {}) if isinstance(status.get("theta_harvest"), dict) else {}
         earned = float(theta.get("earned", 0.0) or 0.0)
         target = max(1.0, float(theta.get("target", 80.0) or 80.0))
         progress = ProgressBar(total=100, completed=max(0.0, min(100.0, earned)))
-        theta_renderable = Group(progress, Text(f"{earned:.0f}% / {target:.0f}% target", style="white"))
-        table.add_row("Theta Harvest", theta_renderable)
+        theta_renderable = Group(progress, Text(f"{earned:.0f}% / {target:.0f}%", style=MUTED))
+        table.add_row("Θ Harvest", theta_renderable)
 
-        return Panel(table, title="SYSTEM STATUS", border_style="bright_black")
+        return Panel(table, title="[dim]System[/]", box=box.ROUNDED, border_style=BORDER)
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _dot_status(raw: str) -> Text:
+        """Convert status strings with emojis to clean dot indicators."""
+        text = str(raw or "N/A")
+        # Strip existing emojis/indicators for re-rendering
+        cleaned = text
+        for prefix in ("✅ ", "❌ ", "⚠️ ", "⏸️ ", "⏳ ", "🟢 ", "🟡 ", "● "):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):]
+                break
+
+        # Determine color
+        lower = text.lower()
+        if any(k in lower for k in ("active", "healthy", "ok", "trained", "ready", "synced", "connected")):
+            return Text.assemble(("● ", POS_COLOR), (cleaned, "white"))
+        if any(k in lower for k in ("fail", "down", "disabled", "error")):
+            return Text.assemble(("● ", NEG_COLOR), (cleaned, "white"))
+        if any(k in lower for k in ("degrad", "fallback", "stale", "warn", "paused", "pending", "not enough")):
+            return Text.assemble(("● ", "yellow"), (cleaned, "white"))
+        if "initializing" in lower:
+            return Text.assemble(("○ ", MUTED), (cleaned, MUTED))
+        return Text.assemble(("● ", "white"), (cleaned, "white"))
 
     def _format_uptime(self) -> str:
         elapsed = datetime.now(EASTERN_TZ) - self._started_at
@@ -559,19 +735,19 @@ class TerminalUI:
     @staticmethod
     def _utilization_color(value: float) -> str:
         if value > 0.9:
-            return "red"
+            return NEG_COLOR
         if value >= 0.7:
             return "yellow"
-        return "green"
+        return POS_COLOR
 
     @staticmethod
     def _pnl_color(value: float) -> str:
-        return "green" if value >= 0 else "red"
+        return POS_COLOR if value >= 0 else NEG_COLOR
 
     @staticmethod
     def _dte_color(dte: int) -> str:
         if int(dte) <= 7:
-            return "red"
+            return NEG_COLOR
         if int(dte) <= 14:
             return "yellow"
         return "white"
@@ -579,60 +755,60 @@ class TerminalUI:
     @staticmethod
     def _pct_max_color(pct_max: float) -> str:
         if float(pct_max) > 50:
-            return "green"
+            return POS_COLOR
         if float(pct_max) < 0:
-            return "red"
+            return NEG_COLOR
         return "white"
 
     @staticmethod
     def _ratio_color(value: float) -> str:
         if value > 1.0:
-            return "green"
+            return POS_COLOR
         if value >= 0.5:
             return "yellow"
-        return "red"
+        return NEG_COLOR
 
     @staticmethod
     def _profit_factor_color(value: float) -> str:
         if value > 1.5:
-            return "green"
+            return POS_COLOR
         if value >= 1.0:
             return "yellow"
-        return "red"
+        return NEG_COLOR
 
     @staticmethod
     def _drawdown_color(value: float) -> str:
         pct = abs(float(value or 0.0)) * 100.0
         if pct < 2.0:
-            return "green"
+            return POS_COLOR
         if pct <= 4.0:
             return "yellow"
-        return "red"
+        return NEG_COLOR
 
     @staticmethod
     def _regime_color(regime: str) -> str:
         key = str(regime or "").upper()
         if "BULL" in key:
-            return "green"
+            return POS_COLOR
         if "BEAR" in key or "CRASH" in key:
-            return "red"
+            return NEG_COLOR
         if "CHOP" in key:
             return "yellow"
         if "LOW_VOL" in key:
-            return "bright_blue"
+            return ACCENT
         if "MEAN_REVERSION" in key:
-            return "magenta"
+            return ACCENT_DIM
         return "white"
 
     @staticmethod
     def _correlation_color(correlation: str) -> str:
         key = str(correlation or "").lower()
         if key == "normal":
-            return "green"
+            return POS_COLOR
         if key == "stressed":
             return "yellow"
         if key == "crisis":
-            return "red"
+            return NEG_COLOR
         return "white"
 
     @staticmethod

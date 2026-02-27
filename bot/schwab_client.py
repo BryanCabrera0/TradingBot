@@ -73,6 +73,10 @@ class SchwabClient:
             if token_path.exists():
                 tighten_file_permissions(token_path, label="Schwab token file")
             logger.info("Authenticated via existing token file.")
+
+            # ── Token expiry warning ──────────────────────────────────
+            self._check_token_age(token_path)
+
         except FileNotFoundError:
             logger.info(
                 "No token file found. You need to run the initial auth flow."
@@ -84,6 +88,61 @@ class SchwabClient:
                 "Token file not found. Run `python3 -m bot.auth` first to "
                 "complete the OAuth flow."
             )
+
+    @staticmethod
+    def _check_token_age(token_path: Path) -> None:
+        """Warn if the Schwab refresh token is nearing or past its 7-day expiry."""
+        import json as _json
+
+        try:
+            raw = token_path.read_text()
+            data = _json.loads(raw)
+            creation_ts = data.get("creation_timestamp")
+            if creation_ts is None:
+                return
+            created_at = datetime.fromtimestamp(float(creation_ts), tz=EASTERN_TZ)
+            age = datetime.now(EASTERN_TZ) - created_at
+            days_old = age.total_seconds() / 86400.0
+
+            if days_old >= 7.0:
+                msg = (
+                    "\n"
+                    "╭──────────────────────────────────────────────────────╮\n"
+                    "│  ⚠  SCHWAB TOKEN EXPIRED                           │\n"
+                    "│                                                     │\n"
+                    "│  Your refresh token is {days:.1f} days old (>7 day  │\n"
+                    "│  limit). API calls will fail.                       │\n"
+                    "│                                                     │\n"
+                    "│  Run:  python3 -m bot.auth                          │\n"
+                    "╰──────────────────────────────────────────────────────╯\n"
+                ).replace("{days:.1f}", f"{days_old:.1f}")
+                print(msg)
+                logger.warning(
+                    "Schwab refresh token EXPIRED (%.1f days old). "
+                    "Run `python3 -m bot.auth` to re-authenticate.",
+                    days_old,
+                )
+            elif days_old >= 6.0:
+                hours_left = max(0.0, (7.0 - days_old) * 24.0)
+                msg = (
+                    "\n"
+                    "╭──────────────────────────────────────────────────────╮\n"
+                    "│  ⚠  SCHWAB TOKEN EXPIRING SOON                     │\n"
+                    "│                                                     │\n"
+                    "│  Your refresh token expires in ~{hours:.0f} hours.  │\n"
+                    "│  Re-authenticate before it expires.                 │\n"
+                    "│                                                     │\n"
+                    "│  Run:  python3 -m bot.auth                          │\n"
+                    "╰──────────────────────────────────────────────────────╯\n"
+                ).replace("{hours:.0f}", f"{hours_left:.0f}")
+                print(msg)
+                logger.warning(
+                    "Schwab refresh token expires in ~%.0f hours. "
+                    "Run `python3 -m bot.auth` soon.",
+                    hours_left,
+                )
+        except Exception:
+            pass  # Non-critical — don't block startup
 
     @property
     def client(self):
