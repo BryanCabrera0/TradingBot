@@ -731,7 +731,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(report.is_valid)
         self.assertTrue(any("hedging.max_hedge_cost_pct" in msg for msg in report.failed))
 
-    def test_validation_rejects_overlapping_dte_windows_when_multiple_symbol_positions_allowed(self) -> None:
+    def test_validation_allows_overlapping_dte_windows_when_multiple_symbol_positions_allowed(self) -> None:
         cfg = BotConfig()
         cfg.credit_spreads.enabled = True
         cfg.iron_condors.enabled = True
@@ -742,19 +742,19 @@ class ConfigTests(unittest.TestCase):
         cfg.risk.max_positions_per_symbol = 2
         report = validate_config(cfg)
 
-        self.assertFalse(report.is_valid)
-        self.assertTrue(any("Overlapping strategy DTE windows" in msg for msg in report.failed))
+        self.assertTrue(report.is_valid)
+        self.assertTrue(any("strategy DTE overlap check" in msg for msg in report.passed))
 
     def test_validation_formats_human_readable_report(self) -> None:
         cfg = BotConfig()
         cfg.credit_spreads.enabled = True
         cfg.iron_condors.enabled = True
-        cfg.risk.max_positions_per_symbol = 2
+        cfg.risk.max_positions_per_symbol = 1
         report = validate_config(cfg)
         output = format_validation_report(report)
 
         self.assertIn("Configuration validation report", output)
-        self.assertIn("Failures:", output)
+        self.assertIn("Warnings:", output)
 
 
 if __name__ == "__main__":

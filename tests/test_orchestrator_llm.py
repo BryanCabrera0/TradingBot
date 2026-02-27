@@ -440,7 +440,7 @@ class OrchestratorLLMTests(unittest.TestCase):
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
 
         signal = make_signal("SPY")
-        signal.analysis.score = 55.0
+        signal.analysis.score = 25.0  # below base_min(20) + weak_penalty(10) = 30
         signal.metadata["regime"] = "HIGH_VOL_CHOP"
 
         executed = bot._try_execute_entry(signal)
