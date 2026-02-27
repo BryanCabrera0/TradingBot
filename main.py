@@ -169,7 +169,15 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
     """Validate token presence and optionally run inline auth when needed."""
     token_path = Path(config.schwab.token_path).expanduser()
     if not token_path.is_absolute():
-        token_path = (Path.cwd() / token_path).resolve()
+        # Try CWD first, then fall back to the package root directory
+        cwd_candidate = (Path.cwd() / token_path).resolve()
+        pkg_candidate = (Path(__file__).resolve().parent / token_path).resolve()
+        if cwd_candidate.exists():
+            token_path = cwd_candidate
+        elif pkg_candidate.exists():
+            token_path = pkg_candidate
+        else:
+            token_path = cwd_candidate  # default for the "missing" error message
 
     def _auth_prompt() -> bool:
         if not interactive:
@@ -209,6 +217,10 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
         print("Run `tradingbot auth` (or `python3 main.py auth`) before trading.")
         return False
 
+    if age_days is not None:
+        print(f"Schwab token OK (age ~{age_days:.1f} days, refreshes automatically).")
+    else:
+        print("Schwab token found.")
     return True
 
 
@@ -399,8 +411,8 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
 def prompt_run_menu() -> tuple[str, bool]:
     """Prompt for run mode."""
     options = {
-        "1": ("auth_paper", False),
-        "2": ("auth_live", False),
+        "1": ("paper", False),
+        "2": ("live", False),
     }
     aliases = {
         "run paper": ("paper", False),
@@ -585,12 +597,11 @@ def main() -> None:
             while mode == "auth":
                 _run_inline_auth()
                 mode, once = prompt_run_menu()
-            # Handle auth + paper: re-auth then start paper trading
+            # Handle explicit "auth paper" / "auth live" typed aliases
             if mode == "auth_paper":
                 _run_inline_auth()
                 mode = "paper"
-            # Handle auth + live: re-auth then start live trading
-            if mode == "auth_live":
+            elif mode == "auth_live":
                 _run_inline_auth()
                 mode = "live"
             args.mode = mode
