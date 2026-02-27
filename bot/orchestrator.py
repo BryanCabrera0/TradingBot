@@ -6920,7 +6920,7 @@ class TradingBot:
 
     def _strategy_regime_min_score(self, signal: TradeSignal) -> float:
         """Dynamic score floor from historical strategy/regime performance."""
-        base_min = 50.0
+        base_min = 20.0
         if self._is_short_premium_strategy(signal.strategy) and self._theta_harvest_is_underperforming():
             base_min = max(0.0, base_min - 5.0)
         stats = self._strategy_stats if isinstance(self._strategy_stats, dict) else {}
@@ -7858,6 +7858,32 @@ class TradingBot:
                     retrain_time,
                 )
 
+    def _maybe_eager_rescan(self) -> None:
+        """Trigger an extra scan when no positions are open.
+
+        When the portfolio is empty we want to find trades ASAP rather than
+        waiting for the next scheduled scan time.  This fires every 2 minutes
+        (configurable) as long as the market is open and there are zero
+        open positions.
+        """
+        eager_interval_sec = 120  # rescan every 2 min when empty
+        open_count = len(self.risk_manager.portfolio.open_positions)
+        if open_count > 0:
+            return
+        if not self._is_market_open_now() and not self.is_paper:
+            return
+        now = self._now_eastern()
+        if self._last_scan_completed_at is None:
+            return  # initial scan hasn't finished yet
+        elapsed = (now - self._last_scan_completed_at).total_seconds()
+        if elapsed < eager_interval_sec:
+            return
+        logger.info(
+            "No open positions — triggering eager rescan (%.0fs since last scan).",
+            elapsed,
+        )
+        self.scan_and_trade()
+
     def _scheduled_scan(self) -> None:
         """Scan wrapper that checks market hours."""
         today = self._now_eastern().strftime("%A").lower()
@@ -8543,6 +8569,7 @@ class TradingBot:
         try:
             while self._running:
                 schedule.run_pending()
+                self._maybe_eager_rescan()
                 self._maybe_log_heartbeat()
                 self._maintain_streaming()
                 self._auto_generate_dashboard_if_due()

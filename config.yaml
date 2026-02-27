@@ -141,7 +141,7 @@ risk:
   # Max % of account value at risk across all positions
   max_portfolio_risk_pct: 15.0
   # Max % of account in a single position
-  max_position_risk_pct: 5.0
+  max_position_risk_pct: 15.0
   # Max number of open positions
   max_open_positions: 30
   # Max number of positions per underlying
@@ -187,7 +187,7 @@ risk_profiles:
     max_daily_loss_pct: 8.0
   aggressive:
     max_portfolio_risk_pct: 15.0
-    max_position_risk_pct: 5.0
+    max_position_risk_pct: 15.0
     max_open_positions: 30
     max_daily_loss_pct: 15.0
 
