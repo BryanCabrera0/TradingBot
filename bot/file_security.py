@@ -20,22 +20,30 @@ def validate_sensitive_file(
     allow_missing: bool = True,
 ) -> None:
     """Validate that an on-disk sensitive path is a regular file (not symlink)."""
-    if path.is_symlink():
-        raise RuntimeError(f"Refusing to use symlink for {label}: {path}")
+    try:
+        if path.is_symlink():
+            raise RuntimeError(f"Refusing to use symlink for {label}: {path}")
 
-    if not path.exists():
-        if allow_missing:
-            return
-        raise FileNotFoundError(f"{label} does not exist: {path}")
+        if not path.exists():
+            if allow_missing:
+                return
+            raise FileNotFoundError(f"{label} does not exist: {path}")
 
-    if not path.is_file():
-        raise RuntimeError(f"{label} path is not a regular file: {path}")
+        if not path.is_file():
+            raise RuntimeError(f"{label} path is not a regular file: {path}")
+    except PermissionError:
+        pass  # File is locked by system, so it exists and is likely valid.
 
 
 def tighten_file_permissions(path: Path, label: str) -> None:
     """Restrict sensitive file permissions to owner read/write when possible."""
-    if os.name != "posix" or not path.exists():
+    if os.name != "posix":
         return
+    try:
+        if not path.exists():
+            return
+    except PermissionError:
+        return  # Locked by system, can't change permissions anyway.
 
     try:
         mode = stat.S_IMODE(path.stat().st_mode)

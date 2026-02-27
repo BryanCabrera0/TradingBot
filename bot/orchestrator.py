@@ -123,7 +123,7 @@ STRATEGY_COOLDOWN_STATE_PATH = Path("bot/data/strategy_cooldown_state.json")
 class TradingBot:
     """Fully automated options trading bot."""
 
-    def __init__(self, config: Optional[BotConfig] = None):
+    def __init__(self, config: Optional[BotConfig] = None, *, warn_unclean_shutdown: bool = True):
         self.config = config or load_config()
         self.is_paper = self.config.trading_mode == "paper"
         self._running = False
@@ -195,7 +195,8 @@ class TradingBot:
         if isinstance(loaded_stats, dict):
             self._strategy_stats = loaded_stats
         self._strategy_cooldown_state = self._load_strategy_cooldown_state()
-        self._warn_if_unclean_previous_shutdown()
+        if warn_unclean_shutdown:
+            self._warn_if_unclean_previous_shutdown()
 
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
@@ -607,7 +608,7 @@ class TradingBot:
             return f"{hours}h {minutes}m"
         return f"{minutes}m"
 
-    def _ui_update_system_status(self) -> None:
+    def _ui_update_system_status(self, scanning_status: Optional[str] = None) -> None:
         if not self.ui:
             return
         entries_allowed = self._entries_allowed()
@@ -630,7 +631,10 @@ class TradingBot:
 
         scanner_state = "✅ Active" if self.scanner else "⏸️ Paused"
         next_scan = self._ui_next_scan_label()
-        scanner_text = f"{scanner_state} (next: {next_scan})"
+        if scanning_status:
+            scanner_text = scanning_status
+        else:
+            scanner_text = f"{scanner_state} (next: {next_scan})"
 
         llm_text = "❌ Disabled"
         if self.config.llm.enabled:
@@ -724,14 +728,19 @@ class TradingBot:
 
     def _warn_if_unclean_previous_shutdown(self) -> None:
         """Log a startup warning when prior runtime did not mark clean shutdown."""
-        state = load_json(self._runtime_state_path, {})
+        if not self._runtime_state_path.exists():
+            return
+        state = load_json(self._runtime_state_path, None)
         if not isinstance(state, dict):
             logger.warning(
                 "Previous session may have crashed (runtime state unavailable at %s).",
                 self._runtime_state_path,
             )
             return
-        if state.get("clean_shutdown") is True:
+        clean_shutdown = state.get("clean_shutdown")
+        if clean_shutdown is True:
+            return
+        if clean_shutdown is not False:
             return
         logger.warning(
             "Previous session may have crashed; clean shutdown flag missing at %s.",
@@ -2916,6 +2925,7 @@ class TradingBot:
             self._ui_update_system_status()
 
         except Exception as e:
+            self._last_scan_completed_at = self._now_eastern()
             logger.error("Error during scan cycle: %s", e)
             self._ui_update(
                 "add_event",
@@ -3752,7 +3762,10 @@ class TradingBot:
             for strategy in self.strategies
         }
 
-        for symbol in targets:
+        total_targets = len(targets)
+        for idx, symbol in enumerate(targets, start=1):
+            self._ui_update_system_status(scanning_status=f"🔄 Scanning {symbol} ({idx}/{total_targets})")
+            
             if self._is_symbol_paused(symbol):
                 logger.info("Skipping %s due to symbol circuit breaker pause.", symbol)
                 continue
@@ -7818,9 +7831,27 @@ class TradingBot:
             logger.info("Scheduled scan at %s ET", scan_time)
 
         # Schedule position monitoring
+
+
         interval = sched_config.position_check_interval
-        schedule.every(interval).minutes.do(self._scheduled_position_check)
-        logger.info("Scheduled position checks every %d minutes", interval)
+
+
+        if self.is_paper:
+
+
+            schedule.every(interval).seconds.do(self._scheduled_position_check)
+
+
+            logger.info("Scheduled position checks every %d SECONDS (testing phase)", interval)
+
+
+        else:
+
+
+            schedule.every(interval).minutes.do(self._scheduled_position_check)
+
+
+            logger.info("Scheduled position checks every %d minutes", interval)
         if not self.is_paper:
             recon_interval = max(5, int(getattr(self.config.reconciliation, "interval_minutes", 30) or 30))
             schedule.every(recon_interval).minutes.do(self._scheduled_reconciliation)
@@ -7862,14 +7893,18 @@ class TradingBot:
         """Trigger an extra scan when no positions are open.
 
         When the portfolio is empty we want to find trades ASAP rather than
-        waiting for the next scheduled scan time.  This fires every 2 minutes
+        waiting for the next scheduled scan time.  This fires every 15 seconds
         (configurable) as long as the market is open and there are zero
         open positions.
         """
-        eager_interval_sec = 120  # rescan every 2 min when empty
+        eager_interval_sec = 5  # testing phase: aggressive scanning
+
         open_count = len(self.risk_manager.portfolio.open_positions)
-        if open_count > 0:
+
+        if not self.is_paper and open_count > 0:
+
             return
+
         if not self._is_market_open_now() and not self.is_paper:
             return
         now = self._now_eastern()
@@ -8556,12 +8591,13 @@ class TradingBot:
         )
         self._ui_update_system_status()
 
-        # Run an initial scan immediately when the market is open.
-        if self.is_paper or self._is_market_open_now():
-            logger.info("Running initial scan...")
-            self.scan_and_trade()
-        else:
-            logger.info("Skipping initial scan because market is closed.")
+        # Run an initial scan immediately on startup.
+
+
+        logger.info("Running initial scan...")
+
+
+        self.scan_and_trade()
 
         self._running = True
         logger.info("Bot is now running. Press Ctrl+C to stop.")
@@ -8574,7 +8610,8 @@ class TradingBot:
                 self._maintain_streaming()
                 self._auto_generate_dashboard_if_due()
                 self._ui_update_system_status()
-                time.sleep(1)
+
+                time.sleep(0.5)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
             self._handle_shutdown(signal.SIGINT, None)

@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime
@@ -282,6 +283,93 @@ class SchwabClientParserTests(unittest.TestCase):
         self.assertEqual(result["attempt"], 3)
         self.assertAlmostEqual(float(result["fill_price"]), 0.9, places=4)
         self.assertIn("fill_improvement_vs_mid", result)
+
+    def test_start_streaming_and_quote_subscribe_support_async_methods(self) -> None:
+        class _AsyncStreamClient:
+            def __init__(self, _client, account_id: str):
+                self.account_id = account_id
+                self.logged_in = False
+                self.handler = None
+                self.subscribed_symbols = []
+
+            async def login(self):
+                self.logged_in = True
+
+            def add_level_one_equity_handler(self, handler):
+                self.handler = handler
+
+            async def level_one_equity_subs(self, symbols):
+                self.subscribed_symbols = list(symbols)
+
+        client = SchwabClient(SchwabConfig())
+        client._client = mock.Mock()
+        client._account_hash = "hash123"
+        handler = mock.Mock()
+
+        with mock.patch("schwab.streaming.StreamClient", _AsyncStreamClient):
+            self.assertTrue(client.start_streaming())
+            self.assertTrue(client.stream_quotes(["spy"], handler))
+
+        self.assertTrue(client._stream_client.logged_in)
+        self.assertEqual(client._stream_client.account_id, "hash123")
+        self.assertEqual(client._stream_client.subscribed_symbols, ["SPY"])
+        self.assertIs(client._stream_client.handler, handler)
+
+    def test_stop_streaming_supports_async_logout(self) -> None:
+        class _AsyncLogoutStream:
+            def __init__(self):
+                self.logged_out = False
+
+            async def logout(self):
+                self.logged_out = True
+
+        stream = _AsyncLogoutStream()
+        client = SchwabClient(SchwabConfig())
+        client._stream_client = stream
+        client._stream_connected = True
+
+        client.stop_streaming()
+
+        self.assertTrue(stream.logged_out)
+        self.assertFalse(client.streaming_connected())
+        self.assertIsNone(client._stream_client)
+
+    def test_stream_async_calls_run_on_single_event_loop(self) -> None:
+        stream_ref = {"value": None}
+
+        class _AsyncStreamClient:
+            def __init__(self, _client, account_id: str):
+                self.account_id = account_id
+                self.loop_ids = []
+                self.subscribed_symbols = []
+                stream_ref["value"] = self
+
+            async def login(self):
+                self.loop_ids.append(id(asyncio.get_running_loop()))
+
+            def add_level_one_equity_handler(self, _handler):
+                return None
+
+            async def level_one_equity_subs(self, symbols):
+                self.loop_ids.append(id(asyncio.get_running_loop()))
+                self.subscribed_symbols = list(symbols)
+
+            async def logout(self):
+                self.loop_ids.append(id(asyncio.get_running_loop()))
+
+        client = SchwabClient(SchwabConfig())
+        client._client = mock.Mock()
+        client._account_hash = "hash456"
+
+        with mock.patch("schwab.streaming.StreamClient", _AsyncStreamClient):
+            self.assertTrue(client.start_streaming())
+            self.assertTrue(client.stream_quotes(["spy"], mock.Mock()))
+            client.stop_streaming()
+
+        stream = stream_ref["value"]
+        self.assertIsNotNone(stream)
+        self.assertEqual(stream.subscribed_symbols, ["SPY"])
+        self.assertEqual(len(set(stream.loop_ids)), 1)
 
 
 if __name__ == "__main__":

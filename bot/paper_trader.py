@@ -37,28 +37,31 @@ class PaperTrader:
     def _load_state(self) -> None:
         """Load paper trading state from disk."""
         path = Path(PAPER_TRADES_FILE)
-        if path.exists():
-            try:
-                validate_sensitive_file(
-                    path,
-                    label="paper trading state file",
-                    allow_missing=False,
-                )
-                tighten_file_permissions(path, label="paper trading state file")
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                self.balance = data.get("balance", self.initial_balance)
-                self.positions = data.get("positions", [])
-                self.closed_trades = data.get("closed_trades", [])
-                self.orders = data.get("orders", [])
-                logger.info(
-                    "Loaded paper trading state: balance=$%.2f, %d open positions",
-                    self.balance, len(self.positions),
-                )
-            except RuntimeError:
-                raise
-            except (json.JSONDecodeError, KeyError, FileNotFoundError, OSError) as e:
-                logger.warning("Failed to load paper state: %s. Starting fresh.", e)
+        try:
+            if path.exists():
+                try:
+                    validate_sensitive_file(
+                        path,
+                        label="paper trading state file",
+                        allow_missing=False,
+                    )
+                    tighten_file_permissions(path, label="paper trading state file")
+                    with open(path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    self.balance = data.get("balance", self.initial_balance)
+                    self.positions = data.get("positions", [])
+                    self.closed_trades = data.get("closed_trades", [])
+                    self.orders = data.get("orders", [])
+                    logger.info(
+                        "Loaded paper trading state: balance=$%.2f, %d open positions",
+                        self.balance, len(self.positions),
+                    )
+                except RuntimeError:
+                    raise
+                except (json.JSONDecodeError, KeyError, FileNotFoundError, OSError) as e:
+                    logger.warning("Failed to load paper state: %s. Starting fresh.", e)
+        except PermissionError:
+            logger.warning("Permission denied accessing paper_trades.json. Starting fresh.")
 
     def _save_state(self) -> None:
         """Save paper trading state to disk."""

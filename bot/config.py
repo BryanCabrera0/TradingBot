@@ -686,11 +686,18 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     # regardless of which directory the bot is launched from.
     for env_name in (".env.local", ".env"):
         env_path = config_base_dir / env_name
-        if env_path.exists():
-            load_dotenv(env_path, override=True)
-            break
+        try:
+            if env_path.exists():
+                load_dotenv(env_path, override=True)
+                break
+        except PermissionError:
+            logger.warning(f"Permission denied reading {env_path}, skipping.")
+            continue
     else:
-        load_dotenv()  # Fall back to CWD-based search
+        try:
+            load_dotenv()  # Fall back to CWD-based search
+        except PermissionError:
+            logger.warning("Permission denied reading CWD .env, skipping.")
 
     # Override with environment variables (credentials always from env)
     cfg.schwab.app_key = os.getenv("SCHWAB_APP_KEY", cfg.schwab.app_key)

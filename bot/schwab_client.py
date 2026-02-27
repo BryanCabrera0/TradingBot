@@ -1,11 +1,15 @@
 """Schwab API client wrapper for authentication, market data, and order execution."""
 
+import asyncio
+import concurrent.futures
+import inspect
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import schwab
@@ -48,6 +52,11 @@ class SchwabClient:
         self._stream_client = None
         self._stream_connected = False
         self._stream_last_error: str = ""
+        self._stream_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stream_loop_thread: Optional[threading.Thread] = None
+        self._stream_loop_ready = threading.Event()
+        self._stream_loop_lock = threading.Lock()
+        self._stream_message_future: Optional[concurrent.futures.Future] = None
 
     def connect(self) -> None:
         """Authenticate and create the API client."""
@@ -63,19 +72,26 @@ class SchwabClient:
                 label="Schwab token file",
                 allow_missing=True,
             )
-            if token_path.exists():
-                tighten_file_permissions(token_path, label="Schwab token file")
+            try:
+                if token_path.exists():
+                    tighten_file_permissions(token_path, label="Schwab token file")
+            except PermissionError:
+                pass
+
+            # ── Check token expiry BEFORE connecting ──
+            self._check_token_age(token_path)
+
             self._client = schwab.auth.client_from_token_file(
                 token_path_str,
                 self.config.app_key,
                 self.config.app_secret,
             )
-            if token_path.exists():
-                tighten_file_permissions(token_path, label="Schwab token file")
+            try:
+                if token_path.exists():
+                    tighten_file_permissions(token_path, label="Schwab token file")
+            except PermissionError:
+                pass
             logger.info("Authenticated via existing token file.")
-
-            # ── Token expiry warning ──────────────────────────────────
-            self._check_token_age(token_path)
 
         except FileNotFoundError:
             logger.info(
@@ -117,10 +133,14 @@ class SchwabClient:
                     "╰──────────────────────────────────────────────────────╯\n"
                 ).replace("{days:.1f}", f"{days_old:.1f}")
                 print(msg)
-                logger.warning(
+                logger.error(
                     "Schwab refresh token EXPIRED (%.1f days old). "
                     "Run `python3 -m bot.auth` to re-authenticate.",
                     days_old,
+                )
+                raise RuntimeError(
+                    f"Schwab refresh token EXPIRED ({days_old:.1f} days old). "
+                    "Run `python3 -m bot.auth` to grant a new 7-day token."
                 )
             elif days_old >= 6.0:
                 hours_left = max(0.0, (7.0 - days_old) * 24.0)
@@ -141,14 +161,150 @@ class SchwabClient:
                     "Run `python3 -m bot.auth` soon.",
                     hours_left,
                 )
-        except Exception:
-            pass  # Non-critical — don't block startup
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.debug("Minor error reading token age: %s", e)
 
     @property
     def client(self):
         if self._client is None:
             raise RuntimeError("Client not connected. Call connect() first.")
         return self._client
+
+    def _ensure_stream_loop(self) -> asyncio.AbstractEventLoop:
+        """Ensure stream async operations run on a single dedicated loop."""
+        with self._stream_loop_lock:
+            if self._stream_loop and self._stream_loop.is_running():
+                return self._stream_loop
+
+            self._stream_loop_ready.clear()
+
+            def _runner() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._stream_loop = loop
+                self._stream_loop_ready.set()
+                loop.run_forever()
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    for task in pending:
+                        task.cancel()
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+            self._stream_loop_thread = threading.Thread(
+                target=_runner,
+                name="SchwabStreamLoop",
+                daemon=True,
+            )
+            self._stream_loop_thread.start()
+
+        if not self._stream_loop_ready.wait(timeout=2.0):
+            raise RuntimeError("Timed out starting Schwab streaming event loop.")
+        if self._stream_loop is None:
+            raise RuntimeError("Schwab streaming event loop failed to initialize.")
+        return self._stream_loop
+
+    def _stop_stream_loop(self) -> None:
+        with self._stream_loop_lock:
+            loop = self._stream_loop
+            thread = self._stream_loop_thread
+            self._stream_loop = None
+            self._stream_loop_thread = None
+            self._stream_loop_ready.clear()
+
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def _run_coroutine_sync(self, awaitable: Any, *, timeout_seconds: float = 15.0):
+        """Run an awaitable on the dedicated stream loop and wait for result."""
+        loop = self._ensure_stream_loop()
+        future = asyncio.run_coroutine_threadsafe(awaitable, loop)
+        try:
+            return future.result(timeout=max(0.1, float(timeout_seconds)))
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise RuntimeError("Timed out waiting for Schwab streaming operation.") from exc
+
+    def _run_in_stream_loop(self, func, *args, timeout_seconds: float = 15.0, **kwargs):
+        """Run a synchronous callable on the dedicated stream loop thread."""
+        if self._stream_loop_thread and threading.current_thread() is self._stream_loop_thread:
+            return func(*args, **kwargs)
+
+        loop = self._ensure_stream_loop()
+        result_future: concurrent.futures.Future = concurrent.futures.Future()
+
+        def _invoke() -> None:
+            try:
+                result_future.set_result(func(*args, **kwargs))
+            except Exception as exc:
+                result_future.set_exception(exc)
+
+        loop.call_soon_threadsafe(_invoke)
+        try:
+            return result_future.result(timeout=max(0.1, float(timeout_seconds)))
+        except concurrent.futures.TimeoutError as exc:
+            result_future.cancel()
+            raise RuntimeError("Timed out waiting for Schwab stream loop callback.") from exc
+
+    async def _stream_message_loop(self) -> None:
+        """Continuously process stream messages while connected."""
+        while self._stream_connected and self._stream_client is not None:
+            handle_message = getattr(self._stream_client, "handle_message", None)
+            if not callable(handle_message):
+                return
+            try:
+                result = handle_message()
+                if inspect.isawaitable(result):
+                    await result
+                else:
+                    await asyncio.sleep(0.25)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._stream_last_error = str(exc)
+                self._stream_connected = False
+                logger.warning("Schwab streaming message loop stopped: %s", exc)
+                return
+
+    def _start_stream_message_loop(self) -> None:
+        if not self._stream_client:
+            return
+        if self._stream_message_future and not self._stream_message_future.done():
+            return
+        handle_message = getattr(self._stream_client, "handle_message", None)
+        if not callable(handle_message):
+            return
+        loop = self._ensure_stream_loop()
+        self._stream_message_future = asyncio.run_coroutine_threadsafe(
+            self._stream_message_loop(),
+            loop,
+        )
+
+    def _stop_stream_message_loop(self) -> None:
+        future = self._stream_message_future
+        self._stream_message_future = None
+        if not future or future.done():
+            return
+        future.cancel()
+        try:
+            future.result(timeout=1.0)
+        except Exception:
+            pass
+
+    def _run_stream_callable(self, func, *args, timeout_seconds: float = 15.0, **kwargs):
+        result = self._run_in_stream_loop(
+            func,
+            *args,
+            timeout_seconds=timeout_seconds,
+            **kwargs,
+        )
+        if inspect.isawaitable(result):
+            return self._run_coroutine_sync(result, timeout_seconds=timeout_seconds)
+        return result
 
     def start_streaming(self) -> bool:
         """Best-effort start of Schwab streaming; returns False on unsupported setups."""
@@ -164,32 +320,44 @@ class SchwabClient:
 
         try:  # pragma: no cover - runtime integration
             account_hash = self._require_account_hash()
-            stream_client = StreamClient(self.client, account_id=account_hash)
-            stream_client.login()
+            stream_client = self._run_in_stream_loop(
+                StreamClient,
+                self.client,
+                account_id=account_hash,
+                timeout_seconds=10.0,
+            )
+            self._run_stream_callable(stream_client.login, timeout_seconds=20.0)
             self._stream_client = stream_client
             self._stream_connected = True
             self._stream_last_error = ""
+            self._start_stream_message_loop()
             logger.info("Schwab streaming connected.")
             return True
         except Exception as exc:
             self._stream_last_error = str(exc)
             self._stream_connected = False
             self._stream_client = None
+            self._stop_stream_message_loop()
+            self._stop_stream_loop()
             logger.warning("Schwab streaming unavailable, using polling fallback: %s", exc)
             return False
 
     def stop_streaming(self) -> None:
         if not self._stream_client:
             self._stream_connected = False
+            self._stop_stream_message_loop()
+            self._stop_stream_loop()
             return
+        self._stream_connected = False
+        self._stop_stream_message_loop()
         try:  # pragma: no cover - runtime integration
             logout = getattr(self._stream_client, "logout", None)
             if callable(logout):
-                logout()
+                self._run_stream_callable(logout, timeout_seconds=10.0)
         except Exception:
             pass
-        self._stream_connected = False
         self._stream_client = None
+        self._stop_stream_loop()
 
     def streaming_connected(self) -> bool:
         return bool(self._stream_connected)
@@ -204,9 +372,13 @@ class SchwabClient:
             add_handler = getattr(self._stream_client, "add_level_one_equity_handler", None)
             subscribe = getattr(self._stream_client, "level_one_equity_subs", None)
             if callable(add_handler):
-                add_handler(handler)
+                self._run_stream_callable(add_handler, handler)
             if callable(subscribe):
-                subscribe([symbol.upper() for symbol in symbols])
+                self._run_stream_callable(
+                    subscribe,
+                    [symbol.upper() for symbol in symbols],
+                    timeout_seconds=20.0,
+                )
             return True
         except Exception as exc:
             self._stream_last_error = str(exc)
@@ -224,9 +396,9 @@ class SchwabClient:
             add_handler = getattr(self._stream_client, "add_level_one_option_handler", None)
             subscribe = getattr(self._stream_client, "level_one_option_subs", None)
             if callable(add_handler):
-                add_handler(handler)
+                self._run_stream_callable(add_handler, handler)
             if callable(subscribe):
-                subscribe(option_symbols)
+                self._run_stream_callable(subscribe, option_symbols, timeout_seconds=20.0)
             return True
         except Exception as exc:
             self._stream_last_error = str(exc)
@@ -242,9 +414,9 @@ class SchwabClient:
             add_handler = getattr(self._stream_client, "add_account_activity_handler", None)
             subscribe = getattr(self._stream_client, "account_activity_sub", None)
             if callable(add_handler):
-                add_handler(handler)
+                self._run_stream_callable(add_handler, handler)
             if callable(subscribe):
-                subscribe()
+                self._run_stream_callable(subscribe, timeout_seconds=20.0)
             return True
         except Exception as exc:
             self._stream_last_error = str(exc)

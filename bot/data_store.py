@@ -24,7 +24,11 @@ def ensure_data_dir(path: Path | str = DEFAULT_DATA_DIR) -> Path:
 def load_json(path: Path | str, default: Any) -> Any:
     """Read JSON from disk and fall back to ``default`` on missing/invalid payloads."""
     target = Path(path)
-    if not target.exists():
+    try:
+        if not target.exists():
+            return default
+    except PermissionError:
+        logger.warning(f"Permission denied accessing {target}, using default.")
         return default
 
     try:
@@ -41,8 +45,11 @@ def dump_json(path: Path | str, payload: Any, *, indent: int = 2) -> None:
     """Atomically persist JSON payload to disk."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_private(
-        target,
-        json.dumps(payload, indent=indent, default=str),
-        label=f"data file {target}",
-    )
+    try:
+        atomic_write_private(
+            target,
+            json.dumps(payload, indent=indent, default=str),
+            label=f"data file {target}",
+        )
+    except PermissionError:
+        logger.warning(f"Permission denied writing to {target}, analytics data not saved.")

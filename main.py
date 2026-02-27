@@ -92,18 +92,21 @@ def setup_logging(
     root_logger.addHandler(console)
 
     # Rotating file handler for long-running process safety.
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=max(1024, int(max_bytes)),
-        backupCount=max(1, int(backup_count)),
-    )
-    file_handler.setLevel(log_level)
-    file_fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    file_handler.setFormatter(file_fmt)
-    root_logger.addHandler(file_handler)
+    try:
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max(1024, int(max_bytes)),
+            backupCount=max(1, int(backup_count)),
+        )
+        file_handler.setLevel(log_level)
+        file_fmt = logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        file_handler.setFormatter(file_fmt)
+        root_logger.addHandler(file_handler)
+    except PermissionError:
+        root_logger.warning(f"Permission denied writing to {log_file}, skipping file logging.")
 
 
 def print_banner() -> None:
@@ -190,12 +193,16 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
 
     try:
         validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+    except PermissionError:
+        pass  # File exists but is locked; assume it is valid for now.
     except FileNotFoundError:
         print(f"Schwab token file is missing at {token_path}")
         if _auth_prompt():
             _run_inline_auth()
             try:
                 validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+            except PermissionError:
+                pass
             except Exception:
                 print("Token check failed after auth. Please re-run the command.")
                 return False
@@ -256,6 +263,19 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
     print("\n=== TradingBot Integrated Diagnostics ===")
     print(f"Mode hint: {mode_hint.upper()}")
     print(f"Symbol: {symbol}")
+    client: Optional[SchwabClient] = None
+    bot: Optional[TradingBot] = None
+
+    def _cleanup_streaming() -> None:
+        for candidate in (
+            getattr(bot, "schwab", None),
+            client,
+        ):
+            try:
+                if candidate is not None:
+                    candidate.stop_streaming()
+            except Exception:
+                pass
 
     token_path = Path(config.schwab.token_path).expanduser()
     if not token_path.is_absolute():
@@ -275,6 +295,7 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         print("Schwab auth: OK")
     except Exception as exc:
         print(f"Schwab auth: FAILED ({exc})")
+        _cleanup_streaming()
         return 1
 
     try:
@@ -295,12 +316,13 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         )
     except Exception as exc:
         print(f"SPY chain fetch/parse: FAILED ({exc})")
+        _cleanup_streaming()
         return 1
 
     try:
         diag_cfg = copy.deepcopy(config)
         diag_cfg.terminal_ui.enabled = False
-        bot = TradingBot(diag_cfg)
+        bot = TradingBot(diag_cfg, warn_unclean_shutdown=False)
         bot.connect()
         bot._update_portfolio_state()
         entries_allowed = bot._entries_allowed()
@@ -356,6 +378,7 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         print(f"Signal counts by strategy: {strategy_signal_counts}")
         if not candidates:
             print("Entry candidates: 0 (strategy layer produced no signals)")
+            _cleanup_streaming()
             return 0
 
         candidates.sort(
@@ -366,6 +389,7 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         analysis = signal.analysis
         if analysis is None:
             print("Top candidate has no analysis payload.")
+            _cleanup_streaming()
             return 0
 
         mtf_ok, mtf_agreement, _ = bot._passes_multi_timeframe_confirmation(signal)
@@ -402,9 +426,11 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         )
     except Exception as exc:
         print(f"Orchestrator diagnostics: FAILED ({exc})")
+        _cleanup_streaming()
         return 1
 
     print("Diagnostics complete.")
+    _cleanup_streaming()
     return 0
 
 
@@ -963,14 +989,17 @@ def main() -> None:
         print(preflight_message)
         return
 
+    once_clean_shutdown = False
     try:
         if args.once:
             logger.info("Running single scan cycle...")
+            bot._write_runtime_state(clean_shutdown=False, note="once_starting")
             bot.connect()
             bot.validate_llm_readiness()
             bot.scan_and_trade()
             if config.trading_mode == "paper":
                 show_report()
+            once_clean_shutdown = True
         else:
             if interactive_menu_requested and sys.stdin.isatty():
                 dashboard_action, dashboard_listener_stop, dashboard_listener = (
@@ -980,6 +1009,18 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nRun interrupted by user.")
     finally:
+        if args.once:
+            try:
+                bot._write_runtime_state(
+                    clean_shutdown=once_clean_shutdown,
+                    note="once_complete" if once_clean_shutdown else "once_failed",
+                )
+            except Exception:
+                pass
+            try:
+                bot.schwab.stop_streaming()
+            except Exception:
+                pass
         if dashboard_listener_stop:
             dashboard_listener_stop.set()
         if dashboard_listener and dashboard_listener.is_alive():

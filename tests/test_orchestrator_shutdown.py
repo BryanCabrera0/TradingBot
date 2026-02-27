@@ -95,10 +95,23 @@ class OrchestratorShutdownTests(unittest.TestCase):
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertTrue(payload.get("clean_shutdown"))
 
-    def test_warns_when_clean_shutdown_flag_missing(self) -> None:
+    def test_no_warning_when_runtime_state_file_missing(self) -> None:
         bot = TradingBot(_live_config())
         with tempfile.TemporaryDirectory() as tmp_dir:
             bot._runtime_state_path = Path(tmp_dir) / "runtime_state.json"
+            with mock.patch("bot.orchestrator.logger.warning") as warning_mock:
+                bot._warn_if_unclean_previous_shutdown()
+            warning_mock.assert_not_called()
+
+    def test_warns_when_clean_shutdown_flag_is_false(self) -> None:
+        bot = TradingBot(_live_config())
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_path = Path(tmp_dir) / "runtime_state.json"
+            state_path.write_text(
+                json.dumps({"clean_shutdown": False}),
+                encoding="utf-8",
+            )
+            bot._runtime_state_path = state_path
             with self.assertLogs("bot.orchestrator", level="WARNING") as captured:
                 bot._warn_if_unclean_previous_shutdown()
             self.assertTrue(any("clean shutdown flag missing" in line.lower() for line in captured.output))
