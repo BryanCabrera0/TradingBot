@@ -1098,18 +1098,12 @@ def validate_config(cfg: BotConfig) -> ConfigValidationReport:
         report.passed.append("hedging disabled")
 
     overlap_pairs = _strategy_dte_overlaps(cfg)
-    if overlap_pairs:
+    if overlap_pairs and int(cfg.risk.max_positions_per_symbol) <= 1:
         joined = ", ".join(overlap_pairs)
-        if int(cfg.risk.max_positions_per_symbol) > 1:
-            report.warnings.append(
-                "Overlapping strategy DTE windows may cause double entries: "
-                f"{joined}. max_positions_per_symbol={cfg.risk.max_positions_per_symbol} allows this."
-            )
-        else:
-            report.warnings.append(
-                "Overlapping strategy DTE windows detected but max_positions_per_symbol=1: "
-                + joined
-            )
+        report.warnings.append(
+            "Overlapping strategy DTE windows detected but max_positions_per_symbol=1: "
+            + joined
+        )
     else:
         report.passed.append("strategy DTE overlap check")
 
