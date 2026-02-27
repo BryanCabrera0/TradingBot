@@ -18,7 +18,7 @@ from bot.strategies.base import TradeSignal
 
 logger = logging.getLogger(__name__)
 
-SECTOR_MAP_PATH = Path("bot/data/sector_map.json")
+SECTOR_MAP_PATH = Path(__file__).resolve().parent / "data" / "sector_map.json"
 
 
 @dataclass

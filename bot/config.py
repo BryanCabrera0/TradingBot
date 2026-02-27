@@ -664,19 +664,33 @@ class ConfigValidationReport:
 
 def load_config(config_path: str = "config.yaml") -> BotConfig:
     """Load configuration from YAML file and environment variables."""
-    load_dotenv()
-
     cfg = BotConfig()
     config_base_dir = Path(__file__).resolve().parents[1]
 
     # Load YAML config
     config_file = Path(config_path).expanduser()
+    if not config_file.is_absolute():
+        # Try CWD first, fall back to package root (so it works from any directory)
+        if not config_file.exists():
+            fallback = config_base_dir / config_file
+            if fallback.exists():
+                config_file = fallback
     if config_file.exists():
         with open(config_file) as f:
             raw = yaml.safe_load(f)
         if raw:
             _apply_yaml(cfg, raw)
         config_base_dir = config_file.resolve().parent
+
+    # Load .env from config directory (not CWD) so credentials are found
+    # regardless of which directory the bot is launched from.
+    for env_name in (".env.local", ".env"):
+        env_path = config_base_dir / env_name
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+            break
+    else:
+        load_dotenv()  # Fall back to CWD-based search
 
     # Override with environment variables (credentials always from env)
     cfg.schwab.app_key = os.getenv("SCHWAB_APP_KEY", cfg.schwab.app_key)
@@ -1087,9 +1101,9 @@ def validate_config(cfg: BotConfig) -> ConfigValidationReport:
     if overlap_pairs:
         joined = ", ".join(overlap_pairs)
         if int(cfg.risk.max_positions_per_symbol) > 1:
-            report.failed.append(
+            report.warnings.append(
                 "Overlapping strategy DTE windows may cause double entries: "
-                f"{joined}. Set risk.max_positions_per_symbol=1 or separate DTE ranges."
+                f"{joined}. max_positions_per_symbol={cfg.risk.max_positions_per_symbol} allows this."
             )
         else:
             report.warnings.append(

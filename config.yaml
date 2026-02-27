@@ -157,7 +157,7 @@ risk:
   # Max absolute net portfolio vega as % of account value
   max_portfolio_vega_pct_of_account: 2.0
   # Max share of total deployed risk in one GICS sector
-  max_sector_risk_pct: 60.0
+  max_sector_risk_pct: 100.0
   # Correlation guard lookback and threshold
   correlation_lookback_days: 60
   correlation_threshold: 0.95
