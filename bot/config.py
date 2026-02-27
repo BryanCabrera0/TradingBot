@@ -667,14 +667,16 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     load_dotenv()
 
     cfg = BotConfig()
+    config_base_dir = Path(__file__).resolve().parents[1]
 
     # Load YAML config
-    config_file = Path(config_path)
+    config_file = Path(config_path).expanduser()
     if config_file.exists():
         with open(config_file) as f:
             raw = yaml.safe_load(f)
         if raw:
             _apply_yaml(cfg, raw)
+        config_base_dir = config_file.resolve().parent
 
     # Override with environment variables (credentials always from env)
     cfg.schwab.app_key = os.getenv("SCHWAB_APP_KEY", cfg.schwab.app_key)
@@ -683,6 +685,10 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "SCHWAB_CALLBACK_URL", cfg.schwab.callback_url
     )
     cfg.schwab.token_path = os.getenv("SCHWAB_TOKEN_PATH", cfg.schwab.token_path)
+    token_path = Path(cfg.schwab.token_path).expanduser()
+    if not token_path.is_absolute():
+        token_path = (config_base_dir / token_path).resolve()
+    cfg.schwab.token_path = str(token_path)
     cfg.schwab.account_hash = os.getenv(
         "SCHWAB_ACCOUNT_HASH", cfg.schwab.account_hash
     )

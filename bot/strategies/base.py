@@ -60,8 +60,9 @@ class BaseStrategy(ABC):
 
     def meets_minimum_quality(self, analysis: SpreadAnalysis) -> bool:
         """Check if a spread analysis meets minimum quality thresholds."""
-        min_credit_pct = self.config.get("min_credit_pct", 0.25)
-        min_score = 40.0
+        min_credit_pct = self.config.get("min_credit_pct", 0.06)
+        min_score = self.config.get("min_score", 20.0)
+        min_pop = self.config.get("min_pop", 0.30)
 
         if analysis.credit <= 0:
             self.logger.debug("Rejected: zero or negative credit")
@@ -75,10 +76,11 @@ class BaseStrategy(ABC):
             )
             return False
 
-        if analysis.probability_of_profit < 0.50:
+        if analysis.probability_of_profit < min_pop:
             self.logger.debug(
-                "Rejected: POP %.1f%% < 50%%",
+                "Rejected: POP %.1f%% < %.0f%%",
                 analysis.probability_of_profit * 100,
+                min_pop * 100,
             )
             return False
 

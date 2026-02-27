@@ -29,13 +29,18 @@ class PortfolioHedger:
         net_delta: float,
         sector_exposure: dict,
         regime: str = "normal",
+        existing_hedge_symbols: set | None = None,
     ) -> list[HedgeAction]:
         if not bool(self.config.get("enabled", False)):
             return []
 
+        _existing = existing_hedge_symbols or set()
         actions: list[HedgeAction] = []
         delta_trigger = float(self.config.get("delta_hedge_trigger", 50.0))
         if abs(net_delta) > delta_trigger:
+            # Skip if we already have an active delta hedge for SPY
+            if "SPY" in _existing:
+                return []
             excess = abs(net_delta) - delta_trigger
             qty = max(1, int(round(excess / 20.0)))
             direction = "buy_put" if net_delta > 0 else "sell_call_spread"

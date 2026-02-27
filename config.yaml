@@ -10,28 +10,28 @@ strategies:
     enabled: true
     # "bull_put", "bear_call", or "both"
     direction: both
-    # Days to expiration range
-    min_dte: 20
-    max_dte: 45
-    # Target delta for short leg
-    short_delta: 0.30
+    # Days to expiration range — wider window to find more trades
+    min_dte: 7
+    max_dte: 60
+    # Target delta for short leg — closer to ATM = more premium
+    short_delta: 0.35
     # Width of spread in strikes
     spread_width: 5
-    # Minimum credit to collect as % of spread width
-    min_credit_pct: 0.30
+    # Minimum credit to collect as % of spread width — lowered to accept more trades
+    min_credit_pct: 0.06
     # Close at this % of max profit
     profit_target_pct: 0.50
     # Close at this % loss of credit received
     stop_loss_pct: 2.0
 
   iron_condors:
-    enabled: false
-    min_dte: 25
+    enabled: true
+    min_dte: 7
     max_dte: 50
-    # Target delta for short legs
-    short_delta: 0.16
+    # Target delta for short legs — closer to money
+    short_delta: 0.25
     spread_width: 5
-    min_credit_pct: 0.30
+    min_credit_pct: 0.08
     profit_target_pct: 0.50
     stop_loss_pct: 2.0
 
@@ -45,41 +45,41 @@ strategies:
     tickers: []
 
   naked_puts:
-    enabled: false
-    min_dte: 25
+    enabled: true
+    min_dte: 7
     max_dte: 45
-    short_delta: 0.22
+    short_delta: 0.30
     profit_target_pct: 0.50
-    exit_dte: 21
+    exit_dte: 5
 
   calendar_spreads:
-    enabled: false
-    front_min_dte: 20
+    enabled: true
+    front_min_dte: 14
     front_max_dte: 30
-    back_min_dte: 50
+    back_min_dte: 35
     back_max_dte: 60
     profit_target_pct: 0.25
-    exit_dte: 7
+    exit_dte: 5
 
   strangles:
-    enabled: false
-    min_iv_rank: 70.0
-    short_delta: 0.16
-    min_account_balance: 25000.0
+    enabled: true
+    min_iv_rank: 40.0
+    short_delta: 0.25
+    min_account_balance: 5000.0
     allow_straddles_on: ["SPY", "QQQ", "IWM"]
-    min_dte: 20
+    min_dte: 7
     max_dte: 45
     profit_target_pct: 0.50
     stop_loss_multiple: 2.0
 
   broken_wing_butterfly:
-    enabled: false
-    min_dte: 20
+    enabled: true
+    min_dte: 7
     max_dte: 45
     short_delta: 0.30
     near_wing_width: 5.0
     far_wing_width: 10.0
-    min_credit: 0.10
+    min_credit: 0.05
 
   earnings_vol_crush:
     enabled: false
@@ -97,9 +97,9 @@ strategies:
 scanner:
   enabled: true
   # How many top tickers to trade from scan results
-  max_scan_results: 20
-  # Cache results for 30 minutes (avoid redundant API calls)
-  cache_seconds: 1800
+  max_scan_results: 30
+  # Cache results for 10 minutes — scan more often
+  cache_seconds: 600
   # Only consider stocks in this price range
   min_price: 10
   max_price: 0  # 0 = no upper limit
@@ -136,60 +136,60 @@ watchlist:
   - NVDA
   - TSLA
 
-# Risk management
+# Risk management — AGGRESSIVE for paper trading / model training
 risk:
   # Max % of account value at risk across all positions
-  max_portfolio_risk_pct: 5.0
+  max_portfolio_risk_pct: 15.0
   # Max % of account in a single position
-  max_position_risk_pct: 2.0
+  max_position_risk_pct: 5.0
   # Max number of open positions
-  max_open_positions: 10
+  max_open_positions: 30
   # Max number of positions per underlying
-  max_positions_per_symbol: 2
+  max_positions_per_symbol: 4
   # Min account balance to keep trading
-  min_account_balance: 5000
+  min_account_balance: 1000
   # Max daily loss before stopping (% of account)
-  max_daily_loss_pct: 3.0
+  max_daily_loss_pct: 15.0
   # Proxy downside risk used for covered-call risk budgeting
-  covered_call_notional_risk_pct: 20.0
+  covered_call_notional_risk_pct: 30.0
   # Max absolute net portfolio delta
-  max_portfolio_delta_abs: 50.0
+  max_portfolio_delta_abs: 150.0
   # Max absolute net portfolio vega as % of account value
-  max_portfolio_vega_pct_of_account: 0.5
+  max_portfolio_vega_pct_of_account: 2.0
   # Max share of total deployed risk in one GICS sector
-  max_sector_risk_pct: 40.0
+  max_sector_risk_pct: 60.0
   # Correlation guard lookback and threshold
   correlation_lookback_days: 60
-  correlation_threshold: 0.8
+  correlation_threshold: 0.95
   # Portfolio-level average correlation guard
-  max_portfolio_correlation: 0.85
+  max_portfolio_correlation: 0.95
   # Parametric VaR guardrails (disabled by default)
   var_enabled: false
   var_lookback_days: 60
-  var_limit_pct_95: 3.0
-  var_limit_pct_99: 5.0
-  correlated_loss_threshold: 3
-  correlated_loss_pct: 0.50
-  correlated_loss_cooldown_hours: 2
-  gamma_week_tight_stop: 1.5
-  expiration_day_close_pct: 0.03
+  var_limit_pct_95: 8.0
+  var_limit_pct_99: 12.0
+  correlated_loss_threshold: 6
+  correlated_loss_pct: 0.80
+  correlated_loss_cooldown_hours: 0
+  gamma_week_tight_stop: 3.0
+  expiration_day_close_pct: 0.01
 
 risk_profiles:
   conservative:
-    max_portfolio_risk_pct: 3.0
-    max_position_risk_pct: 1.0
-    max_open_positions: 5
-    max_daily_loss_pct: 2.0
-  moderate:
     max_portfolio_risk_pct: 5.0
     max_position_risk_pct: 2.0
     max_open_positions: 10
     max_daily_loss_pct: 3.0
+  moderate:
+    max_portfolio_risk_pct: 10.0
+    max_position_risk_pct: 4.0
+    max_open_positions: 20
+    max_daily_loss_pct: 8.0
   aggressive:
-    max_portfolio_risk_pct: 8.0
-    max_position_risk_pct: 3.0
-    max_open_positions: 15
-    max_daily_loss_pct: 5.0
+    max_portfolio_risk_pct: 15.0
+    max_position_risk_pct: 5.0
+    max_open_positions: 30
+    max_daily_loss_pct: 15.0
 
 sizing:
   method: fixed   # fixed | kelly
@@ -202,15 +202,15 @@ sizing:
   max_scale_down: 0.50
 
 strategy_allocation:
-  enabled: true
+  enabled: false
   lookback_trades: 30
   min_sharpe_for_boost: 1.5
-  cold_start_penalty: 0.75
+  cold_start_penalty: 1.0
   cold_start_window_days: 60
   cold_start_min_trades: 10
 
 greeks_budget:
-  enabled: true
+  enabled: false
   reduce_size_to_fit: true
   limits:
     BULL_TREND:
@@ -303,15 +303,15 @@ llm_strategist:
   max_directives: 3
 
 circuit_breakers:
-  strategy_loss_streak_limit: 5
-  strategy_cooldown_hours: 24
-  symbol_loss_streak_limit: 2
-  symbol_blacklist_days: 7
-  portfolio_drawdown_halt_pct: 5.0
-  portfolio_halt_hours: 48
-  api_error_rate_threshold: 0.30
-  api_window_minutes: 10
-  llm_timeout_streak: 3
+  strategy_loss_streak_limit: 20
+  strategy_cooldown_hours: 1
+  symbol_loss_streak_limit: 10
+  symbol_blacklist_days: 1
+  portfolio_drawdown_halt_pct: 25.0
+  portfolio_halt_hours: 1
+  api_error_rate_threshold: 0.50
+  api_window_minutes: 5
+  llm_timeout_streak: 10
 
 degradation:
   enabled: true
@@ -324,11 +324,34 @@ degradation:
 schedule:
   # Market scan times (Eastern Time, 24h format)
   scan_times:
-    - "09:45"
-    - "11:00"
-    - "14:00"
+    - "09:35"
+    - "09:50"
+    - "10:05"
+    - "10:20"
+    - "10:35"
+    - "10:50"
+    - "11:05"
+    - "11:20"
+    - "11:35"
+    - "11:50"
+    - "12:05"
+    - "12:20"
+    - "12:35"
+    - "12:50"
+    - "13:05"
+    - "13:20"
+    - "13:35"
+    - "13:50"
+    - "14:05"
+    - "14:20"
+    - "14:35"
+    - "14:50"
+    - "15:05"
+    - "15:20"
+    - "15:35"
+    - "15:45"
   # Position check interval in minutes
-  position_check_interval: 15
+  position_check_interval: 5
   # Only trade on weekdays
   trading_days:
     - monday
@@ -349,8 +372,8 @@ execution:
   # Cancel/re-evaluate working entries when underlying moves this much (%)
   market_move_cancel_pct: 1.0
   # Avoid poor execution windows for entries (exits are exempt)
-  block_first_minutes: 15
-  block_last_minutes: 10
+  block_first_minutes: 3
+  block_last_minutes: 3
   # Smart execution ladder controls
   entry_step_timeout_seconds: 45
   exit_step_timeout_seconds: 60
@@ -370,7 +393,7 @@ signal_ranking:
   weight_vol_premium: 0.10
   ml_score_weight: 0.25
   top_ranked_to_log: 5
-max_signals_per_symbol_per_strategy: 2
+max_signals_per_symbol_per_strategy: 4
 
 ml_scorer:
   enabled: true
@@ -389,10 +412,10 @@ theta_harvest:
   cutoff_hour: 14
 
 correlation_monitor:
-  enabled: true
+  enabled: false
   lookback_days: 20
-  crisis_threshold: 0.95
-  stress_threshold: 0.85
+  crisis_threshold: 0.99
+  stress_threshold: 0.95
 
 execution_timing:
   adaptive: true
@@ -422,15 +445,15 @@ reconciliation:
   auto_import: true
 
 multi_timeframe:
-  enabled: true
-  min_agreement: 2
+  enabled: false
+  min_agreement: 1
 
 cooldown:
   graduated: true
-  level_1_losses: 2
-  level_1_reduction: 0.25
-  level_2_losses: 3
-  level_2_reduction: 0.50
+  level_1_losses: 8
+  level_1_reduction: 0.10
+  level_2_losses: 15
+  level_2_reduction: 0.25
 
 # Optional LLM advisor
 # Use provider "ollama" for local models on your Mac, or "google" for cloud.
@@ -440,10 +463,10 @@ llm:
   model: gemini-2.5-pro
   base_url: http://127.0.0.1:11434
   mode: advisory   # advisory | blocking
-  risk_style: moderate   # conservative | moderate | aggressive
+  risk_style: aggressive   # conservative | moderate | aggressive
   timeout_seconds: 20
-  temperature: 0.1
-  min_confidence: 0.55
+  temperature: 0.3
+  min_confidence: 0.30
   track_record_file: bot/data/llm_track_record.json
   reasoning_effort: high
   text_verbosity: low
@@ -455,9 +478,9 @@ llm:
     - google:gemini-2.5-flash
   ensemble_agreement_threshold: 0.66
   multi_turn_enabled: true
-  multi_turn_confidence_threshold: 70
-  adversarial_review_enabled: true
-  adversarial_loss_threshold_pct: 0.50
+  multi_turn_confidence_threshold: 40
+  adversarial_review_enabled: false
+  adversarial_loss_threshold_pct: 1.00
   journal_enabled: false
   journal_file: bot/data/trade_journal.json
   journal_context_entries: 20

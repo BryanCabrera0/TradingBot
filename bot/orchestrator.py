@@ -2438,11 +2438,28 @@ class TradingBot:
     def _apply_hedging_layer(self) -> None:
         """Create optional hedge recommendations and optionally execute."""
         account_value = float(self.risk_manager.portfolio.account_balance or 0.0)
+
+        # Collect symbols that already have open hedge positions
+        existing_hedge_symbols: set[str] = set()
+        hedge_count = 0
+        for pos in self.risk_manager.portfolio.open_positions:
+            if not isinstance(pos, dict):
+                continue
+            if str(pos.get("strategy", "")).lower() == "hedge":
+                existing_hedge_symbols.add(str(pos.get("symbol", "")))
+                hedge_count += 1
+
+        # Hard cap: never exceed 3 total hedge positions
+        MAX_HEDGE_POSITIONS = 3
+        if hedge_count >= MAX_HEDGE_POSITIONS:
+            return
+
         actions = self.hedger.propose(
             account_value=account_value,
             net_delta=float(self.risk_manager.portfolio.net_delta or 0.0),
             sector_exposure=self.risk_manager.portfolio.sector_risk,
             regime=str(self.circuit_state.get("regime", "normal")),
+            existing_hedge_symbols=existing_hedge_symbols,
         )
         if not actions:
             return

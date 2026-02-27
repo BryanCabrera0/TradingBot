@@ -272,8 +272,26 @@ class SchwabClient:
                 last_exc = exc
                 response = getattr(exc, "response", None)
                 status_code = getattr(response, "status_code", None)
+                err_msg = str(exc)
+                if "refresh_token_authentication_error" in err_msg:
+                    logger.error(
+                        "Schwab refresh token authentication failed. "
+                        "Token may be expired or invalid."
+                    )
+                    raise RuntimeError(
+                        "Schwab refresh token expired or invalid. "
+                        "Run `tradingbot auth` (or `python3 main.py auth`) once to re-authenticate."
+                    ) from exc
+
                 if status_code == 401:
-                    logger.warning("Schwab token may be expired — re-authentication needed")
+                    logger.error("Schwab API returned 401 Unauthorized.")
+                    raise RuntimeError(
+                        "Schwab API unauthorized (401). Token may be stale or account permissions changed. "
+                        "Try `tradingbot auth` (or `python3 main.py auth`)."
+                    ) from exc
+
+                if status_code == 400:
+                    logger.warning("Schwab API call failed with 400 Bad Request. Aborting retries for this symbol. (%s)", err_msg)
                     raise
 
                 if attempt >= retries:

@@ -39,9 +39,9 @@ RISK_POLICIES = {
         "default_risk_adjustment_cap": 0.80,
     },
     "aggressive": {
-        "min_probability_of_profit": 0.52,
-        "min_score": 42.0,
-        "min_credit_to_max_loss": 0.14,
+        "min_probability_of_profit": 0.35,
+        "min_score": 25.0,
+        "min_credit_to_max_loss": 0.05,
         "default_risk_adjustment_cap": 1.00,
     },
 }

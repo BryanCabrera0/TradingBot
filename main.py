@@ -27,14 +27,19 @@ Usage:
 
     # Run one live scan cycle and exit
     python3 main.py run live once --yes
+
+    # Integrated diagnostics (auth + SPY chain + entry-gate snapshot)
+    python3 main.py run paper once --diagnose
 """
 
 import argparse
+import copy
 import json
 import logging
 import select
 import sys
 import threading
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -44,10 +49,12 @@ from bot.data_fetcher import HistoricalDataFetcher
 from bot.backtester import Backtester
 from bot.dashboard import generate_dashboard
 from bot.econ_calendar import refresh_static_calendar_file
+from bot.file_security import validate_sensitive_file
 from bot.live_setup import run_live_setup
+from bot.live_trade_ledger import LiveTradeLedger
+from bot.number_utils import safe_float
 from bot.orchestrator import TradingBot
 from bot.paper_trader import PaperTrader
-from bot.live_trade_ledger import LiveTradeLedger
 from bot.schwab_client import SchwabClient
 
 
@@ -143,14 +150,257 @@ def _run_inline_auth() -> None:
         print(f"\n✗ Re-authorization failed: {exc}\n")
 
 
+def _token_age_days(token_path: Path) -> Optional[float]:
+    """Return token age in days when creation timestamp is available."""
+    try:
+        raw = token_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        created_ts = payload.get("creation_timestamp")
+        if created_ts is None:
+            return None
+        created = datetime.fromtimestamp(float(created_ts), tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return max(0.0, (now - created).total_seconds() / 86400.0)
+    except Exception:
+        return None
+
+
+def _ensure_token_ready(config, *, interactive: bool) -> bool:
+    """Validate token presence and optionally run inline auth when needed."""
+    token_path = Path(config.schwab.token_path).expanduser()
+    if not token_path.is_absolute():
+        token_path = (Path.cwd() / token_path).resolve()
+
+    def _auth_prompt() -> bool:
+        if not interactive:
+            return False
+        try:
+            answer = input("Run Schwab auth flow now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in {"", "y", "yes"}
+
+    try:
+        validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+    except FileNotFoundError:
+        print(f"Schwab token file is missing at {token_path}")
+        if _auth_prompt():
+            _run_inline_auth()
+            try:
+                validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+            except Exception:
+                print("Token check failed after auth. Please re-run the command.")
+                return False
+            return True
+        print("Run `tradingbot auth` (or `python3 main.py auth`) to create a new token.")
+        return False
+    except Exception as exc:
+        print(f"Token check failed for {token_path}: {exc}")
+        return False
+
+    age_days = _token_age_days(token_path)
+    if age_days is not None and age_days >= 7.0:
+        print(
+            f"Schwab token appears expired (age ~{age_days:.1f} days, limit is 7 days)."
+        )
+        if _auth_prompt():
+            _run_inline_auth()
+            return True
+        print("Run `tradingbot auth` (or `python3 main.py auth`) before trading.")
+        return False
+
+    return True
+
+
+def _flatten_chain_side(chain_side: dict) -> list[dict]:
+    rows: list[dict] = []
+    if not isinstance(chain_side, dict):
+        return rows
+    for contracts in chain_side.values():
+        if isinstance(contracts, list):
+            rows.extend([row for row in contracts if isinstance(row, dict)])
+    return rows
+
+
+def _is_valid_contract(contract: dict) -> bool:
+    return bool(
+        str(contract.get("symbol", "")).strip()
+        and str(contract.get("expiration", "")).strip()
+        and safe_float(contract.get("strike"), 0.0) > 0
+        and safe_float(contract.get("dte"), -1) >= 0
+    )
+
+
+def _has_price(contract: dict) -> bool:
+    return (
+        safe_float(contract.get("bid"), 0.0) > 0.0
+        or safe_float(contract.get("ask"), 0.0) > 0.0
+        or safe_float(contract.get("mid"), 0.0) > 0.0
+    )
+
+
+def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "SPY") -> int:
+    """Run one-shot diagnostics for auth, chain parsing, and entry blockers."""
+    print("\n=== TradingBot Integrated Diagnostics ===")
+    print(f"Mode hint: {mode_hint.upper()}")
+    print(f"Symbol: {symbol}")
+
+    token_path = Path(config.schwab.token_path).expanduser()
+    if not token_path.is_absolute():
+        token_path = (Path.cwd() / token_path).resolve()
+    print(f"Token path: {token_path}")
+    try:
+        validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+        mode = token_path.stat().st_mode & 0o777
+        print(f"Token file: OK (perm {oct(mode)})")
+    except Exception as exc:
+        print(f"Token file: FAILED ({exc})")
+        return 1
+
+    try:
+        client = SchwabClient(config.schwab)
+        client.connect()
+        print("Schwab auth: OK")
+    except Exception as exc:
+        print(f"Schwab auth: FAILED ({exc})")
+        return 1
+
+    try:
+        raw = client.get_option_chain(symbol)
+        parsed = SchwabClient.parse_option_chain(raw)
+        calls = _flatten_chain_side(parsed.get("calls", {}))
+        puts = _flatten_chain_side(parsed.get("puts", {}))
+        valid_calls = [row for row in calls if _is_valid_contract(row)]
+        valid_puts = [row for row in puts if _is_valid_contract(row)]
+        priced_calls = [row for row in valid_calls if _has_price(row)]
+        priced_puts = [row for row in valid_puts if _has_price(row)]
+        print(
+            "SPY chain: "
+            f"underlying={safe_float(parsed.get('underlying_price'), 0.0):.2f} | "
+            f"exp(calls/puts)={len(parsed.get('calls', {}))}/{len(parsed.get('puts', {}))} | "
+            f"calls(total/valid/priced)={len(calls)}/{len(valid_calls)}/{len(priced_calls)} | "
+            f"puts(total/valid/priced)={len(puts)}/{len(valid_puts)}/{len(priced_puts)}"
+        )
+    except Exception as exc:
+        print(f"SPY chain fetch/parse: FAILED ({exc})")
+        return 1
+
+    try:
+        diag_cfg = copy.deepcopy(config)
+        diag_cfg.terminal_ui.enabled = False
+        bot = TradingBot(diag_cfg)
+        bot.connect()
+        bot._update_portfolio_state()
+        entries_allowed = bot._entries_allowed()
+        timing = bot._entry_timing_state()
+        open_positions = len(bot.risk_manager.portfolio.open_positions)
+        max_positions = int(bot.config.risk.max_open_positions)
+        print(
+            "Entry state: "
+            f"entries_allowed={entries_allowed} | "
+            f"timing_allowed={timing.get('allowed')} | "
+            f"timing_optimal={timing.get('optimal')} | "
+            f"timing_reason={timing.get('reason')} | "
+            f"open_positions={open_positions}/{max_positions}"
+        )
+
+        pause_fields = [
+            "halt_entries",
+            "consecutive_loss_pause_until",
+            "weekly_loss_pause_until",
+            "correlated_loss_pause_until",
+            "correlation_pause_until",
+        ]
+        pauses = {key: bot.circuit_state.get(key) for key in pause_fields if bot.circuit_state.get(key)}
+        if pauses:
+            print(f"Circuit breaker state: {pauses}")
+
+        chain_data, underlying = bot._get_chain_data(symbol)
+        if not chain_data or safe_float(underlying, 0.0) <= 0:
+            print("Orchestrator chain pull: FAILED (empty chain or non-positive underlying)")
+            return 1
+
+        technical_context = None
+        try:
+            technical_context = bot.technicals.get_context(symbol, bot.schwab)
+        except Exception:
+            technical_context = None
+        market_context = bot._build_market_context(symbol, chain_data)
+
+        strategy_signal_counts: dict[str, int] = {}
+        candidates = []
+        for strategy in bot.strategies:
+            signals = strategy.scan_for_entries(
+                symbol,
+                chain_data,
+                underlying,
+                technical_context=technical_context,
+                market_context=market_context,
+            )
+            filtered = bot._filter_signals_by_context(signals, market_context)
+            strategy_signal_counts[str(strategy.name)] = len(filtered)
+            candidates.extend(filtered)
+
+        print(f"Signal counts by strategy: {strategy_signal_counts}")
+        if not candidates:
+            print("Entry candidates: 0 (strategy layer produced no signals)")
+            return 0
+
+        candidates.sort(
+            key=lambda s: safe_float(s.analysis.score if s.analysis else 0.0, 0.0),
+            reverse=True,
+        )
+        signal = candidates[0]
+        analysis = signal.analysis
+        if analysis is None:
+            print("Top candidate has no analysis payload.")
+            return 0
+
+        mtf_ok, mtf_agreement, _ = bot._passes_multi_timeframe_confirmation(signal)
+        min_score = bot._strategy_regime_min_score(signal)
+        risk_ok, risk_reason = bot.risk_manager.approve_trade(signal)
+        budget_ok, budget_qty, budget_reason = bot.risk_manager.evaluate_greeks_budget(
+            signal,
+            regime=str(signal.metadata.get("regime", bot.circuit_state.get("regime", "NORMAL"))),
+            quantity=max(1, int(signal.quantity or 1)),
+            allow_resize=True,
+        )
+        slippage_penalty = bot._symbol_slippage_penalty(signal.symbol)
+        width = bot._signal_width(signal)
+        min_credit_pct = bot._strategy_min_credit_pct(signal.strategy)
+        required_credit = (min_credit_pct * width) + slippage_penalty if width > 0 and min_credit_pct > 0 else 0.0
+        credit_ok = float(analysis.credit or 0.0) >= required_credit
+
+        print(
+            "Top candidate: "
+            f"{signal.strategy} {signal.symbol} | "
+            f"score={safe_float(analysis.score, 0.0):.1f} | "
+            f"pop={safe_float(analysis.probability_of_profit, 0.0) * 100.0:.1f}% | "
+            f"credit={safe_float(analysis.credit, 0.0):.2f}"
+        )
+        print(
+            "Gate snapshot: "
+            f"mtf_ok={mtf_ok} ({mtf_agreement}/"
+            f"{int(getattr(bot.config.multi_timeframe, 'min_agreement', 2) or 2)}) | "
+            f"score_gate={safe_float(analysis.score, 0.0):.1f}>={min_score:.1f} | "
+            f"risk_ok={risk_ok} ({risk_reason}) | "
+            f"greeks_budget_ok={budget_ok} (qty={budget_qty}; {budget_reason}) | "
+            f"slippage_credit_ok={credit_ok} (credit={safe_float(analysis.credit, 0.0):.2f} "
+            f"required={required_credit:.2f})"
+        )
+    except Exception as exc:
+        print(f"Orchestrator diagnostics: FAILED ({exc})")
+        return 1
+
+    print("Diagnostics complete.")
+    return 0
+
+
 def prompt_run_menu() -> tuple[str, bool]:
-    """Prompt for one of the four supported run modes (or re-auth)."""
+    """Prompt for run mode."""
     options = {
-        "1": ("paper", False),
-        "2": ("paper", True),
-        "3": ("live", False),
-        "4": ("live", True),
-        "5": ("auth", False),
+        "1": ("auth_paper", False),
+        "2": ("auth_live", False),
     }
     aliases = {
         "run paper": ("paper", False),
@@ -161,18 +411,19 @@ def prompt_run_menu() -> tuple[str, bool]:
         "reauth": ("auth", False),
         "re-auth": ("auth", False),
         "token": ("auth", False),
+        "auth paper": ("auth_paper", False),
+        "auth live": ("auth_live", False),
+        "paper": ("paper", False),
+        "live": ("live", False),
     }
 
     print("\nSelect TradingBot mode:")
-    print("  1) run paper")
-    print("  2) run paper once")
-    print("  3) run live")
-    print("  4) run live once")
-    print("  5) re-authorize Schwab token")
+    print("  1) paper trading")
+    print("  2) live trading")
 
     while True:
         try:
-            raw = input("Choose 1-5: ").strip().lower()
+            raw = input("Choose 1 or 2: ").strip().lower()
         except KeyboardInterrupt:
             print("\nAborted.")
             sys.exit(130)
@@ -184,7 +435,7 @@ def prompt_run_menu() -> tuple[str, bool]:
             return options[raw]
         if raw in aliases:
             return aliases[raw]
-        print("Invalid selection. Enter 1, 2, 3, 4, or 5.")
+        print("Invalid selection. Enter 1 or 2.")
 
 
 def prompt_after_run_menu() -> bool:
@@ -300,6 +551,11 @@ def main() -> None:
         choices=["once"],
         help="Run one scan cycle and exit",
     )
+    run_paper.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
+    )
     run_paper.set_defaults(mode="paper")
 
     run_live = run_subparsers.add_parser("live", help="Run in live mode")
@@ -308,6 +564,11 @@ def main() -> None:
         nargs="?",
         choices=["once"],
         help="Run one scan cycle and exit",
+    )
+    run_live.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
     )
     run_live.set_defaults(mode="live")
 
@@ -324,6 +585,14 @@ def main() -> None:
             while mode == "auth":
                 _run_inline_auth()
                 mode, once = prompt_run_menu()
+            # Handle auth + paper: re-auth then start paper trading
+            if mode == "auth_paper":
+                _run_inline_auth()
+                mode = "paper"
+            # Handle auth + live: re-auth then start live trading
+            if mode == "auth_live":
+                _run_inline_auth()
+                mode = "live"
             args.mode = mode
             args.once_token = "once" if once else None
         else:
@@ -333,6 +602,7 @@ def main() -> None:
 
     args.live = str(getattr(args, "mode", "paper") or "paper") == "live"
     args.once = str(getattr(args, "once_token", "") or "") == "once"
+    args.diagnose = bool(getattr(args, "diagnose", False))
     args.report = False
     # Keep advanced execution paths disabled in the simplified 4-command CLI.
     args.dashboard = False
@@ -396,6 +666,29 @@ def main() -> None:
     if validation.failed:
         print("Configuration validation failed. Resolve the failures above before continuing.")
         sys.exit(2)
+
+    # Apply token checks across all run-mode entry points (menu + CLI).
+    needs_token = (
+        args.command == "run"
+        and not args.dashboard
+        and not args.backtest
+        and not args.fetch_data
+        and not args.update_econ_calendar
+        and not args.audit_trail
+        and not args.report
+    )
+    if needs_token and not _ensure_token_ready(config, interactive=sys.stdin.isatty()):
+        sys.exit(1)
+
+    if args.diagnose:
+        code = run_integrated_diagnostics(
+            config=config,
+            mode_hint=str(getattr(args, "mode", config.trading_mode) or config.trading_mode),
+            symbol="SPY",
+        )
+        if code != 0:
+            sys.exit(code)
+        return
 
     if args.fetch_data:
         if not args.start or not args.end:
