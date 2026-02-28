@@ -4564,9 +4564,9 @@ class TradingBot:
                         0.0,
                     ),
                     "ml_score": safe_float(
-                        (signal.metadata or {}).get("ml_score"), 0.5
+                        (sig.metadata or {}).get("ml_score"), 0.5
                     ),
-                    "ml_flag": str((signal.metadata or {}).get("ml_flag", "")),
+                    "ml_flag": str((sig.metadata or {}).get("ml_flag", "")),
                 }
             )
         return rows
