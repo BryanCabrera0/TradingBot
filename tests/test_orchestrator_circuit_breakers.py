@@ -4,6 +4,7 @@ from unittest import mock
 
 from bot.config import BotConfig
 from bot.orchestrator import TradingBot
+from bot.regime_detector import CRASH_CRISIS, HIGH_VOL_CHOP
 
 
 def _config() -> BotConfig:
@@ -25,7 +26,7 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
 
         bot._update_market_regime()
 
-        self.assertEqual(bot.circuit_state["regime"], "crisis")
+        self.assertEqual(bot.circuit_state["regime"], CRASH_CRISIS)
         self.assertTrue(bot.circuit_state["halt_entries"])
         self.assertFalse(bot._entries_allowed())
 
@@ -37,7 +38,7 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
 
         bot._update_market_regime()
 
-        self.assertEqual(bot.circuit_state["regime"], "elevated")
+        self.assertEqual(bot.circuit_state["regime"], HIGH_VOL_CHOP)
         self.assertEqual(
             bot.risk_manager.config.max_open_positions, int(round(starting_limit * 0.7))
         )

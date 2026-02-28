@@ -59,10 +59,9 @@ class OrchestratorShutdownTests(unittest.TestCase):
             bot._runtime_state_path = Path(tmp_dir) / "runtime_state.json"
             bot._handle_shutdown(signal.SIGTERM, None)
 
-        self.assertEqual(bot.schwab.cancel_order.call_count, 3)
+        self.assertEqual(bot.schwab.cancel_order.call_count, 2)
         bot.schwab.cancel_order.assert_any_call("e1")
         bot.schwab.cancel_order.assert_any_call("e2")
-        bot.schwab.cancel_order.assert_any_call("x1")
 
     def test_shutdown_cancels_broker_working_orders_and_sets_clean_flag(self) -> None:
         bot = TradingBot(_live_config())
@@ -70,9 +69,9 @@ class OrchestratorShutdownTests(unittest.TestCase):
         bot.schwab.cancel_order = mock.Mock()
         bot.schwab.get_orders = mock.Mock(
             return_value=[
-                {"orderId": "w1", "status": "WORKING"},
+                {"orderId": "w1", "status": "WORKING", "orderLegCollection": [{"instruction": "BUY_TO_OPEN"}]},
                 {"orderId": "f1", "status": "FILLED"},
-                {"orderId": "w2", "status": "PENDING_CANCEL"},
+                {"orderId": "w2", "status": "PENDING_CANCEL", "orderLegCollection": [{"instruction": "SELL_TO_OPEN"}]},
             ]
         )
         bot.schwab.get_order = mock.Mock(return_value={"status": "CANCELED"})
@@ -116,7 +115,7 @@ class OrchestratorShutdownTests(unittest.TestCase):
                 bot._warn_if_unclean_previous_shutdown()
             self.assertTrue(
                 any(
-                    "clean shutdown flag missing" in line.lower()
+                    "did not shut down cleanly" in line.lower()
                     for line in captured.output
                 )
             )

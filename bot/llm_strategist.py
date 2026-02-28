@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import requests
 
 from bot.config import LLMStrategistConfig
+from bot.llm_advisor import _thinking_config
 from bot.openai_compat import request_openai_json
 
 logger = logging.getLogger(__name__)
@@ -127,13 +128,10 @@ class LLMStrategist:
             if not _is_configured_secret(api_key):
                 raise RuntimeError("OPENAI_API_KEY missing for llm_strategist")
             model_name = str(self.config.model or "").strip()
-            model_key = model_name.lower()
-            if (
-                not model_key
-                or model_key.startswith("gemini-")
-                or model_key.startswith("claude-")
-            ):
-                model_name = "gpt-5.2-pro"
+            if not model_name:
+                raise RuntimeError(
+                    "llm_strategist.model must be set when provider is 'openai'"
+                )
             return request_openai_json(
                 api_key=api_key,
                 model=model_name,
@@ -172,7 +170,7 @@ class LLMStrategist:
             if not _is_configured_secret(api_key):
                 raise RuntimeError("GOOGLE_API_KEY missing for llm_strategist")
             model_name = (
-                str(self.config.model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+                str(self.config.model or "gemini-3.1-pro-thinking-preview").strip() or "gemini-3.1-pro-thinking-preview"
             )
             payload = {
                 "contents": [
@@ -192,6 +190,7 @@ class LLMStrategist:
                     "temperature": 0.2,
                     "maxOutputTokens": 500,
                     "responseMimeType": "application/json",
+                    **_thinking_config("high"),
                 },
             }
             response = requests.post(

@@ -264,7 +264,7 @@ class LLMAdvisorTests(unittest.TestCase):
 
     def test_google_uses_generate_content_api(self) -> None:
         advisor = LLMAdvisor(
-            LLMConfig(enabled=True, provider="google", model="gemini-2.5-pro")
+            LLMConfig(enabled=True, provider="google", model="gemini-3.1-pro-thinking-preview")
         )
         response = mock.Mock()
         response.status_code = 200
@@ -294,7 +294,7 @@ class LLMAdvisorTests(unittest.TestCase):
         self.assertIn('"verdict":"approve"', raw.replace(" ", ""))
         args, kwargs = post.call_args
         self.assertIn(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-thinking-preview:generateContent",
             args[0],
         )
         self.assertEqual(kwargs["params"]["key"], "test-key")

@@ -177,11 +177,11 @@ class NewsScannerTests(unittest.TestCase):
                 enabled=True,
                 llm_sentiment_enabled=True,
                 llm_sentiment_cache_seconds=0,
-                llm_model="gemini-2.5-pro",
+                llm_model="gemini-3.1-pro-thinking-preview",
                 llm_reasoning_effort="medium",
                 llm_text_verbosity="low",
                 llm_max_output_tokens=256,
-                llm_chat_fallback_model="gemini-2.5-flash",
+                llm_chat_fallback_model="gemini-3.1-flash-thinking-preview",
             )
         )
         response = mock.Mock()
@@ -212,7 +212,7 @@ class NewsScannerTests(unittest.TestCase):
         self.assertEqual(sentiment["sentiment"], "neutral")
         args, kwargs = post.call_args
         self.assertIn(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-thinking-preview:generateContent",
             args[0],
         )
         self.assertEqual(kwargs["params"]["key"], "test-key")

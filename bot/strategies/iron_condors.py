@@ -275,11 +275,9 @@ class IronCondorStrategy(BaseStrategy):
         call_short = float(details.get("call_short_strike", 0.0) or 0.0)
         if put_short <= 0 or call_short <= 0:
             return False
-        put_prox = abs(underlying - put_short) / underlying
-        call_prox = abs(underlying - call_short) / underlying
-        return (underlying <= put_short and put_prox <= 0.01) or (
-            underlying >= call_short and call_prox <= 0.01
-        )
+        put_tested = underlying <= (put_short * 1.01)
+        call_tested = underlying >= (call_short * 0.99)
+        return put_tested or call_tested
 
     @staticmethod
     def _average_chain_iv(calls: dict, puts: dict) -> float:

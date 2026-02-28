@@ -140,7 +140,7 @@ class MonteCarloRiskEngine:
             (delta * price_change)
             + (0.5 * gamma * np.square(price_change))
             + (theta * horizon_days)
-            + (vega * iv_change)
+            + (vega * iv_change * 100.0)
             + (rho * rate_shift * 100.0)
         )
         return pnl_per_contract * quantity * 100.0

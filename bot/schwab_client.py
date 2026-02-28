@@ -911,9 +911,13 @@ class SchwabClient:
                 )
                 return last_result
 
-            if status in {"CANCELED", "REJECTED", "EXPIRED"}:
+            if status == "REJECTED":
+                last_result.update({"status": "REJECTED", "order_id": order_id})
+                return last_result
+
+            if status in {"CANCELED", "EXPIRED"}:
                 last_result.update(
-                    {"status": status or "CANCELED", "order_id": order_id}
+                    {"status": status, "order_id": order_id}
                 )
                 continue
 

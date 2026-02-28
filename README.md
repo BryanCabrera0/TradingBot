@@ -41,7 +41,7 @@ Production-grade automated options trading bot for Charles Schwab (`schwab-py`) 
 
 ### LLM Layer
 - Google / Anthropic / Ollama providers
-- Default cloud model: `gemini-2.5-pro`
+- Default cloud model: `gemini-3.1-pro-thinking-preview`
 - Responses API with Chat Completions fallback
 - Ensemble voting + model-accuracy weighting
 - Confidence calibration buckets

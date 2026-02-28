@@ -298,7 +298,7 @@ hedging:
 llm_strategist:
   enabled: false
   provider: google
-  model: gemini-2.5-pro
+  model: gemini-3.1-pro-thinking-preview
   timeout_seconds: 20
   max_directives: 3
 
@@ -460,7 +460,7 @@ cooldown:
 llm:
   enabled: true
   provider: google
-  model: gemini-2.5-pro
+  model: gemini-3.1-pro-thinking-preview
   base_url: http://127.0.0.1:11434
   mode: advisory   # advisory | blocking
   risk_style: aggressive   # conservative | moderate | aggressive
@@ -468,14 +468,14 @@ llm:
   temperature: 0.3
   min_confidence: 0.30
   track_record_file: bot/data/llm_track_record.json
-  reasoning_effort: high
+  reasoning_effort: xhigh
   text_verbosity: low
   max_output_tokens: 500
-  chat_fallback_model: gemini-2.5-flash
+  chat_fallback_model: gemini-3.1-flash-thinking-preview
   ensemble_enabled: false
   ensemble_models:
-    - google:gemini-2.5-pro
-    - google:gemini-2.5-flash
+    - google:gemini-3.1-pro-thinking-preview
+    - google:gemini-3.1-flash-thinking-preview
   ensemble_agreement_threshold: 0.66
   multi_turn_enabled: true
   multi_turn_confidence_threshold: 40
@@ -500,11 +500,11 @@ news:
   finnhub_api_key: ""
   llm_sentiment_enabled: true
   llm_sentiment_cache_seconds: 1800
-  llm_model: gemini-2.5-pro
-  llm_reasoning_effort: medium
+  llm_model: gemini-3.1-pro-thinking-preview
+  llm_reasoning_effort: xhigh
   llm_text_verbosity: low
   llm_max_output_tokens: 400
-  llm_chat_fallback_model: gemini-2.5-flash
+  llm_chat_fallback_model: gemini-3.1-flash-thinking-preview
   market_queries:
     - "stock market"
     - "federal reserve interest rates"

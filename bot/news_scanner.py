@@ -22,6 +22,7 @@ import requests
 from defusedxml import ElementTree as DET
 
 from bot.config import NewsConfig
+from bot.llm_advisor import _thinking_config
 
 logger = logging.getLogger(__name__)
 
@@ -346,8 +347,8 @@ class NewsScanner:
         if not _is_configured_secret(api_key):
             return self._fallback_sentiment(headlines)
         model_name = (
-            str(model or self.config.llm_model or "gemini-2.5-pro").strip()
-            or "gemini-2.5-pro"
+            str(model or self.config.llm_model or "gemini-3.1-pro-thinking-preview").strip()
+            or "gemini-3.1-pro-thinking-preview"
         )
 
         prompt = {
@@ -385,6 +386,7 @@ class NewsScanner:
                         "temperature": 0.0,
                         "maxOutputTokens": int(self.config.llm_max_output_tokens),
                         "responseMimeType": "application/json",
+                        **_thinking_config(self.config.llm_reasoning_effort),
                     },
                 },
                 timeout=self.config.request_timeout_seconds,
@@ -413,17 +415,13 @@ class NewsScanner:
 
     @staticmethod
     def _fallback_sentiment(headlines: list[str]) -> dict:
-        score = 0.0
-        key_event = None
-        for title in headlines:
-            title_lower = title.lower()
-            score += _score_headline_sentiment(title)
-            for keyword in SENTIMENT_EVENT_BLOCKLIST:
-                if keyword in title_lower:
-                    key_event = keyword
-                    break
-            if key_event:
-                break
+        # Score all headlines first so partial corpus doesn't skew the result.
+        score = sum(_score_headline_sentiment(t) for t in headlines)
+        # Then scan for blocklist events independently.
+        key_event = next(
+            (kw for t in headlines for kw in SENTIMENT_EVENT_BLOCKLIST if kw in t.lower()),
+            None,
+        )
 
         if score > 0.6:
             sentiment = "bullish"

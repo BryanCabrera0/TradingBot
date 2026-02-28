@@ -17,10 +17,10 @@ automatically trades options strategies including:
 Usage:
     # With no command, an interactive menu appears to pick a run mode
     python3 main.py
-    python3 main.py run paper
+    python3 main.py run simulator
 
-    # Run one paper scan cycle and exit
-    python3 main.py run paper once
+    # Run the offline training simulator
+    python3 main.py run simulator --iterations 100
 
     # Run continuous live mode (non-interactive confirmation bypass shown)
     python3 main.py run live --yes
@@ -29,7 +29,7 @@ Usage:
     python3 main.py run live once --yes
 
     # Integrated diagnostics (auth + SPY chain + entry-gate snapshot)
-    python3 main.py run paper once --diagnose
+    python3 main.py run simulator once --diagnose
 """
 
 import argparse
@@ -106,12 +106,8 @@ def setup_logging(
 
 
 def print_banner() -> None:
-    print("""
-╭──────────────────────────────────────────────────────────╮
-│              TradingBot                                  │
-│              Fully Automated · Risk Managed              │
-╰──────────────────────────────────────────────────────────╯
-    """)
+    print("\n  TradingBot")
+    print("  Fully Automated · Risk Managed\n")
 
 
 def show_report() -> None:
@@ -121,9 +117,8 @@ def show_report() -> None:
     trader = PaperTrader()
     summary = trader.get_performance_summary()
 
-    print("\n" + "=" * 50)
-    print("  PERFORMANCE REPORT")
-    print("=" * 50)
+    print("\n  Performance Report")
+    print("  " + "─" * 30)
     print(f"  Balance:        ${summary['balance']:>12,.2f}")
     print(f"  Total Trades:   {summary['total_trades']:>12}")
     if summary["total_trades"] > 0:
@@ -133,22 +128,19 @@ def show_report() -> None:
         print(f"  Total P/L:      ${summary['total_pnl']:>12,.2f}")
         print(f"  Avg P/L:        ${summary['avg_pnl']:>12,.2f}")
         print(f"  Return:         {summary.get('return_pct', 0):>11.2f}%")
-    print(f"  Open Positions: {summary['open_positions']:>12}")
-    print("=" * 50 + "\n")
+    print(f"  Open Positions: {summary['open_positions']:>12}\n")
 
 
 def _run_inline_auth() -> None:
     """Run the Schwab OAuth re-authorization flow inline."""
     from bot.auth import run_auth_flow
 
-    print("\n╭──────────────────────────────────────────────────────╮")
-    print("│  Schwab Token Re-Authorization                      │")
-    print("╰──────────────────────────────────────────────────────╯\n")
+    print("\n  Schwab Token Re-Authorization\n")
     try:
         run_auth_flow()
-        print("\n✓ Token refreshed successfully.\n")
+        print("  ✓ Token refreshed successfully.\n")
     except Exception as exc:
-        print(f"\n✗ Re-authorization failed: {exc}\n")
+        print(f"  ✗ Re-authorization failed: {exc}\n")
 
 
 def _token_age_days(token_path: Path) -> Optional[float]:
@@ -196,7 +188,7 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
     except PermissionError:
         pass  # File exists but is locked; assume it is valid for now.
     except FileNotFoundError:
-        print(f"Schwab token file is missing at {token_path}")
+        print(f"  Token missing at {token_path}")
         if _auth_prompt():
             _run_inline_auth()
             try:
@@ -206,32 +198,28 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
             except PermissionError:
                 pass
             except Exception:
-                print("Token check failed after auth. Please re-run the command.")
+                print("  Token check failed after auth. Please re-run.")
                 return False
             return True
-        print(
-            "Run `tradingbot auth` (or `python3 main.py auth`) to create a new token."
-        )
+        print("  Run `python3 main.py auth` to create a token.")
         return False
     except Exception as exc:
-        print(f"Token check failed for {token_path}: {exc}")
+        print(f"  Token check failed: {exc}")
         return False
 
     age_days = _token_age_days(token_path)
     if age_days is not None and age_days >= 7.0:
-        print(
-            f"Schwab token appears expired (age ~{age_days:.1f} days, limit is 7 days)."
-        )
+        print(f"  Token expired (~{age_days:.1f} days old).")
         if _auth_prompt():
             _run_inline_auth()
             return True
-        print("Run `tradingbot auth` (or `python3 main.py auth`) before trading.")
+        print("  Run `python3 main.py auth` to renew.")
         return False
 
     if age_days is not None:
-        print(f"Schwab token OK (age ~{age_days:.1f} days, refreshes automatically).")
+        print(f"  Token OK  (~{age_days:.1f} days old)")
     else:
-        print("Schwab token found.")
+        print("  Token found.")
     return True
 
 
@@ -266,9 +254,7 @@ def run_integrated_diagnostics(
     config, mode_hint: str = "paper", symbol: str = "SPY"
 ) -> int:
     """Run one-shot diagnostics for auth, chain parsing, and entry blockers."""
-    print("\n=== TradingBot Integrated Diagnostics ===")
-    print(f"Mode hint: {mode_hint.upper()}")
-    print(f"Symbol: {symbol}")
+    print(f"\n  Diagnostics  ·  {mode_hint.upper()}  ·  {symbol}\n")
     from bot.schwab_client import SchwabClient
     client: Optional[SchwabClient] = None
     bot: Optional["TradingBot"] = None
@@ -287,23 +273,22 @@ def run_integrated_diagnostics(
     token_path = Path(config.schwab.token_path).expanduser()
     if not token_path.is_absolute():
         token_path = (Path.cwd() / token_path).resolve()
-    print(f"Token path: {token_path}")
     try:
         validate_sensitive_file(
             token_path, label="Schwab token file", allow_missing=False
         )
         mode = token_path.stat().st_mode & 0o777
-        print(f"Token file: OK (perm {oct(mode)})")
+        print(f"  token       {token_path}  (perm {oct(mode)})")
     except Exception as exc:
-        print(f"Token file: FAILED ({exc})")
+        print(f"  token       failed  {exc}")
         return 1
 
     try:
         client = SchwabClient(config.schwab)
         client.connect()
-        print("Schwab auth: OK")
+        print("  auth        ok")
     except Exception as exc:
-        print(f"Schwab auth: FAILED ({exc})")
+        print(f"  auth        failed  {exc}")
         _cleanup_streaming()
         return 1
 
@@ -316,15 +301,13 @@ def run_integrated_diagnostics(
         valid_puts = [row for row in puts if _is_valid_contract(row)]
         priced_calls = [row for row in valid_calls if _has_price(row)]
         priced_puts = [row for row in valid_puts if _has_price(row)]
+        underlying_px = safe_float(parsed.get('underlying_price'), 0.0)
         print(
-            "SPY chain: "
-            f"underlying={safe_float(parsed.get('underlying_price'), 0.0):.2f} | "
-            f"exp(calls/puts)={len(parsed.get('calls', {}))}/{len(parsed.get('puts', {}))} | "
-            f"calls(total/valid/priced)={len(calls)}/{len(valid_calls)}/{len(priced_calls)} | "
-            f"puts(total/valid/priced)={len(puts)}/{len(valid_puts)}/{len(priced_puts)}"
+            f"  chain       {symbol} ${underlying_px:.2f}  "
+            f"calls {len(priced_calls)}/{len(calls)}  puts {len(priced_puts)}/{len(puts)}"
         )
     except Exception as exc:
-        print(f"SPY chain fetch/parse: FAILED ({exc})")
+        print(f"  chain       failed  {exc}")
         _cleanup_streaming()
         return 1
 
@@ -339,12 +322,10 @@ def run_integrated_diagnostics(
         open_positions = len(bot.risk_manager.portfolio.open_positions)
         max_positions = int(bot.config.risk.max_open_positions)
         print(
-            "Entry state: "
-            f"entries_allowed={entries_allowed} | "
-            f"timing_allowed={timing.get('allowed')} | "
-            f"timing_optimal={timing.get('optimal')} | "
-            f"timing_reason={timing.get('reason')} | "
-            f"open_positions={open_positions}/{max_positions}"
+            f"  entries     allowed={entries_allowed}  "
+            f"timing={timing.get('allowed')}  optimal={timing.get('optimal')}  "
+            f"reason={timing.get('reason')}  "
+            f"positions={open_positions}/{max_positions}"
         )
 
         pause_fields = [
@@ -360,7 +341,7 @@ def run_integrated_diagnostics(
             if bot.circuit_state.get(key)
         }
         if pauses:
-            print(f"Circuit breaker state: {pauses}")
+            print(f"  circuit     {pauses}")
 
         chain_data, underlying = bot._get_chain_data(symbol)
         if not chain_data or safe_float(underlying, 0.0) <= 0:
@@ -390,9 +371,9 @@ def run_integrated_diagnostics(
             strategy_signal_counts[str(strategy.name)] = len(filtered)
             candidates.extend(filtered)
 
-        print(f"Signal counts by strategy: {strategy_signal_counts}")
+        print(f"  signals     {strategy_signal_counts}")
         if not candidates:
-            print("Entry candidates: 0 (strategy layer produced no signals)")
+            print("  candidates  0")
             _cleanup_streaming()
             return 0
 
@@ -403,7 +384,7 @@ def run_integrated_diagnostics(
         signal = candidates[0]
         analysis = signal.analysis
         if analysis is None:
-            print("Top candidate has no analysis payload.")
+            print("  top candidate  no analysis payload")
             _cleanup_streaming()
             return 0
 
@@ -428,41 +409,37 @@ def run_integrated_diagnostics(
         )
         credit_ok = float(analysis.credit or 0.0) >= required_credit
 
+        mtf_min = int(getattr(bot.config.multi_timeframe, 'min_agreement', 2) or 2)
         print(
-            "Top candidate: "
-            f"{signal.strategy} {signal.symbol} | "
-            f"score={safe_float(analysis.score, 0.0):.1f} | "
-            f"pop={safe_float(analysis.probability_of_profit, 0.0) * 100.0:.1f}% | "
+            f"  top signal  {signal.strategy} {signal.symbol}  "
+            f"score={safe_float(analysis.score, 0.0):.1f}  "
+            f"pop={safe_float(analysis.probability_of_profit, 0.0) * 100.0:.1f}%  "
             f"credit={safe_float(analysis.credit, 0.0):.2f}"
         )
         print(
-            "Gate snapshot: "
-            f"mtf_ok={mtf_ok} ({mtf_agreement}/"
-            f"{int(getattr(bot.config.multi_timeframe, 'min_agreement', 2) or 2)}) | "
-            f"score_gate={safe_float(analysis.score, 0.0):.1f}>={min_score:.1f} | "
-            f"risk_ok={risk_ok} ({risk_reason}) | "
-            f"greeks_budget_ok={budget_ok} (qty={budget_qty}; {budget_reason}) | "
-            f"slippage_credit_ok={credit_ok} (credit={safe_float(analysis.credit, 0.0):.2f} "
-            f"required={required_credit:.2f})"
+            f"  gates       mtf={mtf_ok} ({mtf_agreement}/{mtf_min})  "
+            f"score={safe_float(analysis.score, 0.0):.1f}>={min_score:.1f}  "
+            f"risk={risk_ok}  greeks={budget_ok} qty={budget_qty}  "
+            f"credit_ok={credit_ok} ({safe_float(analysis.credit, 0.0):.2f}/{required_credit:.2f})"
         )
     except Exception as exc:
-        print(f"Orchestrator diagnostics: FAILED ({exc})")
+        print(f"  diagnostics failed  {exc}")
         _cleanup_streaming()
         return 1
 
-    print("Diagnostics complete.")
+    print("\n  Done.\n")
     _cleanup_streaming()
     return 0
 
 
 RUN_MENU_OPTIONS: dict[str, tuple[str, bool]] = {
-    "1": ("paper", False),
+    "1": ("simulator", False),
     "2": ("live", False),
 }
 
 RUN_MENU_ALIASES: dict[str, tuple[str, bool]] = {
-    "run paper": ("paper", False),
-    "run paper once": ("paper", True),
+    "run simulator": ("simulator", False),
+    "run simulator once": ("simulator", True),
     "run live": ("live", False),
     "run live once": ("live", True),
     "auth": ("auth", False),
@@ -471,7 +448,7 @@ RUN_MENU_ALIASES: dict[str, tuple[str, bool]] = {
     "token": ("auth", False),
     "auth paper": ("auth_paper", False),
     "auth live": ("auth_live", False),
-    "paper": ("paper", False),
+    "simulator": ("simulator", False),
     "live": ("live", False),
 }
 
@@ -511,22 +488,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
     run_parser = subparsers.add_parser("run", help="Run trading bot")
-    run_parser.set_defaults(mode="paper", once_token=None)
+    run_parser.set_defaults(mode="simulator", once_token=None)
     run_subparsers = run_parser.add_subparsers(dest="mode")
 
-    run_paper = run_subparsers.add_parser("paper", help="Run in paper mode")
-    run_paper.add_argument(
+    run_simulator = run_subparsers.add_parser("simulator", help="Run offline training simulator")
+    run_simulator.add_argument(
+        "--iterations",
+        type=int,
+        default=50,
+        help="Number of simulated training iterations (default 50)",
+    )
+    run_simulator.add_argument(
         "once_token",
         nargs="?",
         choices=["once"],
         help="Run one scan cycle and exit",
     )
-    run_paper.add_argument(
+    run_simulator.add_argument(
         "--diagnose",
         action="store_true",
         help="Run integrated diagnostics (auth/chain/gate checks) and exit",
     )
-    run_paper.set_defaults(mode="paper")
+    run_simulator.set_defaults(mode="simulator")
 
     run_live = run_subparsers.add_parser("live", help="Run in live mode")
     run_live.add_argument(
@@ -553,12 +536,11 @@ def _resolve_menu_selection() -> tuple[str, bool]:
         mode, once = prompt_run_menu()
     if mode == "auth_paper":
         _run_inline_auth()
-        return "paper", once
+        return "simulator", once
     if mode == "auth_live":
         _run_inline_auth()
         return "live", once
     return mode, once
-
 
 def _parse_args() -> tuple[argparse.Namespace, bool]:
     args = _build_parser().parse_args()
@@ -572,14 +554,14 @@ def _parse_args() -> tuple[argparse.Namespace, bool]:
             args.once_token = "once" if once else None
         else:
             # Avoid hanging in non-interactive contexts (scripts/services).
-            args.mode = "paper"
+            args.mode = "simulator"
             args.once_token = None
 
-    args.live = str(getattr(args, "mode", "paper") or "paper") == "live"
+    args.live = str(getattr(args, "mode", "simulator") or "simulator") == "live"
     args.once = str(getattr(args, "once_token", "") or "") == "once"
     args.diagnose = bool(getattr(args, "diagnose", False))
+    args.iterations = int(getattr(args, "iterations", 50))
     return args, interactive_menu_requested
-
 
 def _count_enabled_strategies(config) -> int:
     return sum(
@@ -596,7 +578,7 @@ def _count_enabled_strategies(config) -> int:
 
 
 def _print_runtime_summary(config) -> None:
-    mode_str = "LIVE" if config.trading_mode == "live" else "PAPER"
+    mode_str = "LIVE" if config.trading_mode == "live" else ("SIMULATOR" if config.trading_mode == "simulator" else "PAPER")
     print(f"  Mode:       {mode_str}")
     print(f"  Strategies: {_count_enabled_strategies(config)} enabled")
     if not config.watchlist:
@@ -612,13 +594,14 @@ def _print_runtime_summary(config) -> None:
 
 def prompt_run_menu() -> tuple[str, bool]:
     """Prompt for run mode."""
-    print("\nSelect TradingBot mode:")
-    print("  1) paper trading")
-    print("  2) live trading")
+    print("\n  Mode Selection")
+    print("  " + "─" * 14)
+    print("  1) Simulator (Paper / Training)")
+    print("  2) Live Trading\n")
 
     while True:
         try:
-            raw = input("Choose 1 or 2: ").strip().lower()
+            raw = input("  Select mode [1-2]: ").strip().lower()
         except KeyboardInterrupt:
             print("\nAborted.")
             sys.exit(130)
@@ -635,20 +618,20 @@ def prompt_run_menu() -> tuple[str, bool]:
 
 def prompt_after_run_menu() -> bool:
     """Prompt whether to return to the mode menu after a run exits."""
-    print("\nRun ended.")
-    print("  1) Return to mode menu")
-    print("  2) Exit")
+    print("\n  Session Complete\n")
+    print("  1) Menu")
+    print("  2) Exit\n")
     while True:
         try:
-            raw = input("Choose 1-2: ").strip().lower()
+            raw = input("  Select action [1-2]: ").strip().lower()
         except KeyboardInterrupt:
             print("\nAborted.")
-            return False
+            sys.exit(0)
         except EOFError:
             print("\nNo selection received. Exiting.")
-            return False
+            sys.exit(0)
 
-        if raw in {"1", "return", "menu", "m"}:
+        if raw in {"1", "menu", "m"}:
             return True
         if raw in {"2", "exit", "quit", "q"}:
             return False
@@ -711,97 +694,7 @@ def start_dashboard_command_listener(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Fully automated options trading bot for ThinkorSwim/Schwab"
-    )
-    parser.add_argument(
-        "--config",
-        default="config.yaml",
-        help="Path to YAML config file (default: config.yaml)",
-    )
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="Acknowledge live-trading confirmation prompt (useful for non-interactive live runs)",
-    )
-    parser.add_argument(
-        "--log-level",
-        default=None,
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Override log level from config",
-    )
-    parser.add_argument(
-        "--quiet",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Suppress routine console logs (warnings/errors still shown). "
-            "Full logs remain in log file. Enabled by default; use --no-quiet to show routine logs."
-        ),
-    )
-    subparsers = parser.add_subparsers(dest="command")
-    run_parser = subparsers.add_parser("run", help="Run trading bot")
-    run_parser.set_defaults(mode="paper", once_token=None)
-    run_subparsers = run_parser.add_subparsers(dest="mode")
-
-    run_paper = run_subparsers.add_parser("paper", help="Run in paper mode")
-    run_paper.add_argument(
-        "once_token",
-        nargs="?",
-        choices=["once"],
-        help="Run one scan cycle and exit",
-    )
-    run_paper.add_argument(
-        "--diagnose",
-        action="store_true",
-        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
-    )
-    run_paper.set_defaults(mode="paper")
-
-    run_live = run_subparsers.add_parser("live", help="Run in live mode")
-    run_live.add_argument(
-        "once_token",
-        nargs="?",
-        choices=["once"],
-        help="Run one scan cycle and exit",
-    )
-    run_live.add_argument(
-        "--diagnose",
-        action="store_true",
-        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
-    )
-    run_live.set_defaults(mode="live")
-
-    subparsers.add_parser("auth", help="Re-authorize Schwab OAuth token")
-
-    args = parser.parse_args()
-    interactive_menu_requested = not args.command
-    # Default no-command invocation to interactive mode selection.
-    if interactive_menu_requested:
-        args.command = "run"
-        if sys.stdin.isatty():
-            mode, once = prompt_run_menu()
-            # Handle re-auth selection: run auth flow, then loop back
-            while mode == "auth":
-                _run_inline_auth()
-                mode, once = prompt_run_menu()
-            # Handle explicit "auth paper" / "auth live" typed aliases
-            if mode == "auth_paper":
-                _run_inline_auth()
-                mode = "paper"
-            elif mode == "auth_live":
-                _run_inline_auth()
-                mode = "live"
-            args.mode = mode
-            args.once_token = "once" if once else None
-        else:
-            # Avoid hanging in non-interactive contexts (scripts/services).
-            args.mode = "paper"
-            args.once_token = None
-
-    args.live = str(getattr(args, "mode", "paper") or "paper") == "live"
-    args.once = str(getattr(args, "once_token", "") or "") == "once"
-    args.diagnose = bool(getattr(args, "diagnose", False))
+    args, interactive_menu_requested = _parse_args()
     args.report = False
     # Keep advanced execution paths disabled in the simplified 4-command CLI.
     args.dashboard = False
@@ -860,6 +753,11 @@ def main() -> None:
 
     # Load config
     config = load_config(args.config)
+    
+    # Apply CLI mode
+    if hasattr(args, "mode"):
+        config.trading_mode = args.mode
+
     # Always enable the live terminal dashboard for the simplified run commands.
     config.terminal_ui.enabled = True
     validation = validate_config(config)
@@ -873,6 +771,7 @@ def main() -> None:
     # Apply token checks across all run-mode entry points (menu + CLI).
     needs_token = (
         args.command == "run"
+        and config.trading_mode != "simulator"
         and not args.dashboard
         and not args.backtest
         and not args.fetch_data
@@ -976,7 +875,7 @@ def main() -> None:
         from bot.paper_trader import PaperTrader
         from bot.schwab_client import SchwabClient
         try:
-            if config.trading_mode == "paper":
+            if config.trading_mode in {"paper", "simulator"}:
                 paper = PaperTrader()
                 closed = list(paper.closed_trades)
                 open_positions = paper.get_positions()
@@ -1064,9 +963,8 @@ def main() -> None:
         config.trading_mode = "live"
         # Safety check
         if not config.schwab.app_key or not config.schwab.app_secret:
-            print("ERROR: Live trading requires SCHWAB_APP_KEY and SCHWAB_APP_SECRET")
-            print("       Set them in your .env file. See .env.example.")
-            print("       Then run: python3 main.py run live")
+            print("  SCHWAB_APP_KEY and SCHWAB_APP_SECRET are required for live trading.")
+            print("  Set them in .env (see .env.example), then re-run.")
             sys.exit(1)
 
     log_level = args.log_level or config.log_level
@@ -1082,41 +980,29 @@ def main() -> None:
     logger = logging.getLogger(__name__)
 
     print_banner()
-
-    mode_str = "LIVE" if config.trading_mode == "live" else "PAPER"
-    print(f"  Mode:       {mode_str}")
-    print(
-        "  Strategies: "
-        f"{sum(1 for s in [config.credit_spreads, config.iron_condors, config.covered_calls, config.naked_puts, config.calendar_spreads] if getattr(s, 'enabled', False))} enabled"
-    )
-    if not config.watchlist:
-        print(
-            "  Scanner:    ON — dynamically finds best options stocks from 150+ tickers"
-        )
-    else:
-        print(
-            f"  Watchlist:  {', '.join(config.watchlist[:5])}{'...' if len(config.watchlist) > 5 else ''}"
-        )
-    print()
+    _print_runtime_summary(config)
 
     if config.trading_mode == "live":
-        print("  ⚠  LIVE TRADING MODE — REAL MONEY AT RISK")
-        print("  ⚠  Make sure you understand the risks before proceeding.")
-        print()
+        print("  Live trading  ·  real money at risk\n")
         needs_confirmation = (
             not args.preflight_only and not args.yes and not args.live_readiness_only
         )
         if needs_confirmation:
             if not sys.stdin.isatty():
-                print("ERROR: Live confirmation required in non-interactive mode.")
-                print("       Re-run with --yes once you have validated your setup.")
+                print("  Confirmation required. Re-run with --yes to proceed.")
                 sys.exit(2)
-            confirm = input("  Type 'YES' to confirm live trading: ")
+            confirm = input("  Type YES to confirm: ")
             if confirm.strip() != "YES":
                 print("  Aborted.")
                 return
 
-    # Create and run the bot
+    # Create and run the simulator or bot
+    if config.trading_mode == "simulator":
+        from bot.simulator import TrainingSimulator
+        sim = TrainingSimulator(config)
+        sim.train(iterations=args.iterations)
+        return
+
     from bot.orchestrator import TradingBot
 
     bot = TradingBot(config)
@@ -1200,7 +1086,7 @@ def main() -> None:
             bot.connect()
             bot.validate_llm_readiness()
             bot.scan_and_trade()
-            if config.trading_mode == "paper":
+            if config.trading_mode in {"paper", "simulator"}:
                 show_report()
             once_clean_shutdown = True
         else:
@@ -1210,7 +1096,7 @@ def main() -> None:
                 )
             bot.run()
     except KeyboardInterrupt:
-        print("\nRun interrupted by user.")
+        print("\n  Interrupted.")
     finally:
         if args.once:
             try:

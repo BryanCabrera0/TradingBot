@@ -54,7 +54,7 @@ class GreeksBudgetTests(unittest.TestCase):
         manager.set_greeks_budget_config({"enabled": True, "reduce_size_to_fit": False})
 
         ok, qty, reason = manager.evaluate_greeks_budget(
-            _signal(net_delta=8.0, net_vega=-0.2, quantity=1),
+            _signal(net_delta=0.08, net_vega=-0.002, quantity=1),
             regime="BULL_TREND",
             quantity=1,
         )
@@ -69,7 +69,7 @@ class GreeksBudgetTests(unittest.TestCase):
         manager.set_greeks_budget_config({"enabled": True, "reduce_size_to_fit": True})
 
         ok, qty, reason = manager.evaluate_greeks_budget(
-            _signal(net_delta=8.0, net_vega=-0.6, quantity=3),
+            _signal(net_delta=0.08, net_vega=-0.6, quantity=3),
             regime="HIGH_VOL_CHOP",
             quantity=3,
         )
@@ -82,7 +82,7 @@ class GreeksBudgetTests(unittest.TestCase):
         manager = self._manager()
         manager.portfolio.net_delta = 75.0
         manager.set_greeks_budget_config({"enabled": True, "reduce_size_to_fit": True})
-        signal = _signal(net_delta=8.0, net_vega=-0.2, quantity=1)
+        signal = _signal(net_delta=0.08, net_vega=-0.002, quantity=1)
 
         approved, reason = manager.approve_trade(signal)
 
@@ -92,7 +92,7 @@ class GreeksBudgetTests(unittest.TestCase):
     def test_crisis_regime_alias_uses_crash_budget(self) -> None:
         manager = self._manager()
         manager.portfolio.net_delta = 9.0
-        signal = _signal(net_delta=2.0, net_vega=0.2, quantity=1)
+        signal = _signal(net_delta=0.02, net_vega=0.002, quantity=1)
         ok, qty, reason = manager.evaluate_greeks_budget(
             signal,
             regime="crisis",

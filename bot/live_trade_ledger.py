@@ -504,7 +504,8 @@ class LiveTradeLedger:
             if close_metadata_resolver:
                 try:
                     metadata = close_metadata_resolver(position, symbols) or {}
-                except Exception:
+                except Exception as _exc:
+                    logger.debug("close_metadata_resolver error for %s: %s", position.get("position_id"), _exc)
                     metadata = {}
 
             position["status"] = "closed_external"

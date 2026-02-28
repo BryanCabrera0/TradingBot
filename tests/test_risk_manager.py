@@ -13,7 +13,7 @@ class RiskManagerTests(unittest.TestCase):
     def _make_signal(
         *,
         symbol: str = "AAPL",
-        net_delta: float = 5.0,
+        net_delta: float = 0.05,
         net_vega: float = 0.2,
         max_loss: float = 4.0,
     ) -> TradeSignal:
@@ -112,7 +112,7 @@ class RiskManagerTests(unittest.TestCase):
             account_balance=100_000, open_positions=[], daily_pnl=0.0
         )
         signal = self._make_signal(
-            symbol="AAPL", net_delta=5.0, net_vega=0.5, max_loss=3.8
+            symbol="AAPL", net_delta=0.05, net_vega=0.5, max_loss=3.8
         )
 
         approved, reason = manager.approve_trade(signal)
@@ -132,13 +132,13 @@ class RiskManagerTests(unittest.TestCase):
                     "symbol": "SPY",
                     "quantity": 1,
                     "max_loss": 1.0,
-                    "details": {"net_delta": 52.0},
+                    "details": {"net_delta": 0.52},
                 }
             ],
             daily_pnl=0.0,
         )
         signal = self._make_signal(
-            symbol="QQQ", net_delta=6.0, net_vega=0.1, max_loss=4.0
+            symbol="QQQ", net_delta=0.06, net_vega=0.1, max_loss=4.0
         )
 
         approved, reason = manager.approve_trade(signal)
@@ -172,14 +172,14 @@ class RiskManagerTests(unittest.TestCase):
                     "symbol": "SPY",
                     "quantity": 1,
                     "max_loss": 1.0,
-                    "details": {"net_delta": 48.0},
+                    "details": {"net_delta": 0.48},
                 }
             ],
             daily_pnl=0.0,
         )
 
         approved, reason = manager.approve_trade(
-            self._make_signal(symbol="QQQ", net_delta=5.0)
+            self._make_signal(symbol="QQQ", net_delta=0.05)
         )
 
         self.assertFalse(approved)
@@ -202,14 +202,14 @@ class RiskManagerTests(unittest.TestCase):
                     "symbol": "SPY",
                     "quantity": 1,
                     "max_loss": 1.0,
-                    "details": {"net_delta": 48.0},
+                    "details": {"net_delta": 0.48},
                 }
             ],
             daily_pnl=0.0,
         )
 
         approved, _ = manager.approve_trade(
-            self._make_signal(symbol="QQQ", net_delta=-5.0)
+            self._make_signal(symbol="QQQ", net_delta=-0.05)
         )
 
         self.assertTrue(approved)

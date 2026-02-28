@@ -87,9 +87,9 @@ class ConfigTests(unittest.TestCase):
             cfg = load_config(config_path)
 
         self.assertEqual(cfg.llm.provider, "google")
-        self.assertEqual(cfg.llm.model, "gemini-2.5-pro")
+        self.assertEqual(cfg.llm.model, "gemini-3.1-pro-thinking-preview")
         self.assertEqual(cfg.llm_strategist.provider, "google")
-        self.assertEqual(cfg.llm_strategist.model, "gemini-2.5-pro")
+        self.assertEqual(cfg.llm_strategist.model, "gemini-3.1-pro-thinking-preview")
 
     def test_env_overrides_clamp_llm_numeric_settings(self) -> None:
         config_path = self._write_config("llm:\n  enabled: true\n")
@@ -153,9 +153,9 @@ class ConfigTests(unittest.TestCase):
         ):
             cfg = load_config(config_path)
 
-        self.assertEqual(cfg.llm.reasoning_effort, "high")
+        self.assertEqual(cfg.llm.reasoning_effort, "xhigh")
         self.assertEqual(cfg.llm.text_verbosity, "low")
-        self.assertEqual(cfg.llm.chat_fallback_model, "gemini-2.5-flash")
+        self.assertEqual(cfg.llm.chat_fallback_model, "gemini-3.1-flash-thinking-preview")
 
     def test_news_config_normalizes_and_clamps(self) -> None:
         config_path = self._write_config(
@@ -200,10 +200,10 @@ class ConfigTests(unittest.TestCase):
         ):
             cfg = load_config(config_path)
 
-        self.assertEqual(cfg.news.llm_reasoning_effort, "medium")
+        self.assertEqual(cfg.news.llm_reasoning_effort, "xhigh")
         self.assertEqual(cfg.news.llm_text_verbosity, "low")
         self.assertEqual(cfg.news.llm_max_output_tokens, 64)
-        self.assertEqual(cfg.news.llm_chat_fallback_model, "gemini-2.5-flash")
+        self.assertEqual(cfg.news.llm_chat_fallback_model, "gemini-3.1-flash-thinking-preview")
 
     def test_execution_and_alert_env_overrides(self) -> None:
         config_path = self._write_config(
@@ -470,7 +470,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.rl_prompt_optimizer.rolling_window_size, 20)
 
         self.assertEqual(cfg.alt_data.social_sentiment_cache_minutes, 1)
-        self.assertEqual(cfg.alt_data.social_sentiment_model, "gemini-2.5-pro")
+        self.assertEqual(cfg.alt_data.social_sentiment_model, "gemini-3.1-pro-thinking-preview")
 
         self.assertTrue(cfg.execution_algos.enabled)
         self.assertEqual(cfg.execution_algos.algo_type, "smart_ladder")
@@ -758,7 +758,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_validation_accepts_google_ensemble_model_pair(self) -> None:
         cfg = BotConfig()
-        cfg.llm.ensemble_models = ["google:gemini-2.5-pro"]
+        cfg.llm.ensemble_models = ["google:gemini-3.1-pro-thinking-preview"]
         report = validate_config(cfg)
 
         self.assertTrue(report.is_valid)

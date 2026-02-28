@@ -56,7 +56,6 @@ from bot.pnl_attribution import PnLAttributionEngine
 from bot.regime_detector import (
     BEAR_TREND,
     BULL_TREND,
-    CRASH_CRIISIS,
     CRASH_CRISIS,
     HIGH_VOL_CHOP,
     LOW_VOL_GRIND,
@@ -791,7 +790,7 @@ class TradingBot:
         if clean_shutdown is not False:
             return
         logger.warning(
-            "Previous session may have crashed; clean shutdown flag missing at %s.",
+            "Previous session did not shut down cleanly (crash flag set at %s).",
             self._runtime_state_path,
         )
 
@@ -1719,6 +1718,8 @@ class TradingBot:
     def _update_market_regime(self) -> None:
         """Refresh VIX-based volatility regime and risk throttles."""
         previous_regime = str(self.circuit_state.get("regime", "normal"))
+        regime_detector_succeeded = False
+        detector_set_halt = False
         if self.regime_detector is not None:
             try:
                 state = self.regime_detector.detect()
@@ -1728,9 +1729,11 @@ class TradingBot:
                 self.circuit_state["regime_confidence"] = round(
                     float(state.confidence), 4
                 )
-                if regime_key in {CRASH_CRISIS, CRASH_CRIISIS}:
+                if regime_key in {CRASH_CRISIS}:
                     self.circuit_state["halt_entries"] = True
+                    detector_set_halt = True
                 self._apply_regime_adjustments(regime_key)
+                regime_detector_succeeded = True
             except Exception as exc:
                 logger.warning(
                     "Regime detector failed, falling back to VIX-only regime: %s", exc
@@ -1755,8 +1758,16 @@ class TradingBot:
             return
 
         self.circuit_state["vix"] = round(vix_value, 2)
+        # Derive canonical regime label from VIX level (used as fallback or hard breaker).
         if vix_value > 35:
-            regime = "crisis"
+            vix_regime = CRASH_CRISIS
+        elif vix_value >= 25:
+            vix_regime = HIGH_VOL_CHOP
+        else:
+            vix_regime = LOW_VOL_GRIND
+
+        if vix_value > 35:
+            # Hard circuit breaker — always fires, even when regime_detector succeeded.
             self.circuit_state["halt_entries"] = True
             if not self._breaker_alert_flags["crisis"]:
                 logger.warning(
@@ -1774,22 +1785,21 @@ class TradingBot:
                     message=f"BREAKER: VIX {vix_value:.2f} halted new entries",
                 )
                 self._breaker_alert_flags["crisis"] = True
-        elif vix_value >= 25:
-            regime = "elevated"
-            self.circuit_state["halt_entries"] = False
-            self._breaker_alert_flags["crisis"] = False
-        elif vix_value >= 15:
-            regime = "normal"
-            self.circuit_state["halt_entries"] = False
-            self._breaker_alert_flags["crisis"] = False
         else:
-            regime = "low_vol"
-            self.circuit_state["halt_entries"] = False
             self._breaker_alert_flags["crisis"] = False
+            # Only clear halt_entries if the regime_detector did not set it this cycle.
+            if not detector_set_halt:
+                self.circuit_state["halt_entries"] = False
 
-        self.circuit_state["regime"] = regime
-        self._apply_regime_adjustments(regime)
-        if str(regime) != previous_regime:
+        # Only overwrite the regime label and re-apply adjustments when the
+        # regime_detector was unavailable or failed — the detector's output takes
+        # priority over the coarser VIX-bucket labels.
+        if not regime_detector_succeeded:
+            self.circuit_state["regime"] = vix_regime
+            self._apply_regime_adjustments(vix_regime)
+
+        regime = str(self.circuit_state["regime"])
+        if regime != previous_regime:
             self.alerts.regime_change(
                 f"Regime shifted from {previous_regime} to {regime}",
                 context={
@@ -1895,7 +1905,7 @@ class TradingBot:
                     continue
                 strategy.config["min_credit_pct"] = round(base_credit * 1.20, 4)
 
-        if regime_key in {CRASH_CRISIS, CRASH_CRIISIS}:
+        if regime_key in {CRASH_CRISIS, "CRISIS"}:
             self.risk_manager.config.max_open_positions = max(
                 1, int(round(self.risk_manager.config.max_open_positions * 0.50))
             )
@@ -4622,7 +4632,7 @@ class TradingBot:
             size_multiplier = float(signal.size_multiplier or 1.0)
 
             if (
-                regime in {"CRASH", "CRISIS", CRASH_CRISIS, CRASH_CRIISIS}
+                regime in {"CRASH", "CRISIS", CRASH_CRISIS}
                 and strategy_name in premium_selling
             ):
                 only_allowed = (
@@ -8193,11 +8203,22 @@ class TradingBot:
         broker_positions = self._get_broker_positions()
         if broker_positions is not None:
             open_option_symbols = self._collect_broker_option_symbols(broker_positions)
-            self.live_ledger.close_missing_from_broker(
-                open_strategy_symbols=open_option_symbols,
-                position_symbol_resolver=self._resolve_live_option_symbols,
-                close_metadata_resolver=self._resolve_external_close_metadata,
-            )
+            
+            # Safety check: avoid mass external-close if broker returns empty list 
+            # while we have multiple open positions (likely transient API sync issue).
+            tracked_open = self.live_ledger.list_positions(statuses={"open", "closing"})
+            if not open_option_symbols and len(tracked_open) >= 3:
+                logger.warning(
+                    "Broker returned zero positions but ledger has %d. "
+                    "Skipping external close reconciliation to prevent mass closure.",
+                    len(tracked_open)
+                )
+            else:
+                self.live_ledger.close_missing_from_broker(
+                    open_strategy_symbols=open_option_symbols,
+                    position_symbol_resolver=self._resolve_live_option_symbols,
+                    close_metadata_resolver=self._resolve_external_close_metadata,
+                )
 
         tracked = self.live_ledger.list_positions(
             statuses={"opening", "working", "open", "closing"}
@@ -9193,10 +9214,6 @@ class TradingBot:
                     str(oid).strip()
                     for oid in self.live_ledger.pending_entry_order_ids()
                 )
-                order_ids.update(
-                    str(oid).strip()
-                    for oid in self.live_ledger.pending_exit_order_ids()
-                )
             except Exception as exc:
                 logger.warning(
                     "Failed to enumerate pending order IDs on shutdown: %s", exc
@@ -9210,6 +9227,17 @@ class TradingBot:
                 status = str(order.get("status", "")).upper()
                 if status not in (PENDING_ORDER_STATUSES | PARTIAL_ORDER_STATUSES):
                     continue
+                
+                # Filter for entry orders (opening)
+                is_entry = False
+                for leg in order.get("orderLegCollection", []):
+                    instruction = str(leg.get("instruction", "")).upper()
+                    if "TO_OPEN" in instruction:
+                        is_entry = True
+                        break
+                if not is_entry:
+                    continue
+
                 order_id = str(order.get("orderId", order.get("order_id", ""))).strip()
                 if order_id:
                     order_ids.add(order_id)

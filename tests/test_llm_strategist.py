@@ -72,7 +72,7 @@ class LLMStrategistTests(unittest.TestCase):
 
     def test_google_provider_calls_generate_content(self) -> None:
         strategist = LLMStrategist(
-            LLMStrategistConfig(enabled=True, provider="google", model="gemini-2.5-pro")
+            LLMStrategistConfig(enabled=True, provider="google", model="gemini-3.1-pro-thinking-preview")
         )
         response = mock.Mock()
         response.status_code = 200
@@ -94,7 +94,7 @@ class LLMStrategistTests(unittest.TestCase):
         self.assertEqual(directives, [])
         args, kwargs = post.call_args
         self.assertIn(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-thinking-preview:generateContent",
             args[0],
         )
         self.assertEqual(kwargs["params"]["key"], "test-key")

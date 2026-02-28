@@ -190,14 +190,17 @@ class RiskManager:
             net_delta += (
                 float(details.get("net_delta", pos.get("net_delta", 0.0)) or 0.0)
                 * quantity
+                * 100.0
             )
             net_theta += (
                 float(details.get("net_theta", pos.get("net_theta", 0.0)) or 0.0)
                 * quantity
+                * 100.0
             )
             net_gamma += (
                 float(details.get("net_gamma", pos.get("net_gamma", 0.0)) or 0.0)
                 * quantity
+                * 100.0
             )
             net_vega += (
                 float(details.get("net_vega", pos.get("net_vega", 0.0)) or 0.0)
@@ -253,9 +256,9 @@ class RiskManager:
         }
         self.portfolio.open_positions.append(position)
         self.portfolio.total_risk_deployed += max_loss * qty * 100
-        self.portfolio.net_delta += net_delta * qty
-        self.portfolio.net_theta += net_theta * qty
-        self.portfolio.net_gamma += net_gamma * qty
+        self.portfolio.net_delta += net_delta * qty * 100.0
+        self.portfolio.net_theta += net_theta * qty * 100.0
+        self.portfolio.net_gamma += net_gamma * qty * 100.0
         self.portfolio.net_vega += net_vega * qty * 100.0
 
     def effective_max_loss_per_contract(self, signal: TradeSignal) -> float:
@@ -372,7 +375,7 @@ class RiskManager:
 
         # ── Check 10: Portfolio net-delta guard ───────────────────
         projected_delta = self.portfolio.net_delta + (
-            float(analysis.net_delta) * signal.quantity
+            float(analysis.net_delta) * signal.quantity * 100.0
         )
         delta_limit = max(0.0, float(self.config.max_portfolio_delta_abs))
         if abs(projected_delta) > delta_limit:
@@ -489,7 +492,7 @@ class RiskManager:
             return True, qty, "No Greeks budget limits for regime"
 
         requested_qty = max(1, int(quantity or signal.quantity or 1))
-        delta_unit = safe_float(getattr(analysis, "net_delta", 0.0), 0.0)
+        delta_unit = safe_float(getattr(analysis, "net_delta", 0.0), 0.0) * 100.0
         vega_unit = safe_float(getattr(analysis, "net_vega", 0.0), 0.0) * 100.0
         delta_min = safe_float(limits.get("delta_min"), -1e9)
         delta_max = safe_float(limits.get("delta_max"), 1e9)
@@ -555,8 +558,13 @@ class RiskManager:
         raw = str(regime or "").strip().upper()
         if not raw:
             return "NORMAL"
-        if raw in {"CRASH", "CRISIS", "CRASH_CRISIS", "CRASH/CIRISIS", "CRASH_CRIISIS"}:
+        if raw in {"CRASH", "CRISIS", "CRASH_CRISIS"}:
             return "CRASH/CRISIS"
+        # Map legacy VIX-bucket labels to canonical regime constants.
+        if raw == "ELEVATED":
+            return "HIGH_VOL_CHOP"
+        if raw in {"LOW_VOL", "NORMAL"}:
+            return "LOW_VOL_GRIND"
         return raw
 
     def calculate_position_size(self, signal: TradeSignal) -> int:

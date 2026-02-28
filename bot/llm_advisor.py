@@ -734,8 +734,8 @@ class LLMAdvisor:
             raise RuntimeError("GOOGLE_API_KEY is missing")
 
         model_name = (
-            str(model or self.config.model or "gemini-2.5-pro").strip()
-            or "gemini-2.5-pro"
+            str(model or self.config.model or "gemini-3.1-pro-thinking-preview").strip()
+            or "gemini-3.1-pro-thinking-preview"
         )
         payload = {
             "contents": [
@@ -748,7 +748,14 @@ class LLMAdvisor:
                 "temperature": float(self.config.temperature),
                 "maxOutputTokens": int(self.config.max_output_tokens),
                 "responseMimeType": "application/json",
+                **_thinking_config(self.config.reasoning_effort),
             },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ],
         }
         sys_prompt = str(system_prompt or self._system_prompt()).strip()
         if sys_prompt:
@@ -795,7 +802,7 @@ class LLMAdvisor:
                     texts.append(text)
             if texts:
                 return "\n".join(texts).strip()
-        raise RuntimeError("Google Gemini response missing text content")
+        raise RuntimeError(f"Google Gemini response missing text content. Raw dump: {json.dumps(data)}")
 
     @staticmethod
     def _extract_response_text(data: dict) -> str:
@@ -914,10 +921,10 @@ class LLMAdvisor:
             return provider, primary, primary
 
         if provider == "google":
-            primary = primary_model or "gemini-2.5-pro"
+            primary = primary_model or "gemini-3.1-pro-thinking-preview"
             fallback = primary
-            if "gemini-2.5-pro" in primary:
-                fallback = primary.replace("gemini-2.5-pro", "gemini-2.5-flash")
+            if "gemini-3.1-pro-thinking-preview" in primary:
+                fallback = primary.replace("gemini-3.1-pro-thinking-preview", "gemini-3.1-flash-thinking-preview")
             elif primary.endswith("-pro"):
                 fallback = f"{primary[:-4]}-flash"
             return provider, primary, fallback
@@ -1770,6 +1777,24 @@ def _clamp_float(value: object, minimum: float, maximum: float) -> float:
     except (TypeError, ValueError):
         parsed = minimum
     return max(minimum, min(maximum, parsed))
+
+
+_THINKING_BUDGETS: dict[str, int] = {
+    "none": 0,
+    "low": 1024,
+    "medium": 4096,
+    "high": 8192,
+    # "xhigh" is intentionally absent — omitting thinkingBudget lets the model
+    # use its own dynamic budget (maximum reasoning).
+}
+
+
+def _thinking_config(reasoning_effort: str) -> dict:
+    """Map a reasoning_effort string to a Gemini thinkingConfig dict."""
+    effort = str(reasoning_effort or "").strip().lower()
+    if effort in _THINKING_BUDGETS:
+        return {"thinkingConfig": {"thinkingBudget": _THINKING_BUDGETS[effort]}}
+    return {}
 
 
 def _normalize_provider_name(value: object) -> str:
