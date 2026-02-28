@@ -202,6 +202,7 @@ class RLPromptOptimizer:
                 trade_context.get("earnings_in_window")
                 or earnings_proximity.get("in_window")
             ),
+            "adversarial": bool(trade_context.get("adversarial", False)),
             "attribution": attribution,
         }
 
@@ -246,10 +247,12 @@ class RLPromptOptimizer:
 
     def _detect_patterns(self, rows: list[dict]) -> list[dict]:
         patterns: list[dict] = []
-        min_trades = max(3, int(self.config.min_trades_for_pattern or 8))
+        min_trades = max(3, int(self.config.min_trades_for_pattern or 5))
         min_loss_rate = max(
-            0.5, min(0.99, float(self.config.loss_rate_threshold or 0.6))
+            0.4, min(0.99, float(self.config.loss_rate_threshold or 0.50))
         )
+        # Threshold for detecting high-win-rate combinations worth promoting
+        min_win_rate_for_positive = 0.70
 
         grouped: dict[tuple[str, str], list[dict]] = {}
         for row in rows:
@@ -262,18 +265,33 @@ class RLPromptOptimizer:
             grouped.setdefault((strategy, regime), []).append(row)
         for (strategy, regime), items in grouped.items():
             stats = self._pattern_stats(items)
-            if stats["count"] < min_trades or stats["loss_rate"] < min_loss_rate:
+            if stats["count"] < min_trades:
                 continue
-            patterns.append(
-                {
-                    "pattern_key": f"strategy_regime:{strategy}|{regime}",
-                    "rule": (
-                        f"RULE: Do NOT approve {strategy} when regime is {regime} "
-                        "unless volatility risk premium and options-flow context are supportive."
-                    ),
-                    "stats": stats,
-                }
-            )
+            if stats["loss_rate"] >= min_loss_rate:
+                # Failure pattern: avoid this combo
+                patterns.append(
+                    {
+                        "pattern_key": f"strategy_regime:{strategy}|{regime}",
+                        "rule": (
+                            f"RULE: Do NOT approve {strategy} when regime is {regime} "
+                            "unless volatility risk premium and options-flow context are "
+                            "strongly supportive — historical loss rate is high."
+                        ),
+                        "stats": stats,
+                    }
+                )
+            elif (1.0 - stats["loss_rate"]) >= min_win_rate_for_positive and stats["avg_pnl"] > 0:
+                # Positive pattern: promote this combo
+                patterns.append(
+                    {
+                        "pattern_key": f"prefer:{strategy}|{regime}",
+                        "rule": (
+                            f"RULE: PREFER approving {strategy} when regime is {regime} "
+                            "— this combination has a historically high win rate and positive EV."
+                        ),
+                        "stats": stats,
+                    }
+                )
 
         low_conf = [
             row
@@ -292,6 +310,25 @@ class RLPromptOptimizer:
                         "unless position size is explicitly reduced and risk is hedged."
                     ),
                     "stats": stats,
+                }
+            )
+
+        # Detect adversarial/wrong-regime patterns — any strategy with loss rate >= threshold
+        adversarial_rows = [
+            row for row in rows
+            if isinstance(row, dict) and bool(row.get("adversarial"))
+        ]
+        adv_stats = self._pattern_stats(adversarial_rows)
+        if adv_stats["count"] >= min_trades and adv_stats["loss_rate"] >= min_loss_rate:
+            patterns.append(
+                {
+                    "pattern_key": "wrong_regime_strategy",
+                    "rule": (
+                        "RULE: Do NOT approve a strategy that runs counter to the detected "
+                        "market regime. Regime alignment is the single strongest predictor "
+                        "of trade outcome — misaligned trades have a historically high loss rate."
+                    ),
+                    "stats": adv_stats,
                 }
             )
 

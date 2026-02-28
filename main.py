@@ -255,6 +255,7 @@ def run_integrated_diagnostics(
 ) -> int:
     """Run one-shot diagnostics for auth, chain parsing, and entry blockers."""
     print(f"\n  Diagnostics  ·  {mode_hint.upper()}  ·  {symbol}\n")
+    from bot.orchestrator import TradingBot
     from bot.schwab_client import SchwabClient
     client: Optional[SchwabClient] = None
     bot: Optional["TradingBot"] = None
@@ -737,6 +738,7 @@ def main() -> None:
     args.audit_trail = ""
     args.start = ""
     args.end = ""
+    args.synthetic = False
     args.preflight_only = False
     args.setup_live = False
     args.prepare_live = False
@@ -893,8 +895,9 @@ def main() -> None:
             print("--backtest requires --start and --end in YYYY-MM-DD format.")
             sys.exit(2)
         from bot.backtester import Backtester
+        use_synthetic = getattr(args, "synthetic", False)
         try:
-            backtester = Backtester(config)
+            backtester = Backtester(config, use_synthetic=use_synthetic)
             result = backtester.run(start=args.start, end=args.end)
             print(f"Backtest complete. Report: {result.report_path}")
         except Exception as exc:

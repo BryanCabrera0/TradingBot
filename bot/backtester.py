@@ -22,6 +22,7 @@ from bot.analytics import compute as compute_analytics
 from bot.config import BotConfig, load_config
 from bot.data_store import dump_json, ensure_data_dir
 from bot.number_utils import safe_float
+from bot.pricing import black_scholes, bs_greeks
 from bot.regime_detector import MarketRegimeDetector
 from bot.risk_manager import RiskManager
 from bot.strategies.base import TradeSignal
@@ -52,6 +53,13 @@ class WalkForwardWindow:
 class Backtester:
     """Replay historical option-chain snapshots through live strategy logic."""
 
+    # Symbols and starting price seeds used when generating synthetic chains.
+    _SYNTHETIC_SYMBOLS: dict[str, float] = {
+        "SPY": 510.0,
+        "QQQ": 430.0,
+        "IWM": 200.0,
+    }
+
     def __init__(
         self,
         config: Optional[BotConfig] = None,
@@ -60,6 +68,7 @@ class Backtester:
         initial_balance: float = 100_000.0,
         commission_per_contract: float = 0.65,
         base_slippage_pct: float = 0.02,
+        use_synthetic: bool = False,
     ):
         self.config = config or load_config()
         self.data_dir = ensure_data_dir(data_dir)
@@ -73,6 +82,10 @@ class Backtester:
         self.base_slippage_pct = max(0.0, float(base_slippage_pct))
         self.total_fees = 0.0
         self.total_slippage = 0.0
+        # When True, fall back to Black-Scholes synthetic chains when no data files exist.
+        self.use_synthetic = bool(use_synthetic)
+        # Evolving price state for synthetic GBM continuity across days.
+        self._synthetic_prices: dict[str, float] = dict(self._SYNTHETIC_SYMBOLS)
 
         self.risk_manager = RiskManager(self.config.risk)
         self.strategies = self._build_strategies()
@@ -735,6 +748,39 @@ class Backtester:
             parsed = _chain_from_snapshot(frame)
             if parsed:
                 snapshots[symbol] = parsed
+
+        # Fall back to synthetic chain generation when no historical data files exist.
+        if not snapshots and self.use_synthetic:
+            snapshots = self._generate_synthetic_snapshots(trading_day)
+
+        return snapshots
+
+    def _generate_synthetic_snapshots(self, trading_day: date) -> dict[str, dict]:
+        """Build synthetic option chains for all tracked symbols using Black-Scholes.
+
+        Prices follow a seeded random walk day-over-day so the equity curve reflects
+        realistic price drift rather than independent random draws each session.
+        """
+        snapshots: dict[str, dict] = {}
+        dt = 1 / 252  # one trading day
+
+        for symbol, prev_price in self._synthetic_prices.items():
+            # Daily GBM step: mild upward drift with realistic vol
+            mu_daily = 0.08 * dt
+            sigma_daily = 0.18 * math.sqrt(dt)
+            shock = random.gauss(0.0, 1.0)
+            new_price = prev_price * math.exp(mu_daily + sigma_daily * shock)
+            new_price = max(1.0, round(new_price, 2))
+            self._synthetic_prices[symbol] = new_price
+
+            # IV varies day-to-day around a long-run mean (mean-reverting)
+            iv_mean = 0.18
+            iv = max(0.08, iv_mean + random.gauss(0.0, 0.03))
+
+            chain = _build_synthetic_chain(symbol, new_price, iv_mean=iv)
+            if chain:
+                snapshots[symbol] = chain
+
         return snapshots
 
     def _build_report(self, start_date: date, end_date: date) -> dict:
@@ -981,6 +1027,70 @@ class Backtester:
 </body>
 </html>"""
         output_path.write_text(html, encoding="utf-8")
+
+
+def _build_synthetic_chain(
+    symbol: str,
+    underlying_price: float,
+    *,
+    iv_mean: float = 0.18,
+    dte: int = 45,
+    r: float = 0.05,
+) -> dict:
+    """Generate a structured option chain dict from Black-Scholes for one symbol.
+
+    The output format matches what ``_chain_from_snapshot`` produces so all
+    downstream strategy code can consume it without modification.
+    """
+    calls: dict[str, list[dict]] = {}
+    puts: dict[str, list[dict]] = {}
+
+    center = int(round(underlying_price))
+    # Strike range: ±50 points in $1 increments (covers ~10% OTM for SPY-like prices)
+    strikes = list(range(max(1, center - 50), center + 51))
+    T = max(0.001, dte / 365.0)
+
+    # Expiration label: use rolling ~45-DTE date
+    from datetime import date, timedelta
+    exp_date = (date.today() + timedelta(days=dte)).isoformat()
+
+    for strike in strikes:
+        distance = abs(strike - underlying_price) / max(1.0, underlying_price)
+        # Volatility smile: OTM options carry a premium
+        iv = max(0.08, iv_mean + distance * 0.40)
+        spread_pct = max(0.01, min(0.12, distance * 0.6))
+
+        for option_type in ("call", "put"):
+            mid_val = black_scholes(underlying_price, strike, T, r, iv, option_type)
+            greeks = bs_greeks(underlying_price, strike, T, r, iv, option_type)
+            bid = max(0.01, mid_val * (1.0 - spread_pct))
+            ask = max(bid + 0.01, mid_val * (1.0 + spread_pct))
+            opt = {
+                "symbol": f"{symbol}_{exp_date}_{strike}{'C' if option_type == 'call' else 'P'}",
+                "expiration": exp_date,
+                "dte": dte,
+                "strike": float(strike),
+                "bid": round(float(bid), 2),
+                "ask": round(float(ask), 2),
+                "mid": round(float(mid_val), 2),
+                "delta": round(float(greeks["delta"]), 4),
+                "gamma": round(float(greeks["gamma"]), 4),
+                "theta": round(float(greeks["theta"]), 4),
+                "vega": round(float(greeks["vega"]), 4),
+                "iv": round(float(iv), 4),
+                "volume": random.randint(50, 3000),
+                "open_interest": random.randint(200, 8000),
+            }
+            target = calls if option_type == "call" else puts
+            target.setdefault(exp_date, []).append(opt)
+
+    # Strategies expect strikes sorted ascending
+    for exp in calls:
+        calls[exp].sort(key=lambda o: o["strike"])
+    for exp in puts:
+        puts[exp].sort(key=lambda o: o["strike"])
+
+    return {"underlying_price": underlying_price, "calls": calls, "puts": puts}
 
 
 def _chain_from_snapshot(frame: pd.DataFrame) -> dict:

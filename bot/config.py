@@ -235,10 +235,10 @@ class TerminalUIConfig:
 @dataclass
 class RLPromptOptimizerConfig:
     enabled: bool = False
-    min_trades_for_pattern: int = 8
-    loss_rate_threshold: float = 0.60
-    max_rules: int = 25
-    rolling_window_size: int = 100
+    min_trades_for_pattern: int = 5
+    loss_rate_threshold: float = 0.50
+    max_rules: int = 50
+    rolling_window_size: int = 200
     learned_rules_file: str = "bot/data/learned_rules.json"
     audit_log_file: str = "bot/data/audit_log.jsonl"
 
