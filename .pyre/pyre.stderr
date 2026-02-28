@@ -1,0 +1,252 @@
+2026-02-28 04:53:45,461 [PID 31721] INFO No binary specified, looking for `pyre.bin` in PATH
+2026-02-28 04:53:45,463 [PID 31721] INFO Pyre binary is located at `.venv/bin/pyre.bin`
+2026-02-28 04:53:45,463 [PID 31721] ERROR Invalid configuration: Cannot find any source files to analyze. Either `source_directories` or `targets` must be specified.
+2026-02-28 04:53:55,371 [PID 31808] INFO No binary specified, looking for `pyre.bin` in PATH
+2026-02-28 04:53:55,372 [PID 31808] INFO Pyre binary is located at `.venv/bin/pyre.bin`
+2026-02-28 04:53:55,372 [PID 31808] INFO Could not determine the number of Pyre workers from configuration. Auto-set the value to 4.
+2026-02-28 04:53:55,372 [PID 31808] INFO No typeshed specified, looking for it...
+2026-02-28 04:53:55,372 [PID 31808] INFO Found: `/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed`
+2026-02-28 04:53:55,373 [PID 31808] INFO Writing arguments into /var/folders/lc/gbcb5lv55gqdhbqpgz4432tw0000gn/T/pyre_arguments_ef1puypp.json...
+2026-02-28 04:53:55,373 [PID 31808] DEBUG Arguments:
+{
+  "source_paths": {
+    "kind": "simple",
+    "paths": [
+      "/Users/bryan/TradingBot"
+    ]
+  },
+  "search_paths": [
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stdlib",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ExifRead",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/PyMySQL",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/PyYAML",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/aiofiles",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/chevron",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/colorama",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ldap3",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/mysqlclient",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/paramiko",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/psycopg2",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/pycurl",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/python-dateutil",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/pytz",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/regex",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/requests",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/retry",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/tqdm",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ujson"
+  ],
+  "excludes": [],
+  "checked_directory_allowlist": [
+    "/Users/bryan/TradingBot"
+  ],
+  "checked_directory_blocklist": [],
+  "extensions": [],
+  "log_path": "/Users/bryan/TradingBot/.pyre",
+  "global_root": "/Users/bryan/TradingBot",
+  "debug": false,
+  "python_version": {
+    "major": 3,
+    "minor": 9,
+    "micro": 6
+  },
+  "system_platform": "darwin",
+  "shared_memory": {},
+  "parallel": true,
+  "number_of_workers": 4,
+  "additional_logging_sections": [],
+  "show_error_traces": false,
+  "strict": false
+}
+2026-02-28 04:53:57,579 [PID 31808] PERFORMANCE  Initialized shared memory (heap size: 8589934592, dep table pow: 1, hash table pow: 26): 0.000s
+2026-02-28 04:53:57,591 [PID 31808] PERFORMANCE  Initialized multiprocessing workers (workers: 4): 0.008s
+2026-02-28 04:53:57,591 [PID 31808] INFO  Building module tracker...
+2026-02-28 04:53:57,616 [PID 31808] PERFORMANCE  Module tracker built: 0.025s
+2026-02-28 04:53:57,616 [PID 31808] PERFORMANCE  Full environment built: 0.025s
+2026-02-28 04:53:57,616 [PID 31808] INFO  Collecting all definitions...
+2026-02-28 04:53:58,512 [PID 31808] PERFORMANCE  Collected definitions (defines: 21529): 0.897s
+2026-02-28 04:53:58,512 [PID 31808] INFO  Checking 21529 functions...
+2026-02-28 04:53:59,944 [PID 31808] INFO  Processed 2692 of 21529 functions
+2026-02-28 04:54:00,369 [PID 31808] INFO  Processed 5384 of 21529 functions
+2026-02-28 04:54:00,792 [PID 31808] INFO  Processed 8076 of 21529 functions
+2026-02-28 04:54:01,074 [PID 31808] INFO  Processed 10768 of 21529 functions
+2026-02-28 04:54:01,567 [PID 31808] INFO  Processed 13460 of 21529 functions
+2026-02-28 04:54:01,779 [PID 31808] INFO  Processed 16152 of 21529 functions
+2026-02-28 04:54:02,029 [PID 31808] INFO  Processed 18844 of 21529 functions
+2026-02-28 04:54:02,444 [PID 31808] INFO  Processed 21529 of 21529 functions
+2026-02-28 04:54:02,444 [PID 31808] PERFORMANCE  Check_TypeCheck: 3.931s
+2026-02-28 04:54:02,444 [PID 31808] MEMORY  Shared memory size post-typecheck (size: 27)
+2026-02-28 04:54:02,444 [PID 31808] INFO  Postprocessing 1031 sources...
+2026-02-28 04:54:02,622 [PID 31808] INFO  Postprocessed 258 of 1031 sources
+2026-02-28 04:54:02,623 [PID 31808] INFO  Postprocessed 516 of 1031 sources
+2026-02-28 04:54:02,648 [PID 31808] INFO  Postprocessed 773 of 1031 sources
+2026-02-28 04:54:02,648 [PID 31808] INFO  Postprocessed 1031 of 1031 sources
+2026-02-28 04:54:02,648 [PID 31808] PERFORMANCE  Check_Postprocessing: 0.199s
+2026-02-28 04:54:02,648 [PID 31808] PERFORMANCE  Check (request kind: FullCheck): 5.054s
+2026-02-28 04:54:02,709 [PID 31808] ERROR Found 994 type errors!
+2026-02-28 04:54:16,528 [PID 31993] INFO No binary specified, looking for `pyre.bin` in PATH
+2026-02-28 04:54:16,528 [PID 31993] INFO Pyre binary is located at `.venv/bin/pyre.bin`
+2026-02-28 04:54:16,529 [PID 31993] INFO Could not determine the number of Pyre workers from configuration. Auto-set the value to 4.
+2026-02-28 04:54:16,529 [PID 31993] INFO No typeshed specified, looking for it...
+2026-02-28 04:54:16,529 [PID 31993] INFO Found: `/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed`
+2026-02-28 04:54:16,529 [PID 31993] INFO Writing arguments into /var/folders/lc/gbcb5lv55gqdhbqpgz4432tw0000gn/T/pyre_arguments_6u02xol_.json...
+2026-02-28 04:54:16,529 [PID 31993] DEBUG Arguments:
+{
+  "source_paths": {
+    "kind": "simple",
+    "paths": [
+      "/Users/bryan/TradingBot"
+    ]
+  },
+  "search_paths": [
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stdlib",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ExifRead",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/PyMySQL",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/PyYAML",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/aiofiles",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/chevron",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/colorama",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ldap3",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/mysqlclient",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/paramiko",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/psycopg2",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/pycurl",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/python-dateutil",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/pytz",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/regex",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/requests",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/retry",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/tqdm",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ujson"
+  ],
+  "excludes": [],
+  "checked_directory_allowlist": [
+    "/Users/bryan/TradingBot"
+  ],
+  "checked_directory_blocklist": [],
+  "extensions": [],
+  "log_path": "/Users/bryan/TradingBot/.pyre",
+  "global_root": "/Users/bryan/TradingBot",
+  "debug": false,
+  "python_version": {
+    "major": 3,
+    "minor": 9,
+    "micro": 6
+  },
+  "system_platform": "darwin",
+  "shared_memory": {},
+  "parallel": true,
+  "number_of_workers": 4,
+  "additional_logging_sections": [],
+  "show_error_traces": false,
+  "strict": false
+}
+2026-02-28 04:54:16,569 [PID 31993] PERFORMANCE  Initialized shared memory (heap size: 8589934592, dep table pow: 1, hash table pow: 26): 0.000s
+2026-02-28 04:54:16,581 [PID 31993] PERFORMANCE  Initialized multiprocessing workers (workers: 4): 0.007s
+2026-02-28 04:54:16,582 [PID 31993] INFO  Building module tracker...
+2026-02-28 04:54:16,605 [PID 31993] PERFORMANCE  Module tracker built: 0.022s
+2026-02-28 04:54:16,606 [PID 31993] PERFORMANCE  Full environment built: 0.022s
+2026-02-28 04:54:16,606 [PID 31993] INFO  Collecting all definitions...
+2026-02-28 04:54:17,453 [PID 31993] PERFORMANCE  Collected definitions (defines: 21529): 0.853s
+2026-02-28 04:54:17,453 [PID 31993] INFO  Checking 21529 functions...
+2026-02-28 04:54:18,849 [PID 31993] INFO  Processed 2692 of 21529 functions
+2026-02-28 04:54:19,256 [PID 31993] INFO  Processed 5384 of 21529 functions
+2026-02-28 04:54:19,640 [PID 31993] INFO  Processed 8076 of 21529 functions
+2026-02-28 04:54:19,889 [PID 31993] INFO  Processed 10768 of 21529 functions
+2026-02-28 04:54:20,383 [PID 31993] INFO  Processed 13460 of 21529 functions
+2026-02-28 04:54:20,570 [PID 31993] INFO  Processed 16152 of 21529 functions
+2026-02-28 04:54:20,821 [PID 31993] INFO  Processed 18844 of 21529 functions
+2026-02-28 04:54:21,261 [PID 31993] INFO  Processed 21529 of 21529 functions
+2026-02-28 04:54:21,261 [PID 31993] PERFORMANCE  Check_TypeCheck: 3.801s
+2026-02-28 04:54:21,261 [PID 31993] MEMORY  Shared memory size post-typecheck (size: 27)
+2026-02-28 04:54:21,261 [PID 31993] INFO  Postprocessing 1031 sources...
+2026-02-28 04:54:21,433 [PID 31993] INFO  Postprocessed 258 of 1031 sources
+2026-02-28 04:54:21,446 [PID 31993] INFO  Postprocessed 516 of 1031 sources
+2026-02-28 04:54:21,456 [PID 31993] INFO  Postprocessed 773 of 1031 sources
+2026-02-28 04:54:21,456 [PID 31993] INFO  Postprocessed 1031 of 1031 sources
+2026-02-28 04:54:21,456 [PID 31993] PERFORMANCE  Check_Postprocessing: 0.203s
+2026-02-28 04:54:21,456 [PID 31993] PERFORMANCE  Check (request kind: FullCheck): 4.880s
+2026-02-28 04:54:21,517 [PID 31993] ERROR Found 994 type errors!
+2026-02-28 04:59:35,505 [PID 32934] INFO No binary specified, looking for `pyre.bin` in PATH
+2026-02-28 04:59:35,506 [PID 32934] INFO Pyre binary is located at `.venv/bin/pyre.bin`
+2026-02-28 04:59:35,506 [PID 32934] INFO Could not determine the number of Pyre workers from configuration. Auto-set the value to 4.
+2026-02-28 04:59:35,506 [PID 32934] INFO No typeshed specified, looking for it...
+2026-02-28 04:59:35,506 [PID 32934] INFO Found: `/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed`
+2026-02-28 04:59:35,507 [PID 32934] INFO Writing arguments into /var/folders/lc/gbcb5lv55gqdhbqpgz4432tw0000gn/T/pyre_arguments_kqlaer2h.json...
+2026-02-28 04:59:35,507 [PID 32934] DEBUG Arguments:
+{
+  "source_paths": {
+    "kind": "simple",
+    "paths": [
+      "/Users/bryan/TradingBot"
+    ]
+  },
+  "search_paths": [
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stdlib",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ExifRead",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/PyMySQL",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/PyYAML",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/aiofiles",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/chevron",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/colorama",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ldap3",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/mysqlclient",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/paramiko",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/psycopg2",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/pycurl",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/python-dateutil",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/pytz",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/regex",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/requests",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/retry",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/tqdm",
+    "/Users/bryan/TradingBot/.venv/lib/pyre_check/typeshed/stubs/ujson"
+  ],
+  "excludes": [],
+  "checked_directory_allowlist": [
+    "/Users/bryan/TradingBot"
+  ],
+  "checked_directory_blocklist": [],
+  "extensions": [],
+  "log_path": "/Users/bryan/TradingBot/.pyre",
+  "global_root": "/Users/bryan/TradingBot",
+  "debug": false,
+  "python_version": {
+    "major": 3,
+    "minor": 9,
+    "micro": 6
+  },
+  "system_platform": "darwin",
+  "shared_memory": {},
+  "parallel": true,
+  "number_of_workers": 4,
+  "additional_logging_sections": [],
+  "show_error_traces": false,
+  "strict": false
+}
+2026-02-28 04:59:35,615 [PID 32934] PERFORMANCE  Initialized shared memory (heap size: 8589934592, dep table pow: 1, hash table pow: 26): 0.001s
+2026-02-28 04:59:35,628 [PID 32934] PERFORMANCE  Initialized multiprocessing workers (workers: 4): 0.008s
+2026-02-28 04:59:35,628 [PID 32934] INFO  Building module tracker...
+2026-02-28 04:59:35,653 [PID 32934] PERFORMANCE  Module tracker built: 0.027s
+2026-02-28 04:59:35,653 [PID 32934] PERFORMANCE  Full environment built: 0.027s
+2026-02-28 04:59:35,653 [PID 32934] INFO  Collecting all definitions...
+2026-02-28 04:59:36,578 [PID 32934] PERFORMANCE  Collected definitions (defines: 21529): 0.922s
+2026-02-28 04:59:36,578 [PID 32934] INFO  Checking 21529 functions...
+2026-02-28 04:59:38,030 [PID 32934] INFO  Processed 2692 of 21529 functions
+2026-02-28 04:59:38,434 [PID 32934] INFO  Processed 5384 of 21529 functions
+2026-02-28 04:59:38,800 [PID 32934] INFO  Processed 8076 of 21529 functions
+2026-02-28 04:59:39,022 [PID 32934] INFO  Processed 10768 of 21529 functions
+2026-02-28 04:59:39,566 [PID 32934] INFO  Processed 13460 of 21529 functions
+2026-02-28 04:59:39,759 [PID 32934] INFO  Processed 16152 of 21529 functions
+2026-02-28 04:59:39,979 [PID 32934] INFO  Processed 18844 of 21529 functions
+2026-02-28 04:59:40,390 [PID 32934] INFO  Processed 21529 of 21529 functions
+2026-02-28 04:59:40,390 [PID 32934] PERFORMANCE  Check_TypeCheck: 3.820s
+2026-02-28 04:59:40,390 [PID 32934] MEMORY  Shared memory size post-typecheck (size: 27)
+2026-02-28 04:59:40,390 [PID 32934] INFO  Postprocessing 1031 sources...
+2026-02-28 04:59:40,574 [PID 32934] INFO  Postprocessed 258 of 1031 sources
+2026-02-28 04:59:40,574 [PID 32934] INFO  Postprocessed 516 of 1031 sources
+2026-02-28 04:59:40,597 [PID 32934] INFO  Postprocessed 773 of 1031 sources
+2026-02-28 04:59:40,597 [PID 32934] INFO  Postprocessed 1031 of 1031 sources
+2026-02-28 04:59:40,597 [PID 32934] PERFORMANCE  Check_Postprocessing: 0.203s
+2026-02-28 04:59:40,597 [PID 32934] PERFORMANCE  Check (request kind: FullCheck): 4.975s
+2026-02-28 04:59:40,658 [PID 32934] ERROR Found 990 type errors!

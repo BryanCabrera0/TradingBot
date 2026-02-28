@@ -461,7 +461,8 @@ class TerminalUI:
         max_pos = max(1, int(portfolio.get("max_positions", 1) or 1))
         risk_pct = float(portfolio.get("daily_risk_pct", 0.0) or 0.0)
         max_risk = float(portfolio.get("max_daily_risk_pct", 0.0) or 0.0)
-        greeks = portfolio.get("greeks") if isinstance(portfolio.get("greeks"), dict) else {}
+        greeks_raw = portfolio.get("greeks")
+        greeks = greeks_raw if isinstance(greeks_raw, dict) else {}
         delta = float(greeks.get("delta", 0.0) or 0.0)
         theta = float(greeks.get("theta", 0.0) or 0.0)
         vega = float(greeks.get("vega", 0.0) or 0.0)

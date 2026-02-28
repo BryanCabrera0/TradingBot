@@ -39,8 +39,8 @@ class LLMAdvisorTests(unittest.TestCase):
         advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
         advisor._query_model = mock.Mock(
             return_value=(
-                '{"approve":false,"confidence":0.82,'
-                '"risk_adjustment":0.6,"reason":"volatility spike"}'
+                '{"verdict":"reject","confidence":82,'
+                '"risk_adjustment":0.6,"reasoning":"volatility spike"}'
             )
         )
 
@@ -175,14 +175,14 @@ class LLMAdvisorTests(unittest.TestCase):
             post.call_args_list[1].args[0], "https://api.openai.com/v1/chat/completions"
         )
 
-    def test_openai_gpt52pro_payload_uses_reasoning_without_temp_or_schema(
+    def test_openai_o1_payload_uses_reasoning_without_temp_or_schema(
         self,
     ) -> None:
         advisor = LLMAdvisor(
             LLMConfig(
                 enabled=True,
                 provider="openai",
-                model="gpt-5.2-pro",
+                model="o1",
                 reasoning_effort="high",
                 text_verbosity="low",
                 max_output_tokens=777,
@@ -205,7 +205,7 @@ class LLMAdvisorTests(unittest.TestCase):
                 _ = advisor._query_openai("{}")
 
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["model"], "gpt-5.2-pro")
+        self.assertEqual(payload["model"], "o1")
         self.assertEqual(payload["reasoning"]["effort"], "high")
         self.assertEqual(payload["text"]["verbosity"], "low")
         self.assertEqual(payload["max_output_tokens"], 777)
@@ -369,6 +369,7 @@ class LLMAdvisorTests(unittest.TestCase):
         cfg = LLMConfig(
             enabled=True,
             provider="openai",
+            model="gpt-5.2-pro",
             ensemble_enabled=True,
             multi_turn_enabled=False,
         )
@@ -381,6 +382,7 @@ class LLMAdvisorTests(unittest.TestCase):
             provider: Optional[str] = None,
             model: Optional[str] = None,
             system_prompt: Optional[str] = None,
+            **kwargs,
         ) -> str:
             models_seen.append(str(model or ""))
             if model == "gpt-5.2-pro":
@@ -396,7 +398,7 @@ class LLMAdvisorTests(unittest.TestCase):
         decision, votes = advisor._review_trade_ensemble("{}")
 
         self.assertEqual(decision.verdict, "approve")
-        self.assertTrue(any(model == "gpt-5.2" for model in models_seen))
+        self.assertTrue(any(model == "gpt-5.2-pro" for model in models_seen))
         self.assertGreaterEqual(len(votes), 4)
 
     def test_prompt_includes_journal_context_when_enabled(self) -> None:

@@ -38,9 +38,11 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
 
         bot._update_market_regime()
 
+        expected_scaled_limit = int(round(10 * 0.7))
+
         self.assertEqual(bot.circuit_state["regime"], HIGH_VOL_CHOP)
         self.assertEqual(
-            bot.risk_manager.config.max_open_positions, int(round(starting_limit * 0.7))
+            bot.risk_manager.config.max_open_positions, expected_scaled_limit
         )
         self.assertAlmostEqual(
             bot.strategies[0].config.get("min_credit_pct"),

@@ -550,8 +550,13 @@ def _parse_args() -> tuple[argparse.Namespace, bool]:
         args.command = "run"
         if sys.stdin.isatty():
             mode, once = _resolve_menu_selection()
-            args.mode = mode
-            args.once_token = "once" if once else None
+            if mode == "bootstrap":
+                args.mode = "simulator"
+                args.iterations = 100
+                args.once_token = None
+            else:
+                args.mode = mode
+                args.once_token = "once" if once else None
         else:
             # Avoid hanging in non-interactive contexts (scripts/services).
             args.mode = "simulator"
@@ -560,7 +565,8 @@ def _parse_args() -> tuple[argparse.Namespace, bool]:
     args.live = str(getattr(args, "mode", "simulator") or "simulator") == "live"
     args.once = str(getattr(args, "once_token", "") or "") == "once"
     args.diagnose = bool(getattr(args, "diagnose", False))
-    args.iterations = int(getattr(args, "iterations", 50))
+    args.iterations = getattr(args, "iterations", 50)
+    args.iterations = int(args.iterations) if args.iterations else 50
     return args, interactive_menu_requested
 
 def _count_enabled_strategies(config) -> int:
@@ -592,16 +598,43 @@ def _print_runtime_summary(config) -> None:
     print()
 
 
+def _is_bootstrap_complete() -> bool:
+    try:
+        path = Path("bot/data/learned_rules.json")
+        if not path.exists():
+            return False
+        import json
+        with path.open("r") as f:
+            data = json.load(f)
+        return "meta" in data or "rules" in data
+    except Exception:
+        return False
+
 def prompt_run_menu() -> tuple[str, bool]:
     """Prompt for run mode."""
     print("\n  Mode Selection")
     print("  " + "─" * 14)
-    print("  1) Simulator (Paper / Training)")
-    print("  2) Live Trading\n")
+    
+    bootstrap_done = _is_bootstrap_complete()
+    options = {}
+    
+    if not bootstrap_done:
+        print("  1) One-time Bootstrap (~10-15m)")
+        print("  2) Simulator (Offline / Synthetic Data)")
+        print("  3) Paper Trading (Live Market Data)")
+        print("  4) Live Trading (Real Money)\n")
+        options = {"1": ("bootstrap", False), "2": ("simulator", False), "3": ("paper", False), "4": ("live", False)}
+        valid_range = "[1-4]"
+    else:
+        print("  1) Simulator (Offline / Synthetic Data)")
+        print("  2) Paper Trading (Live Market Data)")
+        print("  3) Live Trading (Real Money)\n")
+        options = {"1": ("simulator", False), "2": ("paper", False), "3": ("live", False)}
+        valid_range = "[1-3]"
 
     while True:
         try:
-            raw = input("  Select mode [1-2]: ").strip().lower()
+            raw = input(f"  Select mode {valid_range}: ").strip().lower()
         except KeyboardInterrupt:
             print("\nAborted.")
             sys.exit(130)
@@ -609,11 +642,11 @@ def prompt_run_menu() -> tuple[str, bool]:
             print("\nNo selection received. Aborted.")
             sys.exit(2)
 
-        if raw in RUN_MENU_OPTIONS:
-            return RUN_MENU_OPTIONS[raw]
+        if raw in options:
+            return options[raw]
         if raw in RUN_MENU_ALIASES:
             return RUN_MENU_ALIASES[raw]
-        print("Invalid selection. Enter 1 or 2.")
+        print(f"Invalid selection. Enter a number {valid_range}.")
 
 
 def prompt_after_run_menu() -> bool:
@@ -1001,6 +1034,9 @@ def main() -> None:
         from bot.simulator import TrainingSimulator
         sim = TrainingSimulator(config)
         sim.train(iterations=args.iterations)
+        if interactive_menu_requested and sys.stdin.isatty():
+            if prompt_after_run_menu():
+                main()
         return
 
     from bot.orchestrator import TradingBot

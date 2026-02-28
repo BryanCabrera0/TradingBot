@@ -12,7 +12,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeSignal:
-    """A signal to open or close a trade."""
+    """A standard signal representation used to open, close, or roll a trade.
+    
+    This object serves as the common currency between the Strategy (which generates it), 
+    the RiskManager (which validates and sizes it), the LLMAdvisor (which approves it), 
+    and the Orchestrator (which executes it).
+    
+    Other AI agents should look for these fields:
+    - action: Must be 'open', 'close', or 'roll'
+    - strategy: Name of the originating strategy (e.g. 'credit_spreads')
+    - analysis: SpreadAnalysis containing Greeks, probability, and theoretical risk/reward
+    - metadata: Free-form dict for debugging or LLM context (e.g. why it was picked)
+    """
 
     action: str  # "open", "close", or "roll"
     strategy: str
@@ -29,7 +40,12 @@ class TradeSignal:
 
 
 class BaseStrategy(ABC):
-    """Abstract base class for trading strategies."""
+    """Abstract base class for all trading strategies in the bot.
+    
+    When creating a new strategy, inherit from this class and implement:
+    1. scan_for_entries: Iterate over option chains and return valid 'open' TradeSignals.
+    2. check_exits: Iterate over open positions and return valid 'close' or 'roll' TradeSignals.
+    """
 
     def __init__(self, name: str, config: dict):
         self.name = name
@@ -47,21 +63,34 @@ class BaseStrategy(ABC):
     ) -> list[TradeSignal]:
         """Scan an options chain for new entry opportunities.
 
-        Returns a list of TradeSignals for positions to open.
+        Args:
+            symbol: Ticker symbol (e.g., 'SPY')
+            chain_data: Raw JSON payload from Schwab options chain API
+            underlying_price: Current market price of the underlying asset
+            technical_context: Optional indicators (RSI, MACD) from TechnicalAnalyzer
+            market_context: Optional dictionary containing VIX, regime, or news sentiment
+
+        Returns:
+            A list of TradeSignals populated with 'open' actions and SpreadAnalysis data.
         """
 
     @abstractmethod
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
-        """Check existing positions for exit signals.
+        """Check existing positions for exit signals based on P&L, DTE, or technicals.
 
-        Returns a list of TradeSignals for positions to close.
+        Args:
+            positions: List of dictionary records representing currently open trades
+            market_client: Reference to the SchwabClient or PaperTrader for fetching latest quotes
+
+        Returns:
+            A list of TradeSignals populated with 'close' actions.
         """
 
     def meets_minimum_quality(self, analysis: SpreadAnalysis) -> bool:
         """Check if a spread analysis meets minimum quality thresholds."""
-        min_credit_pct = self.config.get("min_credit_pct", 0.06)
-        min_score = self.config.get("min_score", 20.0)
-        min_pop = self.config.get("min_pop", 0.30)
+        min_credit_pct = self.config.get("min_credit_pct", 0.02)
+        min_score = self.config.get("min_score", 5.0)
+        min_pop = self.config.get("min_pop", 0.10)
 
         if analysis.credit <= 0:
             self.logger.debug("Rejected: zero or negative credit")

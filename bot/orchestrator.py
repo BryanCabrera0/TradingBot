@@ -216,6 +216,10 @@ class TradingBot:
         self.technicals = TechnicalAnalyzer()
         self.llm_advisor: Optional[LLMAdvisor] = None
         if self.config.llm.enabled:
+            # Force-disable heavy LLM costs during paper trading
+            if self.is_paper:
+                self.config.llm.ensemble_enabled = False
+                self.config.llm.multi_turn_enabled = False
             self.llm_advisor = LLMAdvisor(self.config.llm)
         self.rl_prompt_optimizer: Optional[RLPromptOptimizer] = None
         if bool(getattr(self.config.rl_prompt_optimizer, "enabled", False)):
@@ -4626,10 +4630,10 @@ class TradingBot:
                 filtered.append(sig)
                 continue
 
-            strategy_name = str(signal.strategy or "").lower()
-            dte = int(getattr(signal.analysis, "dte", 0) or 0)
-            width = self._signal_width(signal)
-            size_multiplier = float(signal.size_multiplier or 1.0)
+            strategy_name = str(sig.strategy or "").lower()
+            dte = int(getattr(sig.analysis, "dte", 0) or 0)
+            width = self._signal_width(sig)
+            size_multiplier = float(sig.size_multiplier or 1.0)
 
             if (
                 regime in {"CRASH", "CRISIS", CRASH_CRISIS}
@@ -4664,11 +4668,11 @@ class TradingBot:
                 "bull_put_spread",
                 "bear_call_spread",
             }:
-                tech = signal.metadata.get("technical_context", {})
+                tech = sig.metadata.get("technical_context", {})
                 zscore = safe_float((tech or {}).get("return_5d_zscore"), 0.0)
                 if abs(zscore) >= 2.0:
-                    signal.analysis.score = min(
-                        100.0, float(signal.analysis.score or 0.0) + 8.0
+                    sig.analysis.score = min(
+                        100.0, float(sig.analysis.score or 0.0) + 8.0
                     )
 
             if self.vol_surface_analyzer and vol_surface:
@@ -4702,8 +4706,8 @@ class TradingBot:
             elif flow_bias == "bullish" and strategy_name == "bear_call_spread":
                 size_multiplier *= 0.80
 
-            signal.size_multiplier = max(0.1, min(2.0, size_multiplier))
-            filtered.append(signal)
+            sig.size_multiplier = max(0.1, min(2.0, size_multiplier))
+            filtered.append(sig)
 
         return filtered
 

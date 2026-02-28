@@ -124,18 +124,18 @@ class ScannerConfig:
 class RiskConfig:
     max_portfolio_risk_pct: float = 5.0
     max_position_risk_pct: float = 2.0
-    max_open_positions: int = 10
-    max_positions_per_symbol: int = 2
+    max_open_positions: int = 25
+    max_positions_per_symbol: int = 5
     min_account_balance: float = 5000.0
-    max_daily_loss_pct: float = 3.0
+    max_daily_loss_pct: float = 15.0
     covered_call_notional_risk_pct: float = 20.0
     # Portfolio greek/correlation risk controls
     max_portfolio_delta_abs: float = 50.0
     max_portfolio_vega_pct_of_account: float = 0.5
-    max_sector_risk_pct: float = 40.0
+    max_sector_risk_pct: float = 80.0
     correlation_lookback_days: int = 60
-    correlation_threshold: float = 0.8
-    max_portfolio_correlation: float = 0.85
+    correlation_threshold: float = 0.95
+    max_portfolio_correlation: float = 0.95
     var_enabled: bool = False
     var_lookback_days: int = 60
     var_limit_pct_95: float = 3.0
@@ -330,10 +330,10 @@ class LLMConfig:
     model: str = "gemini-3.1-pro-thinking-preview"
     base_url: str = "http://127.0.0.1:11434"
     mode: str = "advisory"  # "advisory" or "blocking"
-    risk_style: str = "moderate"  # "conservative" | "moderate" | "aggressive"
+    risk_style: str = "aggressive"  # "conservative" | "moderate" | "aggressive"
     timeout_seconds: int = 20
     temperature: float = 0.1
-    min_confidence: float = 0.55
+    min_confidence: float = 0.10
     track_record_file: str = "bot/data/llm_track_record.json"
     reasoning_effort: str = "xhigh"
     text_verbosity: str = "low"
@@ -2126,7 +2126,7 @@ def _normalize_config(cfg: BotConfig) -> None:
             or model_key.startswith("gemini-")
             or model_key.startswith("claude-")
         ):
-            cfg.llm_strategist.model = "gpt-5.2-pro"
+            cfg.llm_strategist.model = "gpt-4o"
     elif cfg.llm_strategist.provider == "google":
         model_key = str(cfg.llm_strategist.model).strip().lower()
         if (

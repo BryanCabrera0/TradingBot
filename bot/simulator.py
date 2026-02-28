@@ -10,6 +10,7 @@ from typing import Any
 
 from bot.analysis import SpreadAnalysis
 from bot.config import BotConfig
+from bot.data_store import load_json
 from bot.llm_advisor import LLMAdvisor
 from bot.llm_strategist import LLMStrategist
 from bot.multi_agent_cio import MultiAgentCIO
@@ -79,8 +80,7 @@ class TrainingSimulator:
     def _load_learned_rules(self) -> list[str]:
         """Fetch current rules from the RL optimizer."""
         try:
-            with open(self.optimizer.rules_path, "r") as f:
-                data = json.load(f)
+            data = load_json(self.optimizer.rules_path, {"rules": []})
             return [str(r.get("rule", "")) for r in data.get("rules", [])]
         except Exception:
             return []
@@ -246,8 +246,8 @@ class TrainingSimulator:
                     "current_price": underlying,
                 })
                 cio_result = self.cio.run(prompt=prompt_json)
-                go_no_go = str(cio_result.final_payload.get("decision", "no-go")).lower()
-                if "no" in go_no_go:
+                go_no_go = str(cio_result.final_payload.get("verdict", "reject")).lower()
+                if go_no_go not in {"approve", "reduce_size"}:
                     skipped += 1
                     print(f"  {i:>4}/{iterations}  {regime:<16}  {strategy_name:<22}  rejected")
                     continue
@@ -272,6 +272,18 @@ class TrainingSimulator:
             is_black_swan = random.random() < 0.15
             path = generate_gbm_path(underlying, mu, sigma, days=45, inject_black_swan=is_black_swan)
 
+            # Calculate initial theoretical value to prevent immediate artificial P&L swings
+            if strategy_name == "bull_put_spread":
+                initial_value = (
+                    black_scholes(underlying, analysis.short_strike, 45/365.0, 0.05, sigma, "put")
+                    - black_scholes(underlying, analysis.long_strike, 45/365.0, 0.05, sigma, "put")
+                )
+            else:
+                initial_value = (
+                    black_scholes(underlying, analysis.short_strike, 45/365.0, 0.05, sigma, "call")
+                    - black_scholes(underlying, analysis.long_strike, 45/365.0, 0.05, sigma, "call")
+                )
+
             final_pnl = 0.0
             pnl = 0.0
             for d, price in enumerate(path):
@@ -286,13 +298,15 @@ class TrainingSimulator:
                         black_scholes(price, analysis.short_strike, T, 0.05, sigma, "call")
                         - black_scholes(price, analysis.long_strike, T, 0.05, sigma, "call")
                     )
-                pnl = analysis.credit - current_value
+                # P&L is the change in value: if value drops from initial, we profit (credit spread)
+                pnl = initial_value - current_value
                 if pnl <= -analysis.max_loss * 0.5:
                     final_pnl = pnl * 100
                     break
-                elif pnl >= analysis.credit * 0.75:
+                elif pnl >= initial_value * 0.75: # Take profit at 75% of max possible gain
                     final_pnl = pnl * 100
                     break
+            
             if final_pnl == 0.0:
                 final_pnl = pnl * 100
 

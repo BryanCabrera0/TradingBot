@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
 CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
-RESPONSES_ONLY_MODELS = {"gpt-5.2-pro"}
+RESPONSES_ONLY_MODELS = {"o1", "o3-mini"}
 DEFAULT_CHAT_FALLBACK_MODEL = "gpt-4.1"
 
 
@@ -210,7 +210,7 @@ def _should_send_temperature(model: str, reasoning_effort: Optional[str]) -> boo
     """Determine whether the temperature parameter should be sent."""
     model_name = str(model or "").strip().lower()
     if (
-        model_name.startswith("gpt-5")
+        (model_name.startswith("o1") or model_name.startswith("o3"))
         and reasoning_effort
         and reasoning_effort != "none"
     ):

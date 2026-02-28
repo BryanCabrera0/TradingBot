@@ -401,6 +401,8 @@ class RLPromptOptimizer:
             else {"value": str(details)},
         }
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.audit_path.exists():
+            self.audit_path.touch(mode=0o600)
         with open(self.audit_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, separators=(",", ":"), default=str))
             handle.write("\n")

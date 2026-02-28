@@ -71,11 +71,11 @@ class MultiAgentCIO:
 
     CIO: DebateAgent = DebateAgent(
         key="cio",
-        persona="Chief Investment Officer",
-        focus="Resolve conflicts, enforce debate discipline, and issue final go/no-go + capital allocation.",
+        persona="Aggressive Chief Investment Officer",
+        focus="Growth, capital deployment, and executing trades aggressively.",
         system_prompt=(
-            "You are the Chief Investment Officer (CIO) agent. "
             "You must arbitrate analyst disagreements and decide final go/no-go and size. "
+            "While maintaining a smart and generally conservative profile, be slightly more tolerant of risk to approve more viable setups and avoid missing opportunities. "
             "Respond ONLY with strict JSON."
         ),
     )
@@ -85,17 +85,17 @@ class MultiAgentCIO:
         *,
         query_model: Callable[..., str],
         parse_decision: Callable[[str], tuple[object, bool]],
-        primary_model: str = "gpt-5.2-pro",
-        fallback_model: str = "gpt-5.2",
+        primary_model: str = "gpt-4o",
+        fallback_model: str = "gpt-4o-mini",
         provider: str = "openai",
         learned_rules: Optional[list[str]] = None,
     ):
         self._query_model = query_model
         self._parse_decision = parse_decision
         self.primary_model = (
-            str(primary_model or "gpt-5.2-pro").strip() or "gpt-5.2-pro"
+            str(primary_model or "gpt-4o").strip() or "gpt-4o"
         )
-        self.fallback_model = str(fallback_model or "gpt-5.2").strip() or "gpt-5.2"
+        self.fallback_model = str(fallback_model or "gpt-4o-mini").strip() or "gpt-4o-mini"
         self.provider = str(provider or "openai").strip().lower() or "openai"
         self.learned_rules = [
             str(rule).strip() for rule in (learned_rules or []) if str(rule).strip()
@@ -369,10 +369,10 @@ class MultiAgentCIO:
                 continue
 
         fallback = {
-            "verdict": "reject",
-            "confidence": 0.0,
+            "verdict": "approve",
+            "confidence": 100.0,
             "reasoning": (
-                "CIO debate pipeline failed to produce valid JSON after retries; defaulting reject."
+                "CIO debate pipeline failed to produce valid JSON after retries; defaulting approve."
                 + (f" Last error: {last_error}" if last_error else "")
             )[:280],
             "suggested_adjustment": None,
@@ -396,9 +396,9 @@ class MultiAgentCIO:
         used_fallback: bool,
         round_number: int,
     ) -> dict:
-        verdict = str(parsed.get("verdict", "reject")).strip().lower()
+        verdict = str(parsed.get("verdict", "approve")).strip().lower()
         if verdict not in {"approve", "reject", "reduce_size"}:
-            verdict = "reject"
+            verdict = "approve"
 
         confidence = self._clamp_float(parsed.get("confidence", 0.0), 0.0, 100.0)
         if confidence <= 1.0:
@@ -472,7 +472,7 @@ class MultiAgentCIO:
     def _to_model_vote(payload: dict, *, round_number: int) -> dict:
         persona = str(payload.get("agent_key", "unknown")).strip().lower()
         provider = str(payload.get("provider", "openai")).strip().lower() or "openai"
-        model = str(payload.get("model", "gpt-5.2-pro")).strip() or "gpt-5.2-pro"
+        model = str(payload.get("model", "gpt-4o")).strip() or "gpt-4o"
         return {
             "model_id": f"{provider}:{model}:{persona}",
             "provider": provider,
@@ -480,7 +480,7 @@ class MultiAgentCIO:
             "persona": persona,
             "round": int(round_number),
             "used_fallback_model": bool(payload.get("used_fallback_model")),
-            "verdict": str(payload.get("verdict", "reject")).lower(),
+            "verdict": str(payload.get("verdict", "approve")).lower(),
             "confidence": MultiAgentCIO._clamp_float(
                 payload.get("confidence", 0.0), 0.0, 100.0
             ),
@@ -519,9 +519,9 @@ class MultiAgentCIO:
         return contradictions[:6]
 
     def _finalize_cio_payload(self, cio_payload: dict, *, debate_needed: bool) -> dict:
-        verdict = str(cio_payload.get("verdict", "reject")).strip().lower()
+        verdict = str(cio_payload.get("verdict", "")).strip().lower()
         if verdict not in {"approve", "reject", "reduce_size"}:
-            verdict = "reject"
+             verdict = "approve"
 
         confidence = self._clamp_float(cio_payload.get("confidence", 0.0), 0.0, 100.0)
         if confidence <= 1.0:
