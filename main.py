@@ -656,7 +656,7 @@ def prompt_after_run_menu() -> bool:
 
 
 def start_dashboard_command_listener(
-    bot: TradingBot,
+    bot: "TradingBot",
 ) -> tuple[dict, threading.Event, threading.Thread]:
     """Listen for menu commands while the bot is running.
 
