@@ -3,7 +3,9 @@ import unittest
 from bot.strategies.calendar_spreads import CalendarSpreadStrategy
 
 
-def _base_chain(front_iv: float = 32.0, back_iv: float = 25.0, back_mid: float = 2.8) -> dict:
+def _base_chain(
+    front_iv: float = 32.0, back_iv: float = 25.0, back_mid: float = 2.8
+) -> dict:
     return {
         "underlying_price": 100.0,
         "calls": {

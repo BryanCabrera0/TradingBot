@@ -31,7 +31,9 @@ def order_factory(price: float, qty: int = 1) -> dict:
 class ExecutionAlgoTests(unittest.TestCase):
     def test_twap_slice_scheduling(self) -> None:
         schwab = StubSchwab()
-        cfg = ExecutionAlgoConfig(enabled=True, algo_type="twap", twap_slices=4, twap_window_seconds=60)
+        cfg = ExecutionAlgoConfig(
+            enabled=True, algo_type="twap", twap_slices=4, twap_window_seconds=60
+        )
         engine = ExecutionAlgoEngine(cfg, schwab, sleep_fn=lambda _: None)
 
         result = engine.execute(
@@ -50,7 +52,9 @@ class ExecutionAlgoTests(unittest.TestCase):
 
     def test_iceberg_child_order_generation(self) -> None:
         schwab = StubSchwab()
-        cfg = ExecutionAlgoConfig(enabled=True, algo_type="iceberg", iceberg_visible_qty=1)
+        cfg = ExecutionAlgoConfig(
+            enabled=True, algo_type="iceberg", iceberg_visible_qty=1
+        )
         engine = ExecutionAlgoEngine(cfg, schwab, sleep_fn=lambda _: None)
 
         result = engine.execute(
@@ -84,7 +88,9 @@ class ExecutionAlgoTests(unittest.TestCase):
             schwab = StubSchwab()
             path = Path(tmp_dir) / "slippage_history.json"
             cfg = ExecutionAlgoConfig(enabled=True, algo_type="smart_ladder")
-            engine = ExecutionAlgoEngine(cfg, schwab, slippage_path=path, sleep_fn=lambda _: None)
+            engine = ExecutionAlgoEngine(
+                cfg, schwab, slippage_path=path, sleep_fn=lambda _: None
+            )
 
             engine.execute(
                 order_factory=order_factory,

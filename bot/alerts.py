@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 
@@ -77,32 +77,46 @@ class AlertManager:
     def trade_opened(self, message: str, *, context: Optional[dict] = None) -> bool:
         if not self.config.trade_notifications:
             return False
-        return self.send(level="INFO", title="Trade Opened", message=message, context=context)
+        return self.send(
+            level="INFO", title="Trade Opened", message=message, context=context
+        )
 
     def trade_closed(self, message: str, *, context: Optional[dict] = None) -> bool:
         if not self.config.trade_notifications:
             return False
-        return self.send(level="INFO", title="Trade Closed", message=message, context=context)
+        return self.send(
+            level="INFO", title="Trade Closed", message=message, context=context
+        )
 
     def daily_summary(self, message: str, *, context: Optional[dict] = None) -> bool:
         if not self.config.daily_summary:
             return False
-        return self.send(level="INFO", title="Daily Summary", message=message, context=context)
+        return self.send(
+            level="INFO", title="Daily Summary", message=message, context=context
+        )
 
     def weekly_summary(self, message: str, *, context: Optional[dict] = None) -> bool:
         if not self.config.weekly_summary:
             return False
-        return self.send(level="INFO", title="Weekly Summary", message=message, context=context)
+        return self.send(
+            level="INFO", title="Weekly Summary", message=message, context=context
+        )
 
     def regime_change(self, message: str, *, context: Optional[dict] = None) -> bool:
         if not self.config.regime_changes:
             return False
-        return self.send(level="WARNING", title="Regime Change", message=message, context=context)
+        return self.send(
+            level="WARNING", title="Regime Change", message=message, context=context
+        )
 
     def risk_warning(self, message: str, *, context: Optional[dict] = None) -> bool:
-        return self.send(level="WARNING", title="Risk Warning", message=message, context=context)
+        return self.send(
+            level="WARNING", title="Risk Warning", message=message, context=context
+        )
 
-    def drawdown_alert(self, drawdown_pct: float, *, context: Optional[dict] = None) -> bool:
+    def drawdown_alert(
+        self, drawdown_pct: float, *, context: Optional[dict] = None
+    ) -> bool:
         thresholds = sorted(float(v) for v in (self.config.drawdown_thresholds or []))
         if not thresholds:
             return False
@@ -128,20 +142,26 @@ class AlertManager:
         webhook_format = str(self.config.webhook_format or "generic").lower()
         if webhook_format == "slack":
             blocks = [
-                {"type": "section", "text": {"type": "mrkdwn", "text": f"*[{level}]* *{title}*"}},
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*[{level}]* *{title}*"},
+                },
                 {"type": "section", "text": {"type": "mrkdwn", "text": text}},
             ]
             if context:
                 blocks.append(
                     {
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"```{json.dumps(context, default=str, indent=2)}```"},
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"```{json.dumps(context, default=str, indent=2)}```",
+                        },
                     }
                 )
             return {"text": text, "blocks": blocks}
 
         if webhook_format == "discord":
-            embed = {
+            embed: dict[str, Any] = {
                 "title": title,
                 "description": text,
                 "timestamp": timestamp,
@@ -152,7 +172,11 @@ class AlertManager:
             }
             if context:
                 embed["fields"].append(
-                    {"name": "Context", "value": json.dumps(context, default=str)[:1000], "inline": False}
+                    {
+                        "name": "Context",
+                        "value": json.dumps(context, default=str)[:1000],
+                        "inline": False,
+                    }
                 )
             return {"embeds": [embed]}
 

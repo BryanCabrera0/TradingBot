@@ -104,8 +104,18 @@ class BacktesterTests(unittest.TestCase):
     def test_backtester_generates_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             data_dir = Path(tmp_dir)
-            _write_snapshot(data_dir / "SPY_2026-02-20.parquet.csv.gz", "2026-02-20", short_mid=1.2, long_mid=0.2)
-            _write_snapshot(data_dir / "SPY_2026-02-23.parquet.csv.gz", "2026-02-23", short_mid=0.4, long_mid=0.1)
+            _write_snapshot(
+                data_dir / "SPY_2026-02-20.parquet.csv.gz",
+                "2026-02-20",
+                short_mid=1.2,
+                long_mid=0.2,
+            )
+            _write_snapshot(
+                data_dir / "SPY_2026-02-23.parquet.csv.gz",
+                "2026-02-23",
+                short_mid=0.4,
+                long_mid=0.1,
+            )
 
             cfg = BotConfig()
             cfg.scanner.enabled = False
@@ -157,7 +167,9 @@ class BacktesterTests(unittest.TestCase):
             self.assertLessEqual(int(result.report["open_positions"]), 2)
 
     def test_exit_on_profit_target(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p-profit",
@@ -179,7 +191,9 @@ class BacktesterTests(unittest.TestCase):
         self.assertIn("Profit target", signals[0].reason)
 
     def test_exit_on_stop_loss(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p-loss",
@@ -207,7 +221,7 @@ class BacktesterTests(unittest.TestCase):
 
         mean_ret = sum(returns) / len(returns)
         variance = sum((item - mean_ret) ** 2 for item in returns) / (len(returns) - 1)
-        expected = (mean_ret / (variance ** 0.5)) * (252 ** 0.5)
+        expected = (mean_ret / (variance**0.5)) * (252**0.5)
 
         self.assertAlmostEqual(sharpe, expected, places=2)
 
@@ -232,8 +246,18 @@ class BacktesterTests(unittest.TestCase):
     def test_backtester_report_includes_regime_breakdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             data_dir = Path(tmp_dir)
-            _write_snapshot(data_dir / "SPY_2026-02-20.parquet.csv.gz", "2026-02-20", short_mid=1.2, long_mid=0.2)
-            _write_snapshot(data_dir / "SPY_2026-02-23.parquet.csv.gz", "2026-02-23", short_mid=0.4, long_mid=0.1)
+            _write_snapshot(
+                data_dir / "SPY_2026-02-20.parquet.csv.gz",
+                "2026-02-20",
+                short_mid=1.2,
+                long_mid=0.2,
+            )
+            _write_snapshot(
+                data_dir / "SPY_2026-02-23.parquet.csv.gz",
+                "2026-02-23",
+                short_mid=0.4,
+                long_mid=0.1,
+            )
 
             cfg = BotConfig()
             cfg.scanner.enabled = False
@@ -258,8 +282,18 @@ class BacktesterTests(unittest.TestCase):
     def test_backtester_report_includes_analytics_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             data_dir = Path(tmp_dir)
-            _write_snapshot(data_dir / "SPY_2026-02-20.parquet.csv.gz", "2026-02-20", short_mid=1.2, long_mid=0.2)
-            _write_snapshot(data_dir / "SPY_2026-02-23.parquet.csv.gz", "2026-02-23", short_mid=0.4, long_mid=0.1)
+            _write_snapshot(
+                data_dir / "SPY_2026-02-20.parquet.csv.gz",
+                "2026-02-20",
+                short_mid=1.2,
+                long_mid=0.2,
+            )
+            _write_snapshot(
+                data_dir / "SPY_2026-02-23.parquet.csv.gz",
+                "2026-02-23",
+                short_mid=0.4,
+                long_mid=0.1,
+            )
 
             cfg = BotConfig()
             cfg.scanner.enabled = False

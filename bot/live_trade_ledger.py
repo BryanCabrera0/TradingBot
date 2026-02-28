@@ -205,11 +205,15 @@ class LiveTradeLedger:
             return
 
         if current_value is not None:
-            position["current_value"] = round(max(0.0, safe_float(current_value, 0.0)), 2)
+            position["current_value"] = round(
+                max(0.0, safe_float(current_value, 0.0)), 2
+            )
         if dte_remaining is not None:
             position["dte_remaining"] = safe_int(dte_remaining, 0)
         if underlying_price is not None:
-            position["underlying_price"] = round(max(0.0, safe_float(underlying_price, 0.0)), 4)
+            position["underlying_price"] = round(
+                max(0.0, safe_float(underlying_price, 0.0)), 4
+            )
         position["last_reconciled"] = datetime.now().isoformat()
         self._save_state()
 
@@ -322,7 +326,9 @@ class LiveTradeLedger:
                 position["status"] = "open"
                 position["open_date"] = filled_at or datetime.now().isoformat()
                 if entry_credit is not None:
-                    position["entry_credit"] = round(max(0.0, safe_float(entry_credit, 0.0)), 2)
+                    position["entry_credit"] = round(
+                        max(0.0, safe_float(entry_credit, 0.0)), 2
+                    )
                 if filled_quantity is not None:
                     position["quantity"] = max(1, safe_int(filled_quantity, 1))
                     position["entry_filled_quantity"] = safe_float(filled_quantity, 0.0)
@@ -363,11 +369,15 @@ class LiveTradeLedger:
                     1,
                     min(
                         quantity,
-                        safe_int(position.get("exit_order_quantity", quantity), quantity),
+                        safe_int(
+                            position.get("exit_order_quantity", quantity), quantity
+                        ),
                     ),
                 )
                 entry_credit = safe_float(position.get("entry_credit", 0.0), 0.0)
-                debit = safe_float(close_value, safe_float(position.get("current_value", 0.0), 0.0))
+                debit = safe_float(
+                    close_value, safe_float(position.get("current_value", 0.0), 0.0)
+                )
                 position["close_value"] = round(max(0.0, debit), 2)
                 realized = (entry_credit - debit) * close_quantity * 100
                 position["realized_pnl"] = round(
@@ -421,9 +431,13 @@ class LiveTradeLedger:
                 qty = max(0.0, safe_float(filled_quantity, 0.0))
                 position["entry_filled_quantity"] = qty
                 if qty > 0:
-                    position["quantity"] = max(position.get("quantity", 1), safe_int(qty, 1))
+                    position["quantity"] = max(
+                        position.get("quantity", 1), safe_int(qty, 1)
+                    )
             if entry_credit is not None:
-                position["entry_credit"] = round(max(0.0, safe_float(entry_credit, 0.0)), 2)
+                position["entry_credit"] = round(
+                    max(0.0, safe_float(entry_credit, 0.0)), 2
+                )
             position["last_reconciled"] = datetime.now().isoformat()
             changed = True
 
@@ -450,9 +464,13 @@ class LiveTradeLedger:
                 continue
 
             if filled_quantity is not None:
-                position["exit_filled_quantity"] = max(0.0, safe_float(filled_quantity, 0.0))
+                position["exit_filled_quantity"] = max(
+                    0.0, safe_float(filled_quantity, 0.0)
+                )
             if close_value is not None:
-                position["close_value"] = round(max(0.0, safe_float(close_value, 0.0)), 2)
+                position["close_value"] = round(
+                    max(0.0, safe_float(close_value, 0.0)), 2
+                )
             position["last_reconciled"] = datetime.now().isoformat()
             changed = True
 
@@ -482,7 +500,7 @@ class LiveTradeLedger:
             if symbols & open_strategy_symbols:
                 continue
 
-            metadata = {}
+            metadata: dict = {}
             if close_metadata_resolver:
                 try:
                     metadata = close_metadata_resolver(position, symbols) or {}
@@ -497,12 +515,18 @@ class LiveTradeLedger:
                 or "EXTERNAL"
             )
             position["exit_reason"] = str(
-                metadata.get("exit_reason") or position.get("exit_reason") or "external_close"
+                metadata.get("exit_reason")
+                or position.get("exit_reason")
+                or "external_close"
             )
             if "close_value" in metadata:
-                position["close_value"] = round(max(0.0, safe_float(metadata.get("close_value"), 0.0)), 2)
+                position["close_value"] = round(
+                    max(0.0, safe_float(metadata.get("close_value"), 0.0)), 2
+                )
             if "realized_pnl" in metadata:
-                position["realized_pnl"] = round(safe_float(metadata.get("realized_pnl"), 0.0), 2)
+                position["realized_pnl"] = round(
+                    safe_float(metadata.get("realized_pnl"), 0.0), 2
+                )
             position["last_reconciled"] = now_iso
             changed += 1
 
@@ -536,7 +560,9 @@ class LiveTradeLedger:
             close_date = str(position.get("close_date", ""))
             if close_date.startswith(today):
                 out["closed_today"] += 1
-                out["realized_pnl_today"] += safe_float(position.get("realized_pnl", 0.0), 0.0)
+                out["realized_pnl_today"] += safe_float(
+                    position.get("realized_pnl", 0.0), 0.0
+                )
 
         out["realized_pnl_today"] = round(out["realized_pnl_today"], 2)
         return out

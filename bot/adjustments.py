@@ -38,19 +38,28 @@ class AdjustmentEngine:
         dte = safe_int(position.get("dte_remaining"), 999)
         min_dte = int(self.config.get("min_dte_remaining", 7))
         if dte < min_dte:
-            return AdjustmentPlan(action="none", reason="too close to expiry", score=0.0)
+            return AdjustmentPlan(
+                action="none", reason="too close to expiry", score=0.0
+            )
 
-        if int((position.get("details", {}) or {}).get("adjustment_count", 0) or 0) >= int(
-            self.config.get("max_adjustments_per_position", 2)
-        ):
-            return AdjustmentPlan(action="none", reason="max adjustments reached", score=0.0)
+        if int(
+            (position.get("details", {}) or {}).get("adjustment_count", 0) or 0
+        ) >= int(self.config.get("max_adjustments_per_position", 2)):
+            return AdjustmentPlan(
+                action="none", reason="max adjustments reached", score=0.0
+            )
 
         if not _is_short_strike_tested(position):
-            return AdjustmentPlan(action="none", reason="short strike not tested", score=0.0)
+            return AdjustmentPlan(
+                action="none", reason="short strike not tested", score=0.0
+            )
 
         pnl = _pnl_pct(position)
         regime_key = str(regime or "").upper()
-        if regime_key in {"CRASH/CRISIS", "HIGH_VOL_CHOP"} or iv_change_since_entry > 0.15:
+        if (
+            regime_key in {"CRASH/CRISIS", "HIGH_VOL_CHOP"}
+            or iv_change_since_entry > 0.15
+        ):
             return AdjustmentPlan(
                 action="add_wing",
                 reason="Elevated volatility while strike tested",
@@ -68,7 +77,9 @@ class AdjustmentEngine:
             score=0.65,
         )
 
-    def to_signal(self, *, position: dict, plan: AdjustmentPlan) -> Optional[TradeSignal]:
+    def to_signal(
+        self, *, position: dict, plan: AdjustmentPlan
+    ) -> Optional[TradeSignal]:
         if plan.action == "none":
             return None
         return TradeSignal(
@@ -91,7 +102,9 @@ def _pnl_pct(position: dict) -> float:
 
 
 def _is_short_strike_tested(position: dict) -> bool:
-    details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+    details = (
+        position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+    )
     underlying = float(position.get("underlying_price", 0.0) or 0.0)
     if underlying <= 0:
         return False
@@ -103,4 +116,7 @@ def _is_short_strike_tested(position: dict) -> bool:
             short_strikes.append(strike)
     if not short_strikes:
         return False
-    return min(abs(underlying - strike) / underlying for strike in short_strikes) <= threshold
+    return (
+        min(abs(underlying - strike) / underlying for strike in short_strikes)
+        <= threshold
+    )

@@ -10,7 +10,6 @@ from typing import Optional
 from bot.data_store import dump_json, ensure_data_dir, load_json
 from bot.number_utils import safe_float, safe_int
 
-
 DEFAULT_ATTRIBUTION_PATH = Path("bot/data/pnl_attribution.json")
 
 
@@ -47,21 +46,54 @@ class PnLAttributionEngine:
         for position in positions or []:
             if not isinstance(position, dict):
                 continue
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             symbol = str(position.get("symbol", "")).upper()
             qty = max(1, safe_int(position.get("quantity"), 1))
-            delta = safe_float(details.get("net_delta", position.get("net_delta", 0.0)), 0.0) * qty
-            gamma = safe_float(details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0) * qty
-            theta = safe_float(details.get("net_theta", position.get("net_theta", 0.0)), 0.0) * qty
-            vega = safe_float(details.get("net_vega", position.get("net_vega", 0.0)), 0.0) * qty
-            rho = safe_float(details.get("net_rho", position.get("net_rho", 0.0)), 0.0) * qty
-            d_price = safe_float(price_changes.get(symbol), 0.0) if isinstance(price_changes, dict) else 0.0
-            d_iv = safe_float(iv_changes.get(symbol), 0.0) if isinstance(iv_changes, dict) else 0.0
+            delta = (
+                safe_float(
+                    details.get("net_delta", position.get("net_delta", 0.0)), 0.0
+                )
+                * qty
+            )
+            gamma = (
+                safe_float(
+                    details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0
+                )
+                * qty
+            )
+            theta = (
+                safe_float(
+                    details.get("net_theta", position.get("net_theta", 0.0)), 0.0
+                )
+                * qty
+            )
+            vega = (
+                safe_float(details.get("net_vega", position.get("net_vega", 0.0)), 0.0)
+                * qty
+            )
+            rho = (
+                safe_float(details.get("net_rho", position.get("net_rho", 0.0)), 0.0)
+                * qty
+            )
+            d_price = (
+                safe_float(price_changes.get(symbol), 0.0)
+                if isinstance(price_changes, dict)
+                else 0.0
+            )
+            d_iv = (
+                safe_float(iv_changes.get(symbol), 0.0)
+                if isinstance(iv_changes, dict)
+                else 0.0
+            )
             days = safe_float(details.get("days_elapsed", 1.0), 1.0)
             rate_change = safe_float(details.get("rate_change", 0.0), 0.0)
 
             delta_pnl = delta * d_price
-            gamma_pnl = 0.5 * gamma * (d_price ** 2)
+            gamma_pnl = 0.5 * gamma * (d_price**2)
             theta_pnl = theta * days
             vega_pnl = vega * d_iv
             rho_pnl = rho * rate_change
@@ -102,13 +134,15 @@ class PnLAttributionEngine:
         if not isinstance(history, list):
             history = []
         filtered = [
-            row for row in history
+            row
+            for row in history
             if isinstance(row, dict) and str(row.get("date", "")) != str(day_iso)
         ]
         filtered.append(
             {
                 "date": str(day_iso),
-                "recorded_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                "recorded_at": datetime.utcnow().replace(microsecond=0).isoformat()
+                + "Z",
                 "attribution": attribution if isinstance(attribution, dict) else {},
             }
         )

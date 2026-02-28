@@ -1,16 +1,18 @@
 import unittest
 
+from bot.strategies.broken_wing_butterfly import BrokenWingButterflyStrategy
 from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.earnings_vol_crush import EarningsVolCrushStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
-from bot.strategies.broken_wing_butterfly import BrokenWingButterflyStrategy
 from bot.strategies.strangles import StranglesStrategy
 
 
 class StrategyExitTests(unittest.TestCase):
     def test_credit_spreads_skip_non_open_positions(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p0",
@@ -28,7 +30,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals, [])
 
     def test_credit_spreads_no_duplicate_close_signals(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p1",
@@ -46,7 +50,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals[0].position_id, "p1")
 
     def test_credit_spreads_dte_exit_works_without_entry_credit(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p1dte",
@@ -100,7 +106,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals[0].position_id, "p3")
 
     def test_adaptive_profit_target_under_14_dte(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p_under14",
@@ -120,7 +128,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals[0].action, "close")
 
     def test_adaptive_profit_target_over_30_dte(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p_over30",
@@ -140,7 +150,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals[0].action, "close")
 
     def test_partial_close_at_40pct(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p_partial",
@@ -162,7 +174,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals[0].action, "close")
 
     def test_roll_signal_at_21_dte(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p_roll",
@@ -183,7 +197,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(signals[0].action, "roll")
 
     def test_defend_mode_tightens_stop(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p_defend",
@@ -205,7 +221,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertIn("Stop loss", signals[0].reason)
 
     def test_gamma_override_tightens_stop_loss_threshold(self) -> None:
-        strategy = CreditSpreadStrategy({"profit_target_pct": 0.5, "stop_loss_pct": 2.0})
+        strategy = CreditSpreadStrategy(
+            {"profit_target_pct": 0.5, "stop_loss_pct": 2.0}
+        )
         positions = [
             {
                 "position_id": "p_gamma",
@@ -253,7 +271,9 @@ class StrategyExitTests(unittest.TestCase):
         self.assertEqual(first, [])
         self.assertGreater(position.get("trailing_stop_high", 0.0), 0.0)
 
-        position["current_value"] = 0.72  # 28% profit: below high-water minus floor (30%)
+        position["current_value"] = (
+            0.72  # 28% profit: below high-water minus floor (30%)
+        )
         second = strategy.check_exits([position], market_client=None)
         self.assertEqual(len(second), 1)
         self.assertIn("Trailing stop", second[0].reason)
@@ -286,7 +306,7 @@ class StrategyExitTests(unittest.TestCase):
                 "status": "open",
                 "entry_credit": 1.0,
                 "current_value": 0.79,  # 21% profit
-                "dte_remaining": 5,     # target 20%
+                "dte_remaining": 5,  # target 20%
                 "details": {},
             }
         ]

@@ -234,13 +234,11 @@ def _ensure_live_alerts(env_path: Path, cfg) -> None:
         return
 
     env_values = dotenv_values(str(env_path))
-    enabled_raw = str(
-        env_values.get("ALERTS_ENABLED", cfg.alerts.enabled)
-    ).strip().lower()
+    enabled_raw = (
+        str(env_values.get("ALERTS_ENABLED", cfg.alerts.enabled)).strip().lower()
+    )
     enabled = enabled_raw in TRUTHY
-    webhook = str(
-        env_values.get("ALERTS_WEBHOOK_URL", cfg.alerts.webhook_url)
-    ).strip()
+    webhook = str(env_values.get("ALERTS_WEBHOOK_URL", cfg.alerts.webhook_url)).strip()
 
     if enabled and webhook:
         return

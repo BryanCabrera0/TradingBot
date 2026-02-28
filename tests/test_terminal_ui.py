@@ -162,11 +162,15 @@ class TerminalUITests(unittest.TestCase):
         def fake_loop() -> None:
             ui._stop_event.wait(timeout=0.05)
 
-        with mock.patch.object(ui, "_install_logging_bridge", return_value=None), mock.patch.object(
-            ui,
-            "_remove_logging_bridge",
-            return_value=None,
-        ), mock.patch.object(ui, "_run_live_loop", side_effect=fake_loop):
+        with (
+            mock.patch.object(ui, "_install_logging_bridge", return_value=None),
+            mock.patch.object(
+                ui,
+                "_remove_logging_bridge",
+                return_value=None,
+            ),
+            mock.patch.object(ui, "_run_live_loop", side_effect=fake_loop),
+        ):
             ui.start()
             ui.stop()
 

@@ -54,7 +54,9 @@ class RegimeState:
     regime: str
     confidence: float
     sub_signals: dict = field(default_factory=dict)
-    recommended_strategy_weights: dict = field(default_factory=lambda: dict(DEFAULT_STRATEGY_WEIGHTS))
+    recommended_strategy_weights: dict = field(
+        default_factory=lambda: dict(DEFAULT_STRATEGY_WEIGHTS)
+    )
     recommended_position_size_scalar: float = 1.0
 
     def as_context(self) -> dict:
@@ -83,7 +85,9 @@ class MarketRegimeDetector:
         self.get_option_chain = get_option_chain
         self.config = config or {}
         self.cache_seconds = max(0, int(self.config.get("cache_seconds", 1800) or 1800))
-        self.history_path = Path(self.config.get("history_file", "bot/data/regime_history.json"))
+        self.history_path = Path(
+            self.config.get("history_file", "bot/data/regime_history.json")
+        )
         self._cached_state: Optional[RegimeState] = None
         self._cached_at: Optional[datetime] = None
         self._last_regime: Optional[str] = None
@@ -134,7 +138,11 @@ class MarketRegimeDetector:
             regime = BULL_TREND
         elif trend_score <= -0.35 and breadth <= 0.45 and vix >= 17:
             regime = BEAR_TREND
-        elif (put_call >= 1.15 or put_call <= 0.75) and abs(trend_score) < 0.2 and vix < 28:
+        elif (
+            (put_call >= 1.15 or put_call <= 0.75)
+            and abs(trend_score) < 0.2
+            and vix < 28
+        ):
             regime = MEAN_REVERSION
         elif vix <= 15.5 and vol_of_vol < 0.12:
             regime = LOW_VOL_GRIND
@@ -242,10 +250,26 @@ class MarketRegimeDetector:
         spy_prices = self._close_series("SPY", 260)
         trend_score = self._trend_score(spy_prices)
 
-        vix_level = self._quote_price("$VIX") or self._quote_price("^VIX") or self._quote_price("VIX")
-        vix3m = self._quote_price("$VIX3M") or self._quote_price("^VIX3M") or self._quote_price("VIX3M")
-        vix6m = self._quote_price("$VIX6M") or self._quote_price("^VIX6M") or self._quote_price("VIX6M")
-        vix1y = self._quote_price("$VIX1Y") or self._quote_price("^VIX1Y") or self._quote_price("VIX1Y")
+        vix_level = (
+            self._quote_price("$VIX")
+            or self._quote_price("^VIX")
+            or self._quote_price("VIX")
+        )
+        vix3m = (
+            self._quote_price("$VIX3M")
+            or self._quote_price("^VIX3M")
+            or self._quote_price("VIX3M")
+        )
+        vix6m = (
+            self._quote_price("$VIX6M")
+            or self._quote_price("^VIX6M")
+            or self._quote_price("VIX6M")
+        )
+        vix1y = (
+            self._quote_price("$VIX1Y")
+            or self._quote_price("^VIX1Y")
+            or self._quote_price("VIX1Y")
+        )
         spy_chain = self._spy_option_chain()
         if vix3m <= 0:
             vix3m = self._estimate_term_iv_from_chain(spy_chain, target_dte=90)
@@ -254,8 +278,12 @@ class MarketRegimeDetector:
         if vix1y <= 0:
             vix1y = self._estimate_term_iv_from_chain(spy_chain, target_dte=360)
         vix_term_ratio = (vix_level / vix3m) if vix_level > 0 and vix3m > 0 else 1.0
-        term_structure_steepness = ((vix3m / vix_level) - 1.0) if vix_level > 0 and vix3m > 0 else 0.0
-        term_structure_momentum = self._term_structure_momentum(term_structure_steepness)
+        term_structure_steepness = (
+            ((vix3m / vix_level) - 1.0) if vix_level > 0 and vix3m > 0 else 0.0
+        )
+        term_structure_momentum = self._term_structure_momentum(
+            term_structure_steepness
+        )
 
         put_call_ratio = self._estimate_put_call_ratio()
         risk_appetite_spread = self._risk_appetite_spread()
@@ -308,7 +336,9 @@ class MarketRegimeDetector:
                     for contract in contracts:
                         if not isinstance(contract, dict):
                             continue
-                        iv = safe_float(contract.get("volatility", contract.get("iv", 0.0)), 0.0)
+                        iv = safe_float(
+                            contract.get("volatility", contract.get("iv", 0.0)), 0.0
+                        )
                         if iv <= 0:
                             continue
                         iv_values.append(iv * 100.0 if iv <= 1.0 else iv)
@@ -326,10 +356,15 @@ class MarketRegimeDetector:
         for row in reversed(entries):
             if not isinstance(row, dict):
                 continue
-            sub = row.get("sub_signals", {}) if isinstance(row.get("sub_signals"), dict) else {}
-            prev = safe_float(sub.get("term_structure_steepness"), None)
-            if prev is None:
+            sub = (
+                row.get("sub_signals", {})
+                if isinstance(row.get("sub_signals"), dict)
+                else {}
+            )
+            raw_steepness = sub.get("term_structure_steepness")
+            if raw_steepness is None:
                 continue
+            prev = safe_float(raw_steepness, 0.0)
             ts_raw = str(row.get("timestamp", "")).replace("Z", "+00:00")
             try:
                 ts = datetime.fromisoformat(ts_raw)
@@ -353,7 +388,11 @@ class MarketRegimeDetector:
             rows = self.get_price_history(symbol, days)
         except Exception:
             return []
-        closes = [safe_float(row.get("close"), 0.0) for row in (rows or []) if isinstance(row, dict)]
+        closes = [
+            safe_float(row.get("close"), 0.0)
+            for row in (rows or [])
+            if isinstance(row, dict)
+        ]
         return [value for value in closes if value > 0]
 
     def _quote_price(self, symbol: str) -> float:
@@ -401,7 +440,9 @@ class MarketRegimeDetector:
         if not isinstance(raw, dict):
             return 1.0
         put_volume = _sum_chain_field(raw.get("putExpDateMap"), "totalVolume", "volume")
-        call_volume = _sum_chain_field(raw.get("callExpDateMap"), "totalVolume", "volume")
+        call_volume = _sum_chain_field(
+            raw.get("callExpDateMap"), "totalVolume", "volume"
+        )
         if call_volume <= 0:
             return 1.0
         return put_volume / call_volume
@@ -417,7 +458,19 @@ class MarketRegimeDetector:
 
     def _breadth_proxy(self) -> float:
         # Sector ETF approximation for "% above 50DMA".
-        sector_etfs = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
+        sector_etfs = [
+            "XLB",
+            "XLC",
+            "XLE",
+            "XLF",
+            "XLI",
+            "XLK",
+            "XLP",
+            "XLRE",
+            "XLU",
+            "XLV",
+            "XLY",
+        ]
         ratios = []
         for symbol in sector_etfs:
             closes = self._close_series(symbol, 90)
@@ -434,8 +487,14 @@ class MarketRegimeDetector:
     def _realized_vs_implied(self, closes: list[float]) -> float:
         if len(closes) < 22:
             return 0.0
-        returns = np.diff(np.array(closes[-22:], dtype=float)) / np.array(closes[-22:-1], dtype=float)
-        realized = float(np.std(returns, ddof=1) * math.sqrt(252.0) * 100.0) if len(returns) > 1 else 0.0
+        returns = np.diff(np.array(closes[-22:], dtype=float)) / np.array(
+            closes[-22:-1], dtype=float
+        )
+        realized = (
+            float(np.std(returns, ddof=1) * math.sqrt(252.0) * 100.0)
+            if len(returns) > 1
+            else 0.0
+        )
         # If IV quote is unavailable, fallback to VIX as an implied-vol proxy.
         implied = self._quote_price("$VIX") or self._quote_price("^VIX") or realized
         return implied - realized
@@ -444,7 +503,9 @@ class MarketRegimeDetector:
         vix_series = self._close_series("^VIX", 40)
         if len(vix_series) < 10:
             return 0.0
-        returns = np.diff(np.array(vix_series[-20:], dtype=float)) / np.array(vix_series[-20:-1], dtype=float)
+        returns = np.diff(np.array(vix_series[-20:], dtype=float)) / np.array(
+            vix_series[-20:-1], dtype=float
+        )
         if len(returns) < 2:
             return 0.0
         return float(np.std(returns, ddof=1))
@@ -575,10 +636,14 @@ class MarketRegimeDetector:
             weights["naked_puts"] = _clamp(weights["naked_puts"] * 1.05, 0.0, 2.0)
         elif trend < -0.3:
             weights["covered_calls"] = _clamp(weights["covered_calls"] * 0.95, 0.0, 2.0)
-        return {name: round(_clamp(value, 0.0, 2.0), 4) for name, value in weights.items()}
+        return {
+            name: round(_clamp(value, 0.0, 2.0), 4) for name, value in weights.items()
+        }
 
     @staticmethod
-    def _size_scalar_for_regime(regime: str, confidence: float, vol_of_vol: float) -> float:
+    def _size_scalar_for_regime(
+        regime: str, confidence: float, vol_of_vol: float
+    ) -> float:
         if regime == CRASH_CRISIS:
             base = 0.55
         elif regime == HIGH_VOL_CHOP:
@@ -639,7 +704,7 @@ def _slope(values: list[float]) -> float:
     arr = np.array(values, dtype=float)
     idx = np.arange(len(arr), dtype=float)
     x_center = idx - float(np.mean(idx))
-    denom = float(np.sum(x_center ** 2))
+    denom = float(np.sum(x_center**2))
     if denom <= 0:
         return 0.0
     y_center = arr - float(np.mean(arr))

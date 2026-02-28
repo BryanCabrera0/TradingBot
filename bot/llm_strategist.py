@@ -1,4 +1,11 @@
-"""Cycle-level LLM portfolio strategist."""
+"""Cycle-level LLM portfolio strategist.
+
+SIMPLE EXPLANATION:
+The LLM Strategist acts as the head trader. It looks at the big picture—including
+current options chains, technical indicators, and market data—and decides what specific 
+trades we should make (e.g., "sell a put spread on SPY"). It focuses on finding the 
+best opportunities to deploy capital based on the current market environment.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,6 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 import requests
 
@@ -106,7 +112,9 @@ class LLMStrategist:
                 PortfolioDirective(
                     action=action,
                     reason=str(item.get("reason", "") or "LLM strategist directive"),
-                    payload=item.get("payload", {}) if isinstance(item.get("payload"), dict) else {},
+                    payload=item.get("payload", {})
+                    if isinstance(item.get("payload"), dict)
+                    else {},
                     confidence=confidence / 100.0 if confidence > 1 else confidence,
                 )
             )
@@ -115,12 +123,16 @@ class LLMStrategist:
     def _query(self, prompt: str) -> str:
         provider = _normalize_provider_name(self.config.provider)
         if provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = os.getenv("OPENAI_API_KEY") or ""
             if not _is_configured_secret(api_key):
                 raise RuntimeError("OPENAI_API_KEY missing for llm_strategist")
             model_name = str(self.config.model or "").strip()
             model_key = model_name.lower()
-            if not model_key or model_key.startswith("gemini-") or model_key.startswith("claude-"):
+            if (
+                not model_key
+                or model_key.startswith("gemini-")
+                or model_key.startswith("claude-")
+            ):
                 model_name = "gpt-5.2-pro"
             return request_openai_json(
                 api_key=api_key,
@@ -143,7 +155,12 @@ class LLMStrategist:
                                     "reason": {"type": "string"},
                                     "payload": {"type": "object"},
                                 },
-                                "required": ["action", "confidence", "reason", "payload"],
+                                "required": [
+                                    "action",
+                                    "confidence",
+                                    "reason",
+                                    "payload",
+                                ],
                             },
                         }
                     },
@@ -151,10 +168,12 @@ class LLMStrategist:
                 },
             )
         if provider == "google":
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
             if not _is_configured_secret(api_key):
                 raise RuntimeError("GOOGLE_API_KEY missing for llm_strategist")
-            model_name = str(self.config.model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+            model_name = (
+                str(self.config.model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+            )
             payload = {
                 "contents": [
                     {
@@ -184,7 +203,9 @@ class LLMStrategist:
             if response.status_code >= 400:
                 detail = ""
                 try:
-                    detail = str((response.json().get("error") or {}).get("message", "")).strip()
+                    detail = str(
+                        (response.json().get("error") or {}).get("message", "")
+                    ).strip()
                 except Exception:
                     detail = ""
                 if not detail:
@@ -215,11 +236,13 @@ class LLMStrategist:
                     return "\n".join(texts).strip()
             raise RuntimeError("Google Gemini response missing text content")
         if provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
+            api_key = os.getenv("ANTHROPIC_API_KEY") or ""
             if not _is_configured_secret(api_key):
                 raise RuntimeError("ANTHROPIC_API_KEY missing for llm_strategist")
             try:
-                from anthropic import Anthropic
+                from anthropic import (
+                    Anthropic,  # type: ignore[import-untyped,import-not-found]
+                )
             except Exception as exc:
                 raise RuntimeError("anthropic package required") from exc
             client = Anthropic(api_key=api_key)
@@ -232,9 +255,9 @@ class LLMStrategist:
             )
             parts = []
             for item in getattr(response, "content", []):
-                text = getattr(item, "text", None)
-                if isinstance(text, str):
-                    parts.append(text)
+                text_val = getattr(item, "text", None)
+                if isinstance(text_val, str):
+                    parts.append(text_val)
             return "\n".join(parts).strip()
         if provider == "ollama":
             url = "http://127.0.0.1:11434/api/generate"
@@ -245,10 +268,14 @@ class LLMStrategist:
                 "format": "json",
                 "options": {"temperature": 0.2},
             }
-            response = requests.post(url, json=body, timeout=self.config.timeout_seconds)
+            response = requests.post(
+                url, json=body, timeout=self.config.timeout_seconds
+            )
             response.raise_for_status()
             return str(response.json().get("response", "")).strip()
-        raise RuntimeError(f"Unsupported llm_strategist provider: {self.config.provider}")
+        raise RuntimeError(
+            f"Unsupported llm_strategist provider: {self.config.provider}"
+        )
 
 
 def _safe_json(text: str) -> dict:
@@ -285,7 +312,7 @@ def _normalize_provider_name(value: object) -> str:
 
 def _clamp_float(value: object, minimum: float, maximum: float) -> float:
     try:
-        parsed = float(value)
+        parsed = float(str(value))
     except (TypeError, ValueError):
         parsed = minimum
     return max(minimum, min(maximum, parsed))

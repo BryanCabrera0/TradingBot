@@ -51,7 +51,12 @@ class IronCondorStrategy(BaseStrategy):
         vol_surface = (market_context or {}).get("vol_surface", {})
         if isinstance(vol_surface, dict) and vol_surface:
             vol_of_vol = float(vol_surface.get("vol_of_vol", 0.0) or 0.0)
-            max_vov = float(self.config.get("max_vol_of_vol", self.config.get("max_vol_of_vol_for_condors", 0.20)))
+            max_vov = float(
+                self.config.get(
+                    "max_vol_of_vol",
+                    self.config.get("max_vol_of_vol_for_condors", 0.20),
+                )
+            )
             if vol_of_vol > max_vov:
                 return []
 
@@ -73,14 +78,18 @@ class IronCondorStrategy(BaseStrategy):
             short_put = find_option_by_delta(exp_puts, target_delta)
             if not short_put:
                 continue
-            long_put = find_spread_wing(exp_puts, short_put["strike"], spread_width, "lower")
+            long_put = find_spread_wing(
+                exp_puts, short_put["strike"], spread_width, "lower"
+            )
             if not long_put:
                 continue
 
             short_call = find_option_by_delta(exp_calls, target_delta)
             if not short_call:
                 continue
-            long_call = find_spread_wing(exp_calls, short_call["strike"], spread_width, "higher")
+            long_call = find_spread_wing(
+                exp_calls, short_call["strike"], spread_width, "higher"
+            )
             if not long_call:
                 continue
 
@@ -143,7 +152,11 @@ class IronCondorStrategy(BaseStrategy):
             if self._is_short_strike_tested(pos):
                 stop_loss_pct = min(stop_loss_pct, 1.5)
 
-            if quantity >= 2 and not pos.get("partial_closed", False) and pnl_pct >= 0.40:
+            if (
+                quantity >= 2
+                and not pos.get("partial_closed", False)
+                and pnl_pct >= 0.40
+            ):
                 signals.append(
                     TradeSignal(
                         action="close",
@@ -157,7 +170,12 @@ class IronCondorStrategy(BaseStrategy):
                 continue
 
             details = pos.get("details", {}) or {}
-            max_seen = float(details.get("max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)) or pnl_pct)
+            max_seen = float(
+                details.get(
+                    "max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)
+                )
+                or pnl_pct
+            )
             max_seen = max(max_seen, pnl_pct)
             details["max_profit_pct_seen"] = max_seen
             pos["max_profit_pct_seen"] = max_seen
@@ -179,11 +197,17 @@ class IronCondorStrategy(BaseStrategy):
                         floor=trail_floor,
                     )
                     if pnl_pct <= trail_lock:
-                        exit_reason = f"Trailing stop hit ({pnl_pct:.1%} <= {trail_lock:.1%})"
+                        exit_reason = (
+                            f"Trailing stop hit ({pnl_pct:.1%} <= {trail_lock:.1%})"
+                        )
 
                 if not exit_reason and pnl_pct >= target_pct:
                     exit_reason = f"Profit target reached ({pnl_pct:.1%})"
-                elif not exit_reason and pnl < 0 and abs(pnl) >= entry_credit * stop_loss_pct:
+                elif (
+                    not exit_reason
+                    and pnl < 0
+                    and abs(pnl) >= entry_credit * stop_loss_pct
+                ):
                     exit_reason = f"Stop loss triggered (loss {abs(pnl):.2f})"
 
             if not exit_reason and dte_remaining <= 5:
@@ -214,7 +238,9 @@ class IronCondorStrategy(BaseStrategy):
         return 0.50
 
     @staticmethod
-    def _trailing_lock_pct(*, max_seen: float, activation: float, floor: float) -> float:
+    def _trailing_lock_pct(
+        *, max_seen: float, activation: float, floor: float
+    ) -> float:
         gain_above_activation = max(0.0, max_seen - activation)
         lock = floor + (gain_above_activation * 0.50)
         lock = min(max_seen - 0.01, lock)
@@ -222,7 +248,11 @@ class IronCondorStrategy(BaseStrategy):
 
     @staticmethod
     def _stop_loss_for_position(position: dict, base_stop_loss_pct: float) -> float:
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
         override = safe_float(details.get("stop_loss_override_multiple"), 0.0)
         regime = str(position.get("regime", details.get("regime", ""))).upper()
         iv_rank = float(position.get("iv_rank", details.get("iv_rank", 50.0)) or 50.0)
@@ -247,14 +277,13 @@ class IronCondorStrategy(BaseStrategy):
             return False
         put_prox = abs(underlying - put_short) / underlying
         call_prox = abs(underlying - call_short) / underlying
-        return (
-            (underlying <= put_short and put_prox <= 0.01)
-            or (underlying >= call_short and call_prox <= 0.01)
+        return (underlying <= put_short and put_prox <= 0.01) or (
+            underlying >= call_short and call_prox <= 0.01
         )
 
     @staticmethod
     def _average_chain_iv(calls: dict, puts: dict) -> float:
-        ivs = []
+        ivs: list[float] = []
         for exp_options in calls.values():
             ivs.extend(
                 float(option.get("iv", 0.0) or 0.0)

@@ -9,75 +9,77 @@ This is the brain of the bot. It:
 6. Runs continuously with no manual intervention
 """
 
-from collections import defaultdict, deque
 import copy
-from dataclasses import fields, is_dataclass
 import json
 import logging
-from pathlib import Path
 import re
 import signal
 import time
 import traceback
 import uuid
+from collections import defaultdict, deque
+from dataclasses import fields, is_dataclass
 from datetime import date, datetime, timedelta
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
 import schedule
 
+from bot.adjustments import AdjustmentEngine
 from bot.alerts import AlertManager
-from bot.analytics import compute as compute_analytics
-from bot.analysis import SpreadAnalysis
 from bot.alt_data import AltDataEngine
+from bot.analysis import SpreadAnalysis
+from bot.analytics import compute as compute_analytics
 from bot.config import BotConfig, format_validation_report, load_config, validate_config
-from bot.correlation_monitor import CRISIS as CORRELATION_CRISIS, STRESSED as CORRELATION_STRESSED, CrossAssetCorrelationMonitor
-from bot.data_store import dump_json, load_json
+from bot.correlation_monitor import CRISIS as CORRELATION_CRISIS
+from bot.correlation_monitor import STRESSED as CORRELATION_STRESSED
+from bot.correlation_monitor import CrossAssetCorrelationMonitor
 from bot.dashboard import generate_dashboard
+from bot.data_store import dump_json, load_json
 from bot.econ_calendar import EconomicCalendar
 from bot.execution_algos import ExecutionAlgoEngine
 from bot.file_security import atomic_write_private
 from bot.hedger import PortfolioHedger
-from bot.llm_strategist import LLMStrategist
+from bot.iv_history import IVHistory
 from bot.live_trade_ledger import LiveTradeLedger
-from bot.schwab_client import SchwabClient
 from bot.llm_advisor import LLMAdvisor
+from bot.llm_strategist import LLMStrategist
+from bot.market_scanner import SECTOR_ETF_BY_SYMBOL, MarketScanner
+from bot.ml_scorer import MLSignalScorer
+from bot.monte_carlo import MonteCarloRiskEngine
 from bot.news_scanner import NewsScanner
 from bot.number_utils import safe_float, safe_int
 from bot.options_flow import OptionsFlowAnalyzer
-from bot.pnl_attribution import PnLAttributionEngine
-from bot.rl_prompt_optimizer import RLPromptOptimizer, load_active_rules
-from bot.monte_carlo import MonteCarloRiskEngine
 from bot.paper_trader import PaperTrader
-from bot.adjustments import AdjustmentEngine
+from bot.pnl_attribution import PnLAttributionEngine
 from bot.regime_detector import (
-    BULL_TREND,
     BEAR_TREND,
+    BULL_TREND,
+    CRASH_CRIISIS,
+    CRASH_CRISIS,
     HIGH_VOL_CHOP,
     LOW_VOL_GRIND,
-    CRASH_CRISIS,
-    CRASH_CRIISIS,
     MEAN_REVERSION,
     MarketRegimeDetector,
     RegimeState,
 )
-from bot.roll_manager import RollManager
 from bot.risk_manager import RiskManager
-from bot.market_scanner import MarketScanner, SECTOR_ETF_BY_SYMBOL
-from bot.ml_scorer import MLSignalScorer
-from bot.strategy_sandbox import StrategySandboxManager
-from bot.iv_history import IVHistory
-from bot.technicals import TechnicalAnalyzer, build_technical_context
-from bot.vol_surface import VolSurfaceAnalyzer
+from bot.rl_prompt_optimizer import RLPromptOptimizer, load_active_rules
+from bot.roll_manager import RollManager
+from bot.schwab_client import SchwabClient
+from bot.strategies.base import TradeSignal
 from bot.strategies.broken_wing_butterfly import BrokenWingButterflyStrategy
 from bot.strategies.calendar_spreads import CalendarSpreadStrategy
+from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 from bot.strategies.earnings_vol_crush import EarningsVolCrushStrategy
 from bot.strategies.iron_condors import IronCondorStrategy
 from bot.strategies.naked_puts import NakedPutStrategy
-from bot.strategies.covered_calls import CoveredCallStrategy
 from bot.strategies.strangles import StranglesStrategy
-from bot.strategies.base import TradeSignal
+from bot.strategy_sandbox import StrategySandboxManager
+from bot.technicals import TechnicalAnalyzer, build_technical_context
+from bot.vol_surface import VolSurfaceAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +125,9 @@ STRATEGY_COOLDOWN_STATE_PATH = Path("bot/data/strategy_cooldown_state.json")
 class TradingBot:
     """Fully automated options trading bot."""
 
-    def __init__(self, config: Optional[BotConfig] = None, *, warn_unclean_shutdown: bool = True):
+    def __init__(
+        self, config: Optional[BotConfig] = None, *, warn_unclean_shutdown: bool = True
+    ):
         self.config = config or load_config()
         self.is_paper = self.config.trading_mode == "paper"
         self._running = False
@@ -188,7 +192,9 @@ class TradingBot:
                 self.ui.start()
             except Exception as exc:
                 self.ui = None
-                logger.warning("Terminal UI failed to start; continuing without TUI: %s", exc)
+                logger.warning(
+                    "Terminal UI failed to start; continuing without TUI: %s", exc
+                )
 
         self._log_config_overrides()
         loaded_stats = load_json(STRATEGY_STATS_PATH, {})
@@ -201,7 +207,9 @@ class TradingBot:
         # Initialize components
         self.risk_manager = RiskManager(self.config.risk)
         self.risk_manager.set_sizing_config(self.config.sizing)
-        self.risk_manager.set_strategy_allocation_config(self.config.strategy_allocation)
+        self.risk_manager.set_strategy_allocation_config(
+            self.config.strategy_allocation
+        )
         self.risk_manager.set_greeks_budget_config(self.config.greeks_budget)
         self.paper_trader = PaperTrader() if self.is_paper else None
         self.live_ledger = None if self.is_paper else LiveTradeLedger()
@@ -236,7 +244,9 @@ class TradingBot:
         self.regime_detector: Optional[MarketRegimeDetector] = None
         if self.config.regime.enabled:
             self.regime_detector = MarketRegimeDetector(
-                get_price_history=lambda symbol, days: self.schwab.get_price_history(symbol, days),
+                get_price_history=lambda symbol, days: self.schwab.get_price_history(
+                    symbol, days
+                ),
                 get_quote=lambda symbol: self.schwab.get_quote(symbol),
                 get_option_chain=lambda symbol: self.schwab.get_option_chain(symbol),
                 config=vars(self.config.regime),
@@ -270,8 +280,12 @@ class TradingBot:
         self.monte_carlo_engine: Optional[MonteCarloRiskEngine] = None
         if bool(getattr(self.config.monte_carlo, "enabled", False)):
             self.monte_carlo_engine = MonteCarloRiskEngine(
-                simulations=int(getattr(self.config.monte_carlo, "simulations", 10_000) or 10_000),
-                var_limit_pct=float(getattr(self.config.monte_carlo, "var_limit_pct", 3.0) or 3.0),
+                simulations=int(
+                    getattr(self.config.monte_carlo, "simulations", 10_000) or 10_000
+                ),
+                var_limit_pct=float(
+                    getattr(self.config.monte_carlo, "var_limit_pct", 3.0) or 3.0
+                ),
             )
         self.correlation_monitor: Optional[CrossAssetCorrelationMonitor] = None
 
@@ -299,31 +313,23 @@ class TradingBot:
             self.scanner = MarketScanner(self.schwab, self.config.scanner)
 
         # Initialize strategies
-        self.strategies = []
+        self.strategies: list[Any] = []
         if self.config.credit_spreads.enabled:
             self.strategies.append(
                 CreditSpreadStrategy(vars(self.config.credit_spreads))
             )
         if self.config.iron_condors.enabled:
-            self.strategies.append(
-                IronCondorStrategy(vars(self.config.iron_condors))
-            )
+            self.strategies.append(IronCondorStrategy(vars(self.config.iron_condors)))
         if self.config.covered_calls.enabled:
-            self.strategies.append(
-                CoveredCallStrategy(vars(self.config.covered_calls))
-            )
+            self.strategies.append(CoveredCallStrategy(vars(self.config.covered_calls)))
         if self.config.naked_puts.enabled:
-            self.strategies.append(
-                NakedPutStrategy(vars(self.config.naked_puts))
-            )
+            self.strategies.append(NakedPutStrategy(vars(self.config.naked_puts)))
         if self.config.calendar_spreads.enabled:
             self.strategies.append(
                 CalendarSpreadStrategy(vars(self.config.calendar_spreads))
             )
         if self.config.strangles.enabled:
-            self.strategies.append(
-                StranglesStrategy(vars(self.config.strangles))
-            )
+            self.strategies.append(StranglesStrategy(vars(self.config.strangles)))
         if self.config.broken_wing_butterfly.enabled:
             self.strategies.append(
                 BrokenWingButterflyStrategy(vars(self.config.broken_wing_butterfly))
@@ -338,7 +344,7 @@ class TradingBot:
             strategy.name: float(strategy.config.get("min_credit_pct", 0.0))
             for strategy in self.strategies
         }
-        self.circuit_state = {
+        self.circuit_state: dict[str, Any] = {
             "regime": "normal",
             "vix": None,
             "halt_entries": False,
@@ -355,7 +361,9 @@ class TradingBot:
             "weekly_loss": False,
         }
 
-        scanner_status = "ON (dynamic market scan)" if self.scanner else "OFF (static watchlist)"
+        scanner_status = (
+            "ON (dynamic market scan)" if self.scanner else "OFF (static watchlist)"
+        )
         logger.info(
             "TradingBot initialized | Mode: %s | Strategies: %d | Scanner: %s",
             self.config.trading_mode,
@@ -389,7 +397,9 @@ class TradingBot:
         except Exception as exc:
             logger.debug("Could not compute config override diff: %s", exc)
 
-    def _collect_config_diffs(self, path: str, current, default, diffs: list[str]) -> None:
+    def _collect_config_diffs(
+        self, path: str, current, default, diffs: list[str]
+    ) -> None:
         """Recursively collect changed config leaf values."""
         if is_dataclass(current) and is_dataclass(default):
             for field in fields(current):
@@ -431,7 +441,10 @@ class TradingBot:
     def _safe_config_value(value):
         text = str(value)
         lowered = text.lower()
-        if any(token in lowered for token in ("secret", "token", "hash", "api_key", "webhook")):
+        if any(
+            token in lowered
+            for token in ("secret", "token", "hash", "api_key", "webhook")
+        ):
             return "<redacted>"
         return value
 
@@ -452,25 +465,37 @@ class TradingBot:
         for position in positions:
             if not isinstance(position, dict):
                 continue
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             qty = max(1, safe_int(position.get("quantity"), 1))
             entry_price = safe_float(
                 position.get("entry_credit", details.get("entry_credit", 0.0)),
                 0.0,
             )
             current_price = safe_float(
-                position.get("current_value", details.get("current_value", entry_price)),
+                position.get(
+                    "current_value", details.get("current_value", entry_price)
+                ),
                 entry_price,
             )
-            pnl = safe_float(position.get("pnl"), (entry_price - current_price) * qty * 100.0)
+            pnl = safe_float(
+                position.get("pnl"), (entry_price - current_price) * qty * 100.0
+            )
             max_profit_dollars = max(0.0, entry_price * qty * 100.0)
-            pct_of_max = (pnl / max_profit_dollars * 100.0) if max_profit_dollars > 0 else 0.0
+            pct_of_max = (
+                (pnl / max_profit_dollars * 100.0) if max_profit_dollars > 0 else 0.0
+            )
             rows.append(
                 {
                     "symbol": str(position.get("symbol", "")).upper(),
                     "strategy": str(position.get("strategy", "")),
                     "qty": qty,
-                    "dte": safe_int(position.get("dte_remaining", details.get("dte", 0)), 0),
+                    "dte": safe_int(
+                        position.get("dte_remaining", details.get("dte", 0)), 0
+                    ),
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "pnl": round(pnl, 2),
@@ -545,7 +570,9 @@ class TradingBot:
         return next_run.strftime("%H:%M")
 
     def _ui_regime_duration(self, regime: str) -> str:
-        history_path = Path(self.config.regime.history_file or "bot/data/regime_history.json")
+        history_path = Path(
+            self.config.regime.history_file or "bot/data/regime_history.json"
+        )
         payload = load_json(history_path, {"entries": []})
         entries = payload.get("entries", []) if isinstance(payload, dict) else []
         if not isinstance(entries, list) or not entries:
@@ -581,7 +608,11 @@ class TradingBot:
         except Exception as exc:
             logger.debug("Econ calendar context fetch failed: %s", exc)
             return "N/A"
-        events = context.get("upcoming_macro_events", []) if isinstance(context, dict) else []
+        events = (
+            context.get("upcoming_macro_events", [])
+            if isinstance(context, dict)
+            else []
+        )
         if not isinstance(events, list) or not events:
             return "N/A"
         first = events[0] if isinstance(events[0], dict) else {}
@@ -667,7 +698,10 @@ class TradingBot:
         breakers = 0
         if self.circuit_state.get("halt_entries"):
             breakers += 1
-        if self._portfolio_halt_until and self._now_eastern() < self._portfolio_halt_until:
+        if (
+            self._portfolio_halt_until
+            and self._now_eastern() < self._portfolio_halt_until
+        ):
             breakers += 1
         if self.circuit_state.get("consecutive_loss_pause_until"):
             breakers += 1
@@ -681,12 +715,16 @@ class TradingBot:
         if self._last_scan_completed_at:
             elapsed = self._now_eastern() - self._last_scan_completed_at
             mins = max(0, int(elapsed.total_seconds() // 60))
-            last_scan = f"{self._last_scan_completed_at.strftime('%H:%M ET')} ({mins}m ago)"
+            last_scan = (
+                f"{self._last_scan_completed_at.strftime('%H:%M ET')} ({mins}m ago)"
+            )
 
         reconciliation = "✅ synced"
         if self._last_reconciliation_watchdog:
             lag = self._now_eastern() - self._last_reconciliation_watchdog
-            if lag > timedelta(minutes=max(5, int(self.config.reconciliation.interval_minutes) * 2)):
+            if lag > timedelta(
+                minutes=max(5, int(self.config.reconciliation.interval_minutes) * 2)
+            ):
                 reconciliation = "⚠️ stale"
         elif not self.is_paper:
             reconciliation = "⚠️ pending"
@@ -694,13 +732,18 @@ class TradingBot:
         ml_status = "❌ disabled"
         if bool(getattr(self.config.ml_scorer, "enabled", False)):
             closed_count = len(self._recent_closed_trades())
-            min_training = int(getattr(self.config.ml_scorer, "min_training_trades", 30) or 30)
+            min_training = int(
+                getattr(self.config.ml_scorer, "min_training_trades", 30) or 30
+            )
             if closed_count >= min_training:
                 ml_status = f"✅ trained ({closed_count} trades)"
             else:
                 ml_status = f"⏳ not enough data ({closed_count}/{min_training})"
 
-        theta_target = float(getattr(self.config.theta_harvest, "satisfied_pct", 0.80) or 0.80) * 100.0
+        theta_target = (
+            float(getattr(self.config.theta_harvest, "satisfied_pct", 0.80) or 0.80)
+            * 100.0
+        )
         theta_ratio = self._theta_harvest_ratio() * 100.0
 
         self._ui_update(
@@ -762,7 +805,9 @@ class TradingBot:
             if not isinstance(value, dict):
                 continue
             out[str(key)] = {
-                "reduction": max(0.0, min(0.95, safe_float(value.get("reduction"), 0.0))),
+                "reduction": max(
+                    0.0, min(0.95, safe_float(value.get("reduction"), 0.0))
+                ),
                 "remaining_trades": max(0, safe_int(value.get("remaining_trades"), 0)),
                 "level": max(0, safe_int(value.get("level"), 0)),
                 "updated_at": str(value.get("updated_at", "")),
@@ -807,7 +852,9 @@ class TradingBot:
             try:
                 configured = self.schwab.configured_accounts()
             except Exception as exc:
-                logger.debug("Could not fetch configured accounts from Schwab client: %s", exc)
+                logger.debug(
+                    "Could not fetch configured accounts from Schwab client: %s", exc
+                )
                 configured = []
         if not configured:
             return
@@ -837,14 +884,24 @@ class TradingBot:
     def _apply_risk_profile(self, profile: str) -> None:
         """Apply account risk-profile multipliers to runtime risk config."""
         self.risk_manager.config = copy.deepcopy(self._base_risk_config)
-        named_profiles = self.config.risk_profiles if isinstance(self.config.risk_profiles, dict) else {}
+        named_profiles = (
+            self.config.risk_profiles
+            if isinstance(self.config.risk_profiles, dict)
+            else {}
+        )
         profile_key = str(profile or "").strip().lower()
         preset = named_profiles.get(profile_key)
         if preset:
-            self.risk_manager.config.max_portfolio_risk_pct = float(preset.max_portfolio_risk_pct)
-            self.risk_manager.config.max_position_risk_pct = float(preset.max_position_risk_pct)
+            self.risk_manager.config.max_portfolio_risk_pct = float(
+                preset.max_portfolio_risk_pct
+            )
+            self.risk_manager.config.max_position_risk_pct = float(
+                preset.max_position_risk_pct
+            )
             self.risk_manager.config.max_open_positions = int(preset.max_open_positions)
-            self.risk_manager.config.max_daily_loss_pct = float(preset.max_daily_loss_pct)
+            self.risk_manager.config.max_daily_loss_pct = float(
+                preset.max_daily_loss_pct
+            )
             return
 
         # Backward-compatible fallback for unknown profile names.
@@ -889,7 +946,9 @@ class TradingBot:
             "timestamp": self._now_eastern().isoformat(),
             "event_type": str(event_type),
             "correlation_id": correlation_id or str(uuid.uuid4().hex[:12]),
-            "details": details if isinstance(details, dict) else {"value": str(details)},
+            "details": details
+            if isinstance(details, dict)
+            else {"value": str(details)},
         }
         try:
             existing = ""
@@ -944,7 +1003,9 @@ class TradingBot:
         self._process_stream_exit_check(message)
 
     @staticmethod
-    def _on_stream_account_activity(message) -> None:  # pragma: no cover - callback path
+    def _on_stream_account_activity(
+        message,
+    ) -> None:  # pragma: no cover - callback path
         logger.info("Account activity stream event: %s", message)
 
     def _process_stream_exit_check(self, message) -> None:
@@ -961,14 +1022,21 @@ class TradingBot:
         self._last_stream_exit_check[symbol] = now_et
 
         if self.is_paper:
-            positions = [
-                p for p in self.paper_trader.get_positions()
-                if str(p.get("status", "open")).lower() == "open" and str(p.get("symbol", "")).upper() == symbol
-            ]
+            if self.paper_trader is None:
+                positions = []
+            else:
+                positions = [
+                    p
+                    for p in self.paper_trader.get_positions()
+                    if str(p.get("status", "open")).lower() == "open"
+                    and str(p.get("symbol", "")).upper() == symbol
+                ]
         else:
             positions = [
-                p for p in self._get_tracked_positions()
-                if str(p.get("status", "open")).lower() == "open" and str(p.get("symbol", "")).upper() == symbol
+                p
+                for p in self._get_tracked_positions()
+                if str(p.get("status", "open")).lower() == "open"
+                and str(p.get("symbol", "")).upper() == symbol
             ]
         if not positions:
             return
@@ -988,25 +1056,34 @@ class TradingBot:
             try:
                 signals.extend(strategy.check_exits(positions, self.schwab))
             except Exception as exc:
-                logger.error("Exit check failed for strategy %s: %s", strategy.name, exc, exc_info=True)
+                logger.error(
+                    "Exit check failed for strategy %s: %s",
+                    strategy.name,
+                    exc,
+                    exc_info=True,
+                )
                 continue
 
-        for signal in signals:
-            if signal.action == "roll":
-                self._execute_roll(signal)
+        for sig in signals:
+            if sig.action == "roll":
+                self._execute_roll(sig)
             else:
-                self._execute_exit(signal)
+                self._execute_exit(sig)
 
     @staticmethod
     def _extract_stream_symbol_price(message) -> tuple[str, float]:
         if not isinstance(message, dict):
             return "", 0.0
-        symbol = str(
-            message.get("symbol")
-            or message.get("key")
-            or message.get("serviceSymbol")
-            or ""
-        ).upper().strip()
+        symbol = (
+            str(
+                message.get("symbol")
+                or message.get("key")
+                or message.get("serviceSymbol")
+                or ""
+            )
+            .upper()
+            .strip()
+        )
         price = safe_float(
             message.get("lastPrice", message.get("mark", message.get("price", 0.0))),
             0.0,
@@ -1020,15 +1097,17 @@ class TradingBot:
         self.schwab.connect()
 
         if self.is_paper:
+            balance = (
+                self.paper_trader.get_account_balance() if self.paper_trader else 0.0
+            )
             logger.info(
-                "Paper trading mode — Schwab market data connected. "
-                "Paper balance: $%s",
-                f"{self.paper_trader.get_account_balance():,.2f}",
+                "Paper trading mode — Schwab market data connected. Paper balance: $%s",
+                f"{balance:,.2f}",
             )
             self._setup_streaming()
             return
 
-        account_hash = self.schwab.resolve_account_hash(require_unique=True)
+        account_hash = self.schwab.resolve_account_hash(require_unique=True) or ""
         balance = self.schwab.get_account_balance()
         logger.info(
             "Connected to Schwab API | Account: ...%s | Balance: $%s",
@@ -1127,11 +1206,14 @@ class TradingBot:
         now_et = self._now_eastern()
         if not force and not self._is_market_open_now():
             return 0
-        interval_minutes = max(5, int(getattr(self.config.reconciliation, "interval_minutes", 30) or 30))
+        interval_minutes = max(
+            5, int(getattr(self.config.reconciliation, "interval_minutes", 30) or 30)
+        )
         if (
             not force
             and self._last_reconciliation_watchdog is not None
-            and (now_et - self._last_reconciliation_watchdog) < timedelta(minutes=interval_minutes)
+            and (now_et - self._last_reconciliation_watchdog)
+            < timedelta(minutes=interval_minutes)
         ):
             return 0
         self._last_reconciliation_watchdog = now_et
@@ -1218,7 +1300,9 @@ class TradingBot:
             raise RuntimeError(
                 f"Could not retrieve a valid live quote for {probe_symbol}."
             )
-        logger.info("Live preflight quote check passed: %s @ $%.2f", probe_symbol, probe_price)
+        logger.info(
+            "Live preflight quote check passed: %s @ $%.2f", probe_symbol, probe_price
+        )
 
         chain_data, underlying_price = self._get_chain_data(probe_symbol)
         if not chain_data or underlying_price <= 0:
@@ -1246,7 +1330,9 @@ class TradingBot:
         for warning in validation.warnings:
             logger.warning("Config validation warning: %s", warning)
         if validation.failed:
-            raise RuntimeError("Config validation failed: " + "; ".join(validation.failed))
+            raise RuntimeError(
+                "Config validation failed: " + "; ".join(validation.failed)
+            )
 
         if not self.config.schwab.app_key or not self.config.schwab.app_secret:
             raise RuntimeError(
@@ -1429,12 +1515,30 @@ class TradingBot:
         active = manager.active_strategy()
         if not isinstance(active, dict):
             return 1.0
-        proposal = active.get("proposal", {}) if isinstance(active.get("proposal"), dict) else {}
-        strategy_type = str(proposal.get("type", active.get("type", ""))).strip().lower()
+        proposal = (
+            active.get("proposal", {})
+            if isinstance(active.get("proposal"), dict)
+            else {}
+        )
+        strategy_type = (
+            str(proposal.get("type", active.get("type", ""))).strip().lower()
+        )
         strategy_name = str(signal.strategy or "").strip().lower()
-        proposal_name = str(proposal.get("name", active.get("name", ""))).strip().lower()
+        proposal_name = (
+            str(proposal.get("name", active.get("name", ""))).strip().lower()
+        )
         if proposal_name and strategy_name == proposal_name:
-            return max(0.1, min(1.0, float(active.get("sizing_scalar", self.config.strategy_sandbox.sizing_scalar))))
+            return max(
+                0.1,
+                min(
+                    1.0,
+                    float(
+                        active.get(
+                            "sizing_scalar", self.config.strategy_sandbox.sizing_scalar
+                        )
+                    ),
+                ),
+            )
 
         mapped: set[str] = set()
         if strategy_type == "credit_spread":
@@ -1444,7 +1548,17 @@ class TradingBot:
         elif strategy_type == "iron_condor":
             mapped = {"iron_condor"}
         if strategy_name in mapped:
-            return max(0.1, min(1.0, float(active.get("sizing_scalar", self.config.strategy_sandbox.sizing_scalar))))
+            return max(
+                0.1,
+                min(
+                    1.0,
+                    float(
+                        active.get(
+                            "sizing_scalar", self.config.strategy_sandbox.sizing_scalar
+                        )
+                    ),
+                ),
+            )
         return 1.0
 
     def _run_strategy_sandbox_cycle(self) -> None:
@@ -1453,7 +1567,11 @@ class TradingBot:
             return
         try:
             decision = manager.evaluate_cycle(
-                regime=str(self.current_regime_state.regime if self.current_regime_state else self.circuit_state.get("regime", "UNKNOWN")),
+                regime=str(
+                    self.current_regime_state.regime
+                    if self.current_regime_state
+                    else self.circuit_state.get("regime", "UNKNOWN")
+                ),
                 strategy_scores=dict(self._last_cycle_strategy_scores),
                 enabled_strategies=self._enabled_strategy_names(),
                 market_context={
@@ -1462,7 +1580,9 @@ class TradingBot:
                     "strategy_scores": dict(self._last_cycle_strategy_scores),
                     "last_ranked_signals": list(self._last_ranked_signals[:10]),
                     "portfolio": {
-                        "open_positions": len(self.risk_manager.portfolio.open_positions),
+                        "open_positions": len(
+                            self.risk_manager.portfolio.open_positions
+                        ),
                         "daily_pnl": self.risk_manager.portfolio.daily_pnl,
                         "total_risk_deployed": self.risk_manager.portfolio.total_risk_deployed,
                     },
@@ -1495,8 +1615,12 @@ class TradingBot:
         total_timeout_seconds: Optional[int] = None,
         quote_spread_provider: Optional[Callable[[], float]] = None,
     ) -> dict:
-        shifts, step_timeouts, max_attempts = self._execution_ladder_settings(phase=phase)
-        if self.execution_algo_engine and bool(getattr(self.config.execution_algos, "enabled", False)):
+        shifts, step_timeouts, max_attempts = self._execution_ladder_settings(
+            phase=phase
+        )
+        if self.execution_algo_engine and bool(
+            getattr(self.config.execution_algos, "enabled", False)
+        ):
             return self.execution_algo_engine.execute(
                 order_factory=order_factory,
                 midpoint_price=midpoint_price,
@@ -1530,7 +1654,9 @@ class TradingBot:
         overrides = {
             "adaptive_targets": bool(self.config.exits.adaptive_targets),
             "trailing_stop_enabled": bool(self.config.exits.trailing_stop_enabled),
-            "trailing_stop_activation_pct": float(self.config.exits.trailing_stop_activation_pct),
+            "trailing_stop_activation_pct": float(
+                self.config.exits.trailing_stop_activation_pct
+            ),
             "trailing_stop_floor_pct": float(self.config.exits.trailing_stop_floor_pct),
         }
         for strategy in self.strategies:
@@ -1599,12 +1725,16 @@ class TradingBot:
                 self.current_regime_state = state
                 regime_key = str(state.regime)
                 self.circuit_state["regime"] = regime_key
-                self.circuit_state["regime_confidence"] = round(float(state.confidence), 4)
+                self.circuit_state["regime_confidence"] = round(
+                    float(state.confidence), 4
+                )
                 if regime_key in {CRASH_CRISIS, CRASH_CRIISIS}:
                     self.circuit_state["halt_entries"] = True
                 self._apply_regime_adjustments(regime_key)
             except Exception as exc:
-                logger.warning("Regime detector failed, falling back to VIX-only regime: %s", exc)
+                logger.warning(
+                    "Regime detector failed, falling back to VIX-only regime: %s", exc
+                )
 
         vix_value = None
         for symbol in ("$VIX", "^VIX", "VIX"):
@@ -1667,7 +1797,9 @@ class TradingBot:
                     "confidence": self.circuit_state.get("regime_confidence"),
                 },
             )
-            confidence_pct = safe_float(self.circuit_state.get("regime_confidence"), 0.0)
+            confidence_pct = safe_float(
+                self.circuit_state.get("regime_confidence"), 0.0
+            )
             if confidence_pct <= 1.0:
                 confidence_pct *= 100.0
             self._ui_update(
@@ -1727,14 +1859,19 @@ class TradingBot:
                 level="WARNING",
                 title="Correlation regime shift",
                 message=f"{previous} -> {regime}",
-                context={"correlations": state.get("correlations", {}), "flags": state.get("flags", {})},
+                context={
+                    "correlations": state.get("correlations", {}),
+                    "flags": state.get("flags", {}),
+                },
             )
 
     def _apply_regime_adjustments(self, regime: str) -> None:
         """Adjust risk/entry thresholds based on volatility regime."""
         # Reset to base profile values before applying overlays.
         profile = (
-            str((self._active_account or {}).get("risk_profile", "moderate")).strip().lower()
+            str((self._active_account or {}).get("risk_profile", "moderate"))
+            .strip()
+            .lower()
             if self._active_account
             else "moderate"
         )
@@ -1763,10 +1900,15 @@ class TradingBot:
                 1, int(round(self.risk_manager.config.max_open_positions * 0.50))
             )
 
-        if self.current_regime_state and self.current_regime_state.recommended_strategy_weights:
+        if (
+            self.current_regime_state
+            and self.current_regime_state.recommended_strategy_weights
+        ):
             weights = self.current_regime_state.recommended_strategy_weights
             for strategy in self.strategies:
-                strategy.config["regime_weight"] = float(weights.get(strategy.name, 1.0))
+                strategy.config["regime_weight"] = float(
+                    weights.get(strategy.name, 1.0)
+                )
 
     def _update_loss_breakers(self) -> None:
         """Apply consecutive-loss and weekly-loss entry pauses."""
@@ -1780,7 +1922,11 @@ class TradingBot:
             max_loss_hits = 0
             for trade in recent_three:
                 pnl = float(trade.get("pnl", 0.0))
-                max_loss = abs(float(trade.get("max_loss", 0.0)) * max(1, int(trade.get("quantity", 1))) * 100.0)
+                max_loss = abs(
+                    float(trade.get("max_loss", 0.0))
+                    * max(1, int(trade.get("quantity", 1)))
+                    * 100.0
+                )
                 if max_loss > 0 and pnl <= (-0.95 * max_loss):
                     max_loss_hits += 1
             if max_loss_hits == 3:
@@ -1793,7 +1939,9 @@ class TradingBot:
                     except ValueError:
                         existing_dt = None
                 if not existing_dt or now >= existing_dt:
-                    self.circuit_state["consecutive_loss_pause_until"] = pause_until.isoformat()
+                    self.circuit_state["consecutive_loss_pause_until"] = (
+                        pause_until.isoformat()
+                    )
                     if not self._breaker_alert_flags["consecutive_loss"]:
                         self._alert(
                             level="ERROR",
@@ -1844,7 +1992,7 @@ class TradingBot:
                         level="ERROR",
                         title="Weekly loss breaker",
                         message=f"Weekly loss {weekly_loss:,.2f} breached 5% threshold. "
-                                f"Entries paused until {pause_until.isoformat()}",
+                        f"Entries paused until {pause_until.isoformat()}",
                     )
                     self._ui_update(
                         "add_event",
@@ -1878,7 +2026,9 @@ class TradingBot:
 
         for trade in sorted(closed, key=lambda item: str(item.get("close_date", ""))):
             pnl = float(trade.get("pnl", 0.0) or 0.0)
-            strategy = self._strategy_group(str(trade.get("strategy", "")).strip().lower())
+            strategy = self._strategy_group(
+                str(trade.get("strategy", "")).strip().lower()
+            )
             symbol = str(trade.get("symbol", "")).strip().upper()
 
             if strategy:
@@ -1966,10 +2116,26 @@ class TradingBot:
         if not bool(getattr(self.config.cooldown, "graduated", False)):
             return
         changed = False
-        level1_losses = max(1, int(getattr(self.config.cooldown, "level_1_losses", 2) or 2))
-        level2_losses = max(level1_losses, int(getattr(self.config.cooldown, "level_2_losses", 3) or 3))
-        level1_reduction = max(0.0, min(0.95, float(getattr(self.config.cooldown, "level_1_reduction", 0.25) or 0.25)))
-        level2_reduction = max(level1_reduction, min(0.95, float(getattr(self.config.cooldown, "level_2_reduction", 0.50) or 0.50)))
+        level1_losses = max(
+            1, int(getattr(self.config.cooldown, "level_1_losses", 2) or 2)
+        )
+        level2_losses = max(
+            level1_losses, int(getattr(self.config.cooldown, "level_2_losses", 3) or 3)
+        )
+        level1_reduction = max(
+            0.0,
+            min(
+                0.95,
+                float(getattr(self.config.cooldown, "level_1_reduction", 0.25) or 0.25),
+            ),
+        )
+        level2_reduction = max(
+            level1_reduction,
+            min(
+                0.95,
+                float(getattr(self.config.cooldown, "level_2_reduction", 0.50) or 0.50),
+            ),
+        )
 
         for strategy, streak in streak_by_strategy.items():
             streak_n = max(0, int(streak))
@@ -1981,19 +2147,24 @@ class TradingBot:
 
             target = None
             if streak_n >= level2_losses:
-                target = {"reduction": level2_reduction, "remaining_trades": 5, "level": 2}
+                target = {
+                    "reduction": level2_reduction,
+                    "remaining_trades": 5,
+                    "level": 2,
+                }
             elif streak_n >= level1_losses:
-                target = {"reduction": level1_reduction, "remaining_trades": 3, "level": 1}
+                target = {
+                    "reduction": level1_reduction,
+                    "remaining_trades": 3,
+                    "level": 1,
+                }
             if target is None:
                 continue
 
             current = self._strategy_cooldown_state.get(strategy, {})
             current_level = safe_int(current.get("level"), 0)
             current_remaining = safe_int(current.get("remaining_trades"), 0)
-            should_replace = (
-                current_level < target["level"]
-                or current_remaining <= 0
-            )
+            should_replace = current_level < target["level"] or current_remaining <= 0
             if should_replace:
                 self._strategy_cooldown_state[strategy] = {
                     **target,
@@ -2040,12 +2211,16 @@ class TradingBot:
 
     def _apply_drawdown_breaker(self) -> None:
         now = self._now_eastern()
-        threshold = float(self.config.circuit_breakers.portfolio_drawdown_halt_pct) / 100.0
+        threshold = (
+            float(self.config.circuit_breakers.portfolio_drawdown_halt_pct) / 100.0
+        )
         if threshold <= 0:
             return
         drawdown = self.risk_manager._current_drawdown()
         if drawdown >= threshold:
-            pause_until = now + timedelta(hours=int(self.config.circuit_breakers.portfolio_halt_hours))
+            pause_until = now + timedelta(
+                hours=int(self.config.circuit_breakers.portfolio_halt_hours)
+            )
             if not self._portfolio_halt_until or now >= self._portfolio_halt_until:
                 self._portfolio_halt_until = pause_until
                 logger.warning(
@@ -2173,7 +2348,11 @@ class TradingBot:
         return now_et.hour >= cutoff_hour
 
     def _theta_harvest_ratio(self) -> float:
-        state = self._theta_harvest_state if isinstance(self._theta_harvest_state, dict) else {}
+        state = (
+            self._theta_harvest_state
+            if isinstance(self._theta_harvest_state, dict)
+            else {}
+        )
         if str(state.get("date", "")) != self._now_eastern().date().isoformat():
             return 0.0
         expected = safe_float(state.get("expected_theta"), 0.0)
@@ -2188,7 +2367,9 @@ class TradingBot:
         if not self._theta_harvest_cutoff_reached():
             return False
         ratio = self._theta_harvest_ratio()
-        target = float(getattr(self.config.theta_harvest, "satisfied_pct", 0.80) or 0.80)
+        target = float(
+            getattr(self.config.theta_harvest, "satisfied_pct", 0.80) or 0.80
+        )
         return ratio >= target
 
     def _theta_harvest_is_underperforming(self) -> bool:
@@ -2196,12 +2377,18 @@ class TradingBot:
             return False
         if not self._theta_harvest_cutoff_reached():
             return False
-        state = self._theta_harvest_state if isinstance(self._theta_harvest_state, dict) else {}
+        state = (
+            self._theta_harvest_state
+            if isinstance(self._theta_harvest_state, dict)
+            else {}
+        )
         expected = safe_float(state.get("expected_theta"), 0.0)
         if expected <= 0:
             return False
         ratio = self._theta_harvest_ratio()
-        threshold = float(getattr(self.config.theta_harvest, "underperform_pct", 0.30) or 0.30)
+        threshold = float(
+            getattr(self.config.theta_harvest, "underperform_pct", 0.30) or 0.30
+        )
         return ratio < threshold
 
     def _refresh_theta_harvest_state(self, *, force: bool = False) -> None:
@@ -2236,14 +2423,27 @@ class TradingBot:
         for position in positions:
             if not isinstance(position, dict):
                 continue
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             qty = max(1, safe_int(position.get("quantity"), 1))
-            theta_abs += abs(safe_float(details.get("net_theta", position.get("net_theta", 0.0)), 0.0) * qty)
+            theta_abs += abs(
+                safe_float(
+                    details.get("net_theta", position.get("net_theta", 0.0)), 0.0
+                )
+                * qty
+            )
 
         expected_theta = max(0.0, theta_abs)
         attribution = self.pnl_attribution.compute_attribution(positions, {}, {})
         theta_pnl = safe_float(
-            (attribution.get("portfolio", {}) if isinstance(attribution, dict) else {}).get("theta_pnl"),
+            (
+                attribution.get("portfolio", {})
+                if isinstance(attribution, dict)
+                else {}
+            ).get("theta_pnl"),
             0.0,
         )
         prev_earned = safe_float(self._theta_harvest_state.get("theta_earned"), 0.0)
@@ -2262,7 +2462,11 @@ class TradingBot:
         """Apply optional high-level LLM strategist directives once per cycle."""
         if not self.llm_strategist:
             return
-        for key in [name for name in self._service_degradation if name.startswith("skip_sector:")]:
+        for key in [
+            name
+            for name in self._service_degradation
+            if name.startswith("skip_sector:")
+        ]:
             self._service_degradation.pop(key, None)
         context = {
             "portfolio_greeks": self.risk_manager.get_portfolio_greeks(),
@@ -2273,7 +2477,8 @@ class TradingBot:
             "recent_regime_states": self._recent_regime_states(limit=3),
             "regime_sub_signals": (
                 dict(self.current_regime_state.sub_signals)
-                if self.current_regime_state and isinstance(self.current_regime_state.sub_signals, dict)
+                if self.current_regime_state
+                and isinstance(self.current_regime_state.sub_signals, dict)
                 else {}
             ),
             "strategy_streaks": self._strategy_streak_summary(),
@@ -2319,7 +2524,11 @@ class TradingBot:
                     min(1.5, scalar),
                 )
                 self._cycle_size_scalar *= scalar
-                logger.info("LLM strategist applied size scalar %.2f (%s)", scalar, directive.reason)
+                logger.info(
+                    "LLM strategist applied size scalar %.2f (%s)",
+                    scalar,
+                    directive.reason,
+                )
             elif directive.action == "reduce_delta":
                 self.risk_manager.config.max_portfolio_delta_abs = max(
                     10.0,
@@ -2328,15 +2537,29 @@ class TradingBot:
                 target_count = max(1, safe_int(directive.payload.get("count"), 2))
                 direction = str(directive.payload.get("direction", "")).strip().lower()
                 if direction not in {"positive", "negative"}:
-                    direction = "positive" if float(self.risk_manager.portfolio.net_delta or 0.0) >= 0 else "negative"
+                    direction = (
+                        "positive"
+                        if float(self.risk_manager.portfolio.net_delta or 0.0) >= 0
+                        else "negative"
+                    )
 
                 candidates: list[tuple[float, dict, float]] = []
                 for position in self._get_tracked_positions():
                     if str(position.get("status", "open")).lower() != "open":
                         continue
-                    details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+                    details = (
+                        position.get("details", {})
+                        if isinstance(position.get("details"), dict)
+                        else {}
+                    )
                     qty = max(1, safe_int(position.get("quantity"), 1))
-                    pos_delta = safe_float(details.get("net_delta", position.get("net_delta", 0.0)), 0.0) * qty
+                    pos_delta = (
+                        safe_float(
+                            details.get("net_delta", position.get("net_delta", 0.0)),
+                            0.0,
+                        )
+                        * qty
+                    )
                     if direction == "positive" and pos_delta <= 0:
                         continue
                     if direction == "negative" and pos_delta >= 0:
@@ -2382,7 +2605,7 @@ class TradingBot:
                                 position_id=position.get("position_id"),
                                 reason=f"LLM strategist directive: {directive.reason}",
                                 quantity=max(1, int(position.get("quantity", 1))),
-                    )
+                            )
                         )
         self._ui_update_system_status()
 
@@ -2394,7 +2617,7 @@ class TradingBot:
             return []
         out: list[dict] = []
         prev_regime = None
-        for row in entries[-max(1, int(limit)):]:
+        for row in entries[-max(1, int(limit)) :]:
             if not isinstance(row, dict):
                 continue
             regime = str(row.get("regime", ""))
@@ -2439,17 +2662,30 @@ class TradingBot:
                 continue
             qty = max(1, safe_int(position.get("quantity"), 1))
             max_loss = safe_float(position.get("max_loss"), 0.0)
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             rows.append(
                 {
                     "position_id": position.get("position_id"),
                     "symbol": position.get("symbol"),
                     "strategy": position.get("strategy"),
                     "risk_dollars": round(max_loss * qty * 100.0, 2),
-                    "delta": round(safe_float(details.get("net_delta", position.get("net_delta", 0.0)), 0.0) * qty, 4),
+                    "delta": round(
+                        safe_float(
+                            details.get("net_delta", position.get("net_delta", 0.0)),
+                            0.0,
+                        )
+                        * qty,
+                        4,
+                    ),
                 }
             )
-        rows.sort(key=lambda item: float(item.get("risk_dollars", 0.0) or 0.0), reverse=True)
+        rows.sort(
+            key=lambda item: float(item.get("risk_dollars", 0.0) or 0.0), reverse=True
+        )
         return rows[: max(1, int(limit))]
 
     def _apply_hedging_layer(self) -> None:
@@ -2480,7 +2716,9 @@ class TradingBot:
         )
         if not actions:
             return
-        max_monthly_cost = account_value * (float(self.config.hedging.max_hedge_cost_pct) / 100.0)
+        max_monthly_cost = account_value * (
+            float(self.config.hedging.max_hedge_cost_pct) / 100.0
+        )
         spent_this_month = self._monthly_hedge_cost()
         remaining_budget = max(0.0, max_monthly_cost - spent_this_month)
         for action in actions:
@@ -2515,9 +2753,14 @@ class TradingBot:
                 level = "INFO" if executed else "WARNING"
                 self._alert(
                     level=level,
-                    title="Hedge action executed" if executed else "Hedge action failed",
+                    title="Hedge action executed"
+                    if executed
+                    else "Hedge action failed",
                     message=f"{action.symbol} {action.direction} x{action.quantity}",
-                    context={"estimated_cost": action.estimated_cost, "reason": action.reason},
+                    context={
+                        "estimated_cost": action.estimated_cost,
+                        "reason": action.reason,
+                    },
                 )
                 if not executed:
                     self._ui_update(
@@ -2539,7 +2782,9 @@ class TradingBot:
             return False
 
         quantity = max(1, int(action.quantity))
-        debit = max(0.01, safe_float(option.get("mid"), safe_float(action.estimated_cost, 0.01)))
+        debit = max(
+            0.01, safe_float(option.get("mid"), safe_float(action.estimated_cost, 0.01))
+        )
         details = {
             "expiration": option.get("expiration"),
             "dte": safe_int(option.get("dte"), 0),
@@ -2577,6 +2822,8 @@ class TradingBot:
             return False
 
         if self.is_paper:
+            if self.paper_trader is None:
+                return False
             result = self.paper_trader.execute_open(
                 strategy="hedge",
                 symbol=signal.symbol,
@@ -2602,14 +2849,15 @@ class TradingBot:
             )
             return True
 
-        order_factory = lambda price, qty=quantity: self.schwab.build_long_option_open(
-            symbol=signal.symbol,
-            expiration=str(option.get("expiration", "")),
-            contract_type=str(option.get("contract_type", "P")),
-            strike=safe_float(option.get("strike"), 0.0),
-            quantity=qty,
-            price=price,
-        )
+        def order_factory(price, qty=quantity):
+            return self.schwab.build_long_option_open(
+                    symbol=signal.symbol,
+                    expiration=str(option.get("expiration", "")),
+                    contract_type=str(option.get("contract_type", "P")),
+                    strike=safe_float(option.get("strike"), 0.0),
+                    quantity=qty,
+                    price=price,
+                )
         result = self._submit_execution_order(
             order_factory=order_factory,
             midpoint_price=debit,
@@ -2732,7 +2980,11 @@ class TradingBot:
             for trade in self.paper_trader.closed_trades:
                 if not isinstance(trade, dict):
                     continue
-                details = trade.get("details", {}) if isinstance(trade.get("details"), dict) else {}
+                details = (
+                    trade.get("details", {})
+                    if isinstance(trade.get("details"), dict)
+                    else {}
+                )
                 closed.append(
                     {
                         "strategy": trade.get("strategy", ""),
@@ -2740,7 +2992,9 @@ class TradingBot:
                         "close_date": trade.get("close_date", ""),
                         "pnl": float(trade.get("pnl", 0.0) or 0.0),
                         "max_loss": float(trade.get("max_loss", 0.0) or 0.0),
-                        "quantity": int(trade.get("closed_quantity", trade.get("quantity", 1)) or 1),
+                        "quantity": int(
+                            trade.get("closed_quantity", trade.get("quantity", 1)) or 1
+                        ),
                         "regime": trade.get("regime", details.get("regime", "unknown")),
                     }
                 )
@@ -2804,13 +3058,19 @@ class TradingBot:
                 entry["sum_profit"] = safe_float(entry.get("sum_profit"), 0.0) + pnl
             elif pnl < 0:
                 entry["losses"] = safe_int(entry.get("losses"), 0) + 1
-                entry["sum_loss_abs"] = safe_float(entry.get("sum_loss_abs"), 0.0) + abs(pnl)
+                entry["sum_loss_abs"] = safe_float(
+                    entry.get("sum_loss_abs"), 0.0
+                ) + abs(pnl)
 
             wins = safe_int(entry.get("wins"), 0)
             losses = safe_int(entry.get("losses"), 0)
             total = max(1, wins + losses)
-            entry["avg_profit"] = round(safe_float(entry.get("sum_profit"), 0.0) / max(1, wins), 4)
-            entry["avg_loss"] = round(-safe_float(entry.get("sum_loss_abs"), 0.0) / max(1, losses), 4)
+            entry["avg_profit"] = round(
+                safe_float(entry.get("sum_profit"), 0.0) / max(1, wins), 4
+            )
+            entry["avg_loss"] = round(
+                -safe_float(entry.get("sum_loss_abs"), 0.0) / max(1, losses), 4
+            )
             entry["win_rate"] = round((wins / total) * 100.0, 4)
 
         sanitized: dict[str, dict[str, dict]] = {}
@@ -2890,14 +3150,15 @@ class TradingBot:
         This runs automatically on schedule.
         """
         logger.info("=" * 60)
-        logger.info("SCAN CYCLE STARTED at %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        logger.info(
+            "SCAN CYCLE STARTED at %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
         logger.info("=" * 60)
 
         try:
             self._cycle_size_scalar = 1.0
             self._last_cycle_strategy_scores = {
-                str(strategy.name): 0.0
-                for strategy in self.strategies
+                str(strategy.name): 0.0 for strategy in self.strategies
             }
             # Update portfolio state
             self._update_portfolio_state()
@@ -2947,9 +3208,22 @@ class TradingBot:
                 message=str(e),
             )
 
+    def _execute_daily_maintenance(self) -> None:
+        """Run daily housekeeping: save metrics, generate roll recommendations, trim caches."""
+        if self.is_paper:
+            if self.paper_trader is None:
+                return
+            self.paper_trader.get_account_balance()
+            self.paper_trader.get_positions()
+            self.paper_trader.get_daily_pnl()
+        else:
+            self._reconcile_live_orders()
+
     def _update_portfolio_state(self) -> None:
         """Refresh account balance and positions for risk management."""
         if self.is_paper:
+            if self.paper_trader is None:
+                return
             balance = self.paper_trader.get_account_balance()
             positions = self.paper_trader.get_positions()
             daily_pnl = self.paper_trader.get_daily_pnl()
@@ -2971,11 +3245,16 @@ class TradingBot:
         drawdown_pct = self.risk_manager._current_drawdown() * 100.0
         self.alerts.drawdown_alert(
             drawdown_pct,
-            context={"balance": round(float(balance), 2), "open_positions": len(positions)},
+            context={
+                "balance": round(float(balance), 2),
+                "open_positions": len(positions),
+            },
         )
         logger.info(
             "Portfolio: Balance=$%s | Open positions: %d | Daily P/L: $%.2f",
-            f"{balance:,.2f}", len(positions), daily_pnl,
+            f"{balance:,.2f}",
+            len(positions),
+            daily_pnl,
         )
         daily_risk_used = 0.0
         if float(balance or 0.0) > 0:
@@ -3042,7 +3321,9 @@ class TradingBot:
 
             if status not in ENTRY_ORDER_TERMINAL:
                 if self._working_entry_moved_too_far(order_id):
-                    pending_position = self.live_ledger.get_position_by_order_id(order_id, side="entry")
+                    pending_position = self.live_ledger.get_position_by_order_id(
+                        order_id, side="entry"
+                    )
                     self._cancel_stale_live_order(order_id, side="entry")
                     if pending_position:
                         self._reenter_canceled_working_entry(pending_position)
@@ -3050,7 +3331,12 @@ class TradingBot:
                 if (
                     cancel_stale
                     and status in PENDING_ORDER_STATUSES
-                    and self._is_order_stale(order, order_id=order_id, side="entry", stale_minutes=stale_minutes)
+                    and self._is_order_stale(
+                        order,
+                        order_id=order_id,
+                        side="entry",
+                        stale_minutes=stale_minutes,
+                    )
                 ):
                     self._cancel_stale_live_order(order_id, side="entry")
                 continue
@@ -3086,14 +3372,21 @@ class TradingBot:
                 self.live_ledger.apply_partial_exit_fill(
                     order_id,
                     filled_quantity=filled_qty,
-                    close_value=fill_summary.get("per_contract") if fill_summary else None,
+                    close_value=fill_summary.get("per_contract")
+                    if fill_summary
+                    else None,
                 )
 
             if status not in EXIT_ORDER_TERMINAL:
                 if (
                     cancel_stale
                     and status in PENDING_ORDER_STATUSES
-                    and self._is_order_stale(order, order_id=order_id, side="exit", stale_minutes=stale_minutes)
+                    and self._is_order_stale(
+                        order,
+                        order_id=order_id,
+                        side="exit",
+                        stale_minutes=stale_minutes,
+                    )
                 ):
                     self._cancel_stale_live_order(order_id, side="exit")
                 continue
@@ -3111,10 +3404,23 @@ class TradingBot:
                 close_value=close_value,
             )
             if reconciled and status == "FILLED":
-                closed_position = self.live_ledger.get_position_by_order_id(order_id, side="exit")
-                if closed_position and str(closed_position.get("status", "")).lower() == "closed":
-                    details = closed_position.get("details", {}) if isinstance(closed_position.get("details"), dict) else {}
-                    earnings = details.get("earnings_proximity", {}) if isinstance(details.get("earnings_proximity"), dict) else {}
+                closed_position = self.live_ledger.get_position_by_order_id(
+                    order_id, side="exit"
+                )
+                if (
+                    closed_position
+                    and str(closed_position.get("status", "")).lower() == "closed"
+                ):
+                    details = (
+                        closed_position.get("details", {})
+                        if isinstance(closed_position.get("details"), dict)
+                        else {}
+                    )
+                    earnings = (
+                        details.get("earnings_proximity", {})
+                        if isinstance(details.get("earnings_proximity"), dict)
+                        else {}
+                    )
                     if self.llm_advisor:
                         self.llm_advisor.record_outcome(
                             str(closed_position.get("position_id", "")),
@@ -3330,7 +3636,10 @@ class TradingBot:
                         found_execution_legs = True
 
                         leg_id = cls._parse_leg_id(execution.get("legId"))
-                        meta = leg_meta.get(leg_id, default_meta)
+                        if leg_id is not None:
+                            meta = leg_meta.get(leg_id, default_meta)
+                        else:
+                            meta = default_meta
 
                         quantity = safe_float(execution.get("quantity"), 0.0)
                         price = safe_float(execution.get("price"), 0.0)
@@ -3512,7 +3821,9 @@ class TradingBot:
                 message=f"{side} order {order_id} canceled after stale timeout",
             )
         except Exception as exc:
-            logger.warning("Failed to cancel stale %s order %s: %s", side, order_id, exc)
+            logger.warning(
+                "Failed to cancel stale %s order %s: %s", side, order_id, exc
+            )
             self._alert(
                 level="ERROR",
                 title="Failed stale-order cancel",
@@ -3523,13 +3834,20 @@ class TradingBot:
         """Return True when a working entry moved beyond configured market-move threshold."""
         if self.is_paper or not self.live_ledger:
             return False
-        threshold_pct = max(0.0, float(getattr(self.config.execution, "market_move_cancel_pct", 1.0) or 1.0))
+        threshold_pct = max(
+            0.0,
+            float(getattr(self.config.execution, "market_move_cancel_pct", 1.0) or 1.0),
+        )
         if threshold_pct <= 0:
             return False
         position = self.live_ledger.get_position_by_order_id(order_id, side="entry")
         if not position:
             return False
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
         ref_price = safe_float(details.get("entry_underlying_price"), 0.0)
         if ref_price <= 0:
             return False
@@ -3563,11 +3881,17 @@ class TradingBot:
         )
         self._try_execute_entry(signal)
 
-    def _signal_from_pending_entry_position(self, position: dict) -> Optional[TradeSignal]:
+    def _signal_from_pending_entry_position(
+        self, position: dict
+    ) -> Optional[TradeSignal]:
         """Reconstruct a TradeSignal from a pending/working ledger position."""
         if not isinstance(position, dict):
             return None
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
         strategy = str(position.get("strategy", "")).strip()
         symbol = str(position.get("symbol", "")).strip()
         if not strategy or not symbol:
@@ -3579,13 +3903,23 @@ class TradingBot:
             dte=safe_int(details.get("dte"), 0),
             short_strike=safe_float(details.get("short_strike"), 0.0),
             long_strike=safe_float(details.get("long_strike"), 0.0),
-            call_short_strike=safe_float(details.get("call_short_strike"), None),
-            call_long_strike=safe_float(details.get("call_long_strike"), None),
-            put_short_strike=safe_float(details.get("put_short_strike"), None),
-            put_long_strike=safe_float(details.get("put_long_strike"), None),
+            call_short_strike=float(x)
+            if (x := details.get("call_short_strike")) is not None
+            else None,
+            call_long_strike=float(x)
+            if (x := details.get("call_long_strike")) is not None
+            else None,
+            put_short_strike=float(x)
+            if (x := details.get("put_short_strike")) is not None
+            else None,
+            put_long_strike=float(x)
+            if (x := details.get("put_long_strike")) is not None
+            else None,
             credit=safe_float(position.get("entry_credit"), 0.0),
             max_loss=safe_float(position.get("max_loss"), 0.0),
-            probability_of_profit=safe_float(details.get("probability_of_profit"), 0.55),
+            probability_of_profit=safe_float(
+                details.get("probability_of_profit"), 0.55
+            ),
             score=safe_float(details.get("score"), 50.0),
             net_delta=safe_float(details.get("net_delta"), 0.0),
             net_theta=safe_float(details.get("net_theta"), 0.0),
@@ -3599,13 +3933,17 @@ class TradingBot:
             analysis=analysis,
             quantity=max(1, safe_int(position.get("quantity"), 1)),
             metadata={
-                "regime": details.get("regime", self.circuit_state.get("regime", "normal")),
+                "regime": details.get(
+                    "regime", self.circuit_state.get("regime", "normal")
+                ),
                 "iv_rank": details.get("iv_rank"),
             },
         )
 
     @classmethod
-    def _extract_filled_contracts(cls, order: dict, fill_summary: Optional[dict]) -> float:
+    def _extract_filled_contracts(
+        cls, order: dict, fill_summary: Optional[dict]
+    ) -> float:
         """Extract total filled contracts from order payload."""
         raw_filled = safe_float(order.get("filledQuantity"), 0.0)
         if raw_filled > 0:
@@ -3655,10 +3993,13 @@ class TradingBot:
                     self._service_degradation["scanner_down"] = False
                     logger.info(
                         "Scanner found %d top tickers: %s",
-                        len(targets), ", ".join(targets[:10]),
+                        len(targets),
+                        ", ".join(targets[:10]),
                     )
                     return targets
-                logger.warning("Scanner returned no results. Falling back to watchlist.")
+                logger.warning(
+                    "Scanner returned no results. Falling back to watchlist."
+                )
                 self._service_degradation["scanner_down"] = True
             except Exception as e:
                 logger.error("Scanner failed: %s. Falling back to watchlist.", e)
@@ -3685,10 +4026,16 @@ class TradingBot:
         skip_sectors = self._active_skip_sectors()
         if not skip_sectors:
             return False
-        sector = str(self.risk_manager.sector_map.get(str(symbol).upper(), "")).strip().lower()
+        sector = (
+            str(self.risk_manager.sector_map.get(str(symbol).upper(), ""))
+            .strip()
+            .lower()
+        )
         return bool(sector and sector in skip_sectors)
 
-    def _subscribe_option_stream_for_symbol(self, symbol: str, chain_data: dict, underlying_price: float) -> None:
+    def _subscribe_option_stream_for_symbol(
+        self, symbol: str, chain_data: dict, underlying_price: float
+    ) -> None:
         """Subscribe level-1 option stream for near-ATM contracts of top scan symbols."""
         if underlying_price <= 0:
             return
@@ -3766,19 +4113,22 @@ class TradingBot:
         targets = self._get_scan_targets()
         ranked_candidates: list[TradeSignal] = []
         cycle_strategy_scores: dict[str, float] = {
-            str(strategy.name): 0.0
-            for strategy in self.strategies
+            str(strategy.name): 0.0 for strategy in self.strategies
         }
 
         total_targets = len(targets)
         for idx, symbol in enumerate(targets, start=1):
-            self._ui_update_system_status(scanning_status=f"🔄 Scanning {symbol} ({idx}/{total_targets})")
-            
+            self._ui_update_system_status(
+                scanning_status=f"🔄 Scanning {symbol} ({idx}/{total_targets})"
+            )
+
             if self._is_symbol_paused(symbol):
                 logger.info("Skipping %s due to symbol circuit breaker pause.", symbol)
                 continue
             if self._is_symbol_sector_skipped(symbol):
-                logger.info("Skipping %s due to strategist sector skip directive.", symbol)
+                logger.info(
+                    "Skipping %s due to strategist sector skip directive.", symbol
+                )
                 continue
 
             logger.info("Scanning %s...", symbol)
@@ -3788,7 +4138,9 @@ class TradingBot:
                 if not chain_data or underlying_price <= 0:
                     logger.warning("No chain data for %s, skipping.", symbol)
                     continue
-                self._subscribe_option_stream_for_symbol(symbol, chain_data, underlying_price)
+                self._subscribe_option_stream_for_symbol(
+                    symbol, chain_data, underlying_price
+                )
 
                 # Run each strategy
                 all_signals = []
@@ -3796,14 +4148,25 @@ class TradingBot:
                 try:
                     technical_context = self.technicals.get_context(symbol, self.schwab)
                 except Exception as exc:
-                    logger.debug("Technical context unavailable for %s: %s", symbol, exc)
+                    logger.debug(
+                        "Technical context unavailable for %s: %s", symbol, exc
+                    )
                 market_context = self._build_market_context(symbol, chain_data)
                 regime_weights = market_context.get("regime_weights", {}) or {}
-                position_size_scalar = float(market_context.get("position_size_scalar", 1.0) or 1.0)
-                position_size_scalar *= max(0.5, min(1.5, float(self._cycle_size_scalar or 1.0)))
+                position_size_scalar = float(
+                    market_context.get("position_size_scalar", 1.0) or 1.0
+                )
+                position_size_scalar *= max(
+                    0.5, min(1.5, float(self._cycle_size_scalar or 1.0))
+                )
                 position_size_scalar *= max(
                     0.1,
-                    min(1.5, safe_float(self.circuit_state.get("correlation_size_scalar"), 1.0)),
+                    min(
+                        1.5,
+                        safe_float(
+                            self.circuit_state.get("correlation_size_scalar"), 1.0
+                        ),
+                    ),
                 )
                 for strategy in self.strategies:
                     if self._is_strategy_paused(strategy.name):
@@ -3848,7 +4211,8 @@ class TradingBot:
                         (
                             safe_float(item.analysis.score, 0.0)
                             for item in signals
-                            if isinstance(item, TradeSignal) and item.analysis is not None
+                            if isinstance(item, TradeSignal)
+                            and item.analysis is not None
                         ),
                         default=0.0,
                     )
@@ -3861,17 +4225,37 @@ class TradingBot:
                         for signal in signals:
                             signal.metadata["technical_context"] = tech_payload
                     for signal in signals:
-                        correlation_id = str(signal.metadata.get("correlation_id", "")).strip() or uuid.uuid4().hex[:12]
+                        correlation_id = (
+                            str(signal.metadata.get("correlation_id", "")).strip()
+                            or uuid.uuid4().hex[:12]
+                        )
                         signal.metadata["correlation_id"] = correlation_id
-                        signal.metadata.setdefault("iv_rank", market_context.get("iv_rank"))
-                        signal.metadata.setdefault("regime", market_context.get("regime"))
-                        signal.metadata.setdefault("vol_surface", market_context.get("vol_surface", {}))
-                        signal.metadata.setdefault("options_flow", market_context.get("options_flow", {}))
-                        signal.metadata.setdefault("alt_data", market_context.get("alt_data", {}))
+                        signal.metadata.setdefault(
+                            "iv_rank", market_context.get("iv_rank")
+                        )
+                        signal.metadata.setdefault(
+                            "regime", market_context.get("regime")
+                        )
+                        signal.metadata.setdefault(
+                            "vol_surface", market_context.get("vol_surface", {})
+                        )
+                        signal.metadata.setdefault(
+                            "options_flow", market_context.get("options_flow", {})
+                        )
+                        signal.metadata.setdefault(
+                            "alt_data", market_context.get("alt_data", {})
+                        )
                         signal.metadata.setdefault("gex", market_context.get("gex", {}))
-                        signal.metadata.setdefault("dark_pool_proxy", market_context.get("dark_pool_proxy", {}))
-                        signal.metadata.setdefault("social_sentiment", market_context.get("social_sentiment", {}))
-                        signal.metadata.setdefault("economic_events", market_context.get("economic_events", {}))
+                        signal.metadata.setdefault(
+                            "dark_pool_proxy", market_context.get("dark_pool_proxy", {})
+                        )
+                        signal.metadata.setdefault(
+                            "social_sentiment",
+                            market_context.get("social_sentiment", {}),
+                        )
+                        signal.metadata.setdefault(
+                            "economic_events", market_context.get("economic_events", {})
+                        )
                         signal.metadata.setdefault("apply_timing_blocks", True)
                         if signal.analysis is not None:
                             original = float(signal.analysis.score or 0.0)
@@ -3893,7 +4277,9 @@ class TradingBot:
                             details={
                                 "symbol": signal.symbol,
                                 "strategy": signal.strategy,
-                                "score": float(signal.analysis.score if signal.analysis else 0.0),
+                                "score": float(
+                                    signal.analysis.score if signal.analysis else 0.0
+                                ),
                                 "regime": signal.metadata.get("regime"),
                                 "vol_surface": signal.metadata.get("vol_surface", {}),
                                 "options_flow": signal.metadata.get("options_flow", {}),
@@ -3901,14 +4287,21 @@ class TradingBot:
                         )
                         signal.size_multiplier = max(
                             0.1,
-                            float(signal.size_multiplier or 1.0) * max(0.5, min(1.5, position_size_scalar)),
+                            float(signal.size_multiplier or 1.0)
+                            * max(0.5, min(1.5, position_size_scalar)),
                         )
                         sandbox_scalar = self._sandbox_size_scalar_for_signal(signal)
                         if sandbox_scalar < 1.0:
                             signal.metadata["sandbox_strategy"] = True
-                            signal.metadata["sandbox_sizing_scalar"] = round(sandbox_scalar, 4)
-                            signal.size_multiplier = max(0.1, float(signal.size_multiplier) * sandbox_scalar)
-                    all_signals.extend(self._filter_signals_by_context(signals, market_context))
+                            signal.metadata["sandbox_sizing_scalar"] = round(
+                                sandbox_scalar, 4
+                            )
+                            signal.size_multiplier = max(
+                                0.1, float(signal.size_multiplier) * sandbox_scalar
+                            )
+                    all_signals.extend(
+                        self._filter_signals_by_context(signals, market_context)
+                    )
 
                 if not all_signals:
                     logger.info("No opportunities found on %s.", symbol)
@@ -3919,7 +4312,11 @@ class TradingBot:
                         policy = self.news_scanner.trade_direction_policy(symbol)
                     except Exception as exc:
                         logger.debug("News policy unavailable for %s: %s", symbol, exc)
-                        policy = {"block_all": False, "allow_bull_put": True, "allow_bear_call": True}
+                        policy = {
+                            "block_all": False,
+                            "allow_bull_put": True,
+                            "allow_bear_call": True,
+                        }
 
                     if policy.get("block_all"):
                         logger.info(
@@ -3931,9 +4328,13 @@ class TradingBot:
 
                     filtered = []
                     for signal in all_signals:
-                        if signal.strategy == "bull_put_spread" and not policy.get("allow_bull_put", True):
+                        if signal.strategy == "bull_put_spread" and not policy.get(
+                            "allow_bull_put", True
+                        ):
                             continue
-                        if signal.strategy == "bear_call_spread" and not policy.get("allow_bear_call", True):
+                        if signal.strategy == "bear_call_spread" and not policy.get(
+                            "allow_bear_call", True
+                        ):
                             continue
                         filtered.append(signal)
                     all_signals = filtered
@@ -3958,19 +4359,22 @@ class TradingBot:
 
         if bool(self.config.signal_ranking.enabled):
             ranked_candidates.sort(
-                key=lambda s: safe_float((s.metadata or {}).get("composite_score"), -1.0),
+                key=lambda s: safe_float(
+                    (s.metadata or {}).get("composite_score"), -1.0
+                ),
                 reverse=True,
             )
         else:
             ranked_candidates.sort(
-                key=lambda s: (s.analysis.score if s.analysis else 0.0),
+                key=lambda s: s.analysis.score if s.analysis else 0.0,
                 reverse=True,
             )
         self._last_ranked_signals = self._ranked_signals_snapshot(ranked_candidates)
         self._last_cycle_strategy_scores = cycle_strategy_scores
         remaining_slots = max(
             0,
-            int(self.config.risk.max_open_positions) - len(self.risk_manager.portfolio.open_positions),
+            int(self.config.risk.max_open_positions)
+            - len(self.risk_manager.portfolio.open_positions),
         )
         logger.info(
             "Ranked %d signals, executing top %d",
@@ -4000,11 +4404,19 @@ class TradingBot:
             return 0.0
         cfg = self.config.signal_ranking
         regime_weight = safe_float(signal.metadata.get("regime_score_weight"), 1.0)
-        base_score = safe_float(signal.metadata.get("original_score"), safe_float(analysis.score, 0.0))
+        base_score = safe_float(
+            signal.metadata.get("original_score"), safe_float(analysis.score, 0.0)
+        )
         score_component = base_score * max(0.0, regime_weight)
         pop_component = safe_float(analysis.probability_of_profit, 0.0) * 100.0
-        credit_component = safe_float(getattr(analysis, "credit_pct_of_width", 0.0), 0.0) * 100.0
-        vol_surface = signal.metadata.get("vol_surface", {}) if isinstance(signal.metadata, dict) else {}
+        credit_component = (
+            safe_float(getattr(analysis, "credit_pct_of_width", 0.0), 0.0) * 100.0
+        )
+        vol_surface = (
+            signal.metadata.get("vol_surface", {})
+            if isinstance(signal.metadata, dict)
+            else {}
+        )
         realized_implied_spread = safe_float(
             (vol_surface or {}).get("realized_implied_spread", 0.0),
             0.0,
@@ -4032,9 +4444,21 @@ class TradingBot:
         """Build ML scoring feature vector from an entry signal + scan context."""
         analysis = signal.analysis
         details = signal.metadata if isinstance(signal.metadata, dict) else {}
-        vol_surface = details.get("vol_surface", {}) if isinstance(details.get("vol_surface"), dict) else {}
-        flow = details.get("options_flow", {}) if isinstance(details.get("options_flow"), dict) else {}
-        technical = details.get("technical_context", {}) if isinstance(details.get("technical_context"), dict) else {}
+        vol_surface = (
+            details.get("vol_surface", {})
+            if isinstance(details.get("vol_surface"), dict)
+            else {}
+        )
+        flow = (
+            details.get("options_flow", {})
+            if isinstance(details.get("options_flow"), dict)
+            else {}
+        )
+        technical = (
+            details.get("technical_context", {})
+            if isinstance(details.get("technical_context"), dict)
+            else {}
+        )
         timestamp = self._now_eastern().isoformat()
         day_of_week = self._now_eastern().strftime("%A").lower()
         hour = self._now_eastern().hour
@@ -4051,11 +4475,17 @@ class TradingBot:
 
         news_sentiment_score = safe_float(details.get("news_sentiment_score"), 0.0)
         if news_sentiment_score == 0.0 and isinstance(details.get("news"), dict):
-            news_sentiment_score = safe_float(details.get("news", {}).get("symbol_sentiment"), 0.0)
+            news_sentiment_score = safe_float(
+                details.get("news", {}).get("symbol_sentiment"), 0.0
+            )
         sector = str(
             details.get(
                 "sector",
-                (details.get("sector_performance", {}) if isinstance(details.get("sector_performance"), dict) else {}).get("sector", "unknown"),
+                (
+                    details.get("sector_performance", {})
+                    if isinstance(details.get("sector_performance"), dict)
+                    else {}
+                ).get("sector", "unknown"),
             )
         ).lower()
         econ_days = 99.0
@@ -4065,12 +4495,18 @@ class TradingBot:
             if isinstance(upcoming, list) and upcoming:
                 first = upcoming[0]
                 if isinstance(first, dict):
-                    econ_days = safe_float(first.get("days", first.get("days_until", 99.0)), 99.0)
+                    econ_days = safe_float(
+                        first.get("days", first.get("days_until", 99.0)), 99.0
+                    )
         return {
             "strategy_type": str(signal.strategy).lower(),
-            "regime": str(details.get("regime", self.circuit_state.get("regime", "unknown"))).lower(),
+            "regime": str(
+                details.get("regime", self.circuit_state.get("regime", "unknown"))
+            ).lower(),
             "iv_rank": safe_float(details.get("iv_rank"), 0.0),
-            "term_structure_regime": str(vol_surface.get("term_structure_regime", "flat")).lower(),
+            "term_structure_regime": str(
+                vol_surface.get("term_structure_regime", "flat")
+            ).lower(),
             "flow_bias": str(flow.get("directional_bias", "neutral")).lower(),
             "spread_score": safe_float(
                 details.get("original_score", analysis.score if analysis else 0.0),
@@ -4078,18 +4514,27 @@ class TradingBot:
             ),
             "dte": safe_float(analysis.dte if analysis else 0.0, 0.0),
             "delta": safe_float(
-                getattr(analysis, "short_delta", getattr(analysis, "net_delta", 0.0)) if analysis else 0.0,
+                getattr(analysis, "short_delta", getattr(analysis, "net_delta", 0.0))
+                if analysis
+                else 0.0,
                 0.0,
             ),
-            "credit_to_width_ratio": safe_float(getattr(analysis, "credit_pct_of_width", 0.0) if analysis else 0.0, 0.0),
+            "credit_to_width_ratio": safe_float(
+                getattr(analysis, "credit_pct_of_width", 0.0) if analysis else 0.0, 0.0
+            ),
             "day_of_week": day_of_week,
             "time_of_day_bucket": time_bucket,
             "sector": sector,
             "news_sentiment_score": news_sentiment_score,
             "econ_calendar_proximity_days": econ_days,
-            "vix_level": safe_float(details.get("vix", self.circuit_state.get("vix", 20.0)), 20.0),
+            "vix_level": safe_float(
+                details.get("vix", self.circuit_state.get("vix", 20.0)), 20.0
+            ),
             "put_call_ratio": safe_float(
-                details.get("put_call_ratio", flow.get("put_call_ratio", technical.get("put_call_ratio", 1.0))),
+                details.get(
+                    "put_call_ratio",
+                    flow.get("put_call_ratio", technical.get("put_call_ratio", 1.0)),
+                ),
                 1.0,
             ),
             "entry_timestamp": timestamp,
@@ -4099,20 +4544,28 @@ class TradingBot:
         """Build top-ranked signal view for dashboard/debugging."""
         top_n = max(1, int(self.config.signal_ranking.top_ranked_to_log))
         rows: list[dict] = []
-        for signal in signals[:top_n]:
-            analysis = signal.analysis
+        for sig in signals[:top_n]:
+            analysis = sig.analysis
             rows.append(
                 {
-                    "symbol": signal.symbol,
-                    "strategy": signal.strategy,
-                    "composite_score": safe_float((signal.metadata or {}).get("composite_score"), 0.0),
+                    "symbol": sig.symbol,
+                    "strategy": sig.strategy,
+                    "composite_score": safe_float(
+                        (sig.metadata or {}).get("composite_score"), 0.0
+                    ),
                     "score": safe_float(analysis.score if analysis else 0.0, 0.0),
-                    "pop": safe_float(analysis.probability_of_profit if analysis else 0.0, 0.0),
+                    "pop": safe_float(
+                        analysis.probability_of_profit if analysis else 0.0, 0.0
+                    ),
                     "credit_pct_of_width": safe_float(
-                        getattr(analysis, "credit_pct_of_width", 0.0) if analysis else 0.0,
+                        getattr(analysis, "credit_pct_of_width", 0.0)
+                        if analysis
+                        else 0.0,
                         0.0,
                     ),
-                    "ml_score": safe_float((signal.metadata or {}).get("ml_score"), 0.5),
+                    "ml_score": safe_float(
+                        (signal.metadata or {}).get("ml_score"), 0.5
+                    ),
                     "ml_flag": str((signal.metadata or {}).get("ml_flag", "")),
                 }
             )
@@ -4129,9 +4582,21 @@ class TradingBot:
 
         context = market_context or {}
         regime = str(context.get("regime", "")).upper()
-        vol_surface = context.get("vol_surface", {}) if isinstance(context.get("vol_surface"), dict) else {}
-        flow = context.get("options_flow", {}) if isinstance(context.get("options_flow"), dict) else {}
-        vol_flags = vol_surface.get("flags", {}) if isinstance(vol_surface.get("flags"), dict) else {}
+        vol_surface = (
+            context.get("vol_surface", {})
+            if isinstance(context.get("vol_surface"), dict)
+            else {}
+        )
+        flow = (
+            context.get("options_flow", {})
+            if isinstance(context.get("options_flow"), dict)
+            else {}
+        )
+        vol_flags = (
+            vol_surface.get("flags", {})
+            if isinstance(vol_surface.get("flags"), dict)
+            else {}
+        )
         flow_bias = str(flow.get("directional_bias", "neutral")).strip().lower()
 
         premium_selling = {
@@ -4146,9 +4611,9 @@ class TradingBot:
         }
 
         filtered: list[TradeSignal] = []
-        for signal in signals:
-            if signal.action != "open" or signal.analysis is None:
-                filtered.append(signal)
+        for sig in signals:
+            if sig.action != "open" or sig.analysis is None:
+                filtered.append(sig)
                 continue
 
             strategy_name = str(signal.strategy or "").lower()
@@ -4156,8 +4621,16 @@ class TradingBot:
             width = self._signal_width(signal)
             size_multiplier = float(signal.size_multiplier or 1.0)
 
-            if regime in {"CRASH", "CRISIS", CRASH_CRISIS, CRASH_CRIISIS} and strategy_name in premium_selling:
-                only_allowed = strategy_name in {"bull_put_spread", "bear_call_spread", "iron_condor"} and dte <= 14 and width >= 8.0
+            if (
+                regime in {"CRASH", "CRISIS", CRASH_CRISIS, CRASH_CRIISIS}
+                and strategy_name in premium_selling
+            ):
+                only_allowed = (
+                    strategy_name
+                    in {"bull_put_spread", "bear_call_spread", "iron_condor"}
+                    and dte <= 14
+                    and width >= 8.0
+                )
                 if not only_allowed:
                     continue
                 size_multiplier *= 0.60
@@ -4177,26 +4650,41 @@ class TradingBot:
                     size_multiplier *= 0.75
                 if strategy_name == "calendar_spread":
                     size_multiplier *= 1.20
-            elif regime == MEAN_REVERSION and strategy_name in {"bull_put_spread", "bear_call_spread"}:
+            elif regime == MEAN_REVERSION and strategy_name in {
+                "bull_put_spread",
+                "bear_call_spread",
+            }:
                 tech = signal.metadata.get("technical_context", {})
                 zscore = safe_float((tech or {}).get("return_5d_zscore"), 0.0)
                 if abs(zscore) >= 2.0:
-                    signal.analysis.score = min(100.0, float(signal.analysis.score or 0.0) + 8.0)
+                    signal.analysis.score = min(
+                        100.0, float(signal.analysis.score or 0.0) + 8.0
+                    )
 
             if self.vol_surface_analyzer and vol_surface:
                 if (
-                    strategy_name in {"bull_put_spread", "bear_call_spread", "naked_put", "iron_condor"}
+                    strategy_name
+                    in {
+                        "bull_put_spread",
+                        "bear_call_spread",
+                        "naked_put",
+                        "iron_condor",
+                    }
                     and bool(self.config.vol_surface.require_positive_vol_risk_premium)
                     and not bool(vol_flags.get("positive_vol_risk_premium", False))
                 ):
                     continue
 
-                if strategy_name == "calendar_spread" and not bool(vol_flags.get("front_richer_than_back", False)):
+                if strategy_name == "calendar_spread" and not bool(
+                    vol_flags.get("front_richer_than_back", False)
+                ):
                     continue
 
                 if strategy_name == "iron_condor":
                     vol_of_vol = safe_float(vol_surface.get("vol_of_vol"), 0.0)
-                    if vol_of_vol > float(self.config.vol_surface.max_vol_of_vol_for_condors):
+                    if vol_of_vol > float(
+                        self.config.vol_surface.max_vol_of_vol_for_condors
+                    ):
                         continue
 
             if flow_bias == "bearish" and strategy_name == "bull_put_spread":
@@ -4216,14 +4704,24 @@ class TradingBot:
         if analysis is None:
             return 0.0
         if signal.strategy == "iron_condor":
-            put_width = abs(float(analysis.put_short_strike or 0.0) - float(analysis.put_long_strike or 0.0))
-            call_width = abs(float(analysis.call_long_strike or 0.0) - float(analysis.call_short_strike or 0.0))
+            put_width = abs(
+                float(analysis.put_short_strike or 0.0)
+                - float(analysis.put_long_strike or 0.0)
+            )
+            call_width = abs(
+                float(analysis.call_long_strike or 0.0)
+                - float(analysis.call_short_strike or 0.0)
+            )
             return max(put_width, call_width)
-        return abs(float(analysis.long_strike or 0.0) - float(analysis.short_strike or 0.0))
+        return abs(
+            float(analysis.long_strike or 0.0) - float(analysis.short_strike or 0.0)
+        )
 
     def _check_exits(self) -> None:
         """Check all open positions for exit conditions."""
         if self.is_paper:
+            if self.paper_trader is None:
+                return
             self._refresh_paper_position_values()
             positions = self.paper_trader.get_positions()
         else:
@@ -4247,20 +4745,18 @@ class TradingBot:
         }
         for strategy in self.strategies:
             exit_signals = strategy.check_exits(positions, self.schwab)
-            for signal in exit_signals:
-                pid = str(signal.position_id) if signal.position_id else ""
+            for sig in exit_signals:
+                pid = str(sig.position_id) if sig.position_id else ""
                 if pid and pid in covered_ids:
                     continue
                 if pid:
                     covered_ids.add(pid)
-                all_exit_signals.append(signal)
+                all_exit_signals.append(sig)
 
         covered_positions = {
-            str(signal.position_id)
-            for signal in all_exit_signals
-            if signal.position_id
+            str(signal.position_id) for signal in all_exit_signals if signal.position_id
         }
-        adjustment_jobs: list[tuple[dict, object]] = []
+        adjustment_jobs: list[tuple[dict, Any]] = []
         regime = str(self.circuit_state.get("regime", "normal"))
 
         if bool(self.config.rolling.enabled):
@@ -4297,9 +4793,15 @@ class TradingBot:
                 if not position_id or position_id in covered_positions:
                     continue
 
-                details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+                details = (
+                    position.get("details", {})
+                    if isinstance(position.get("details"), dict)
+                    else {}
+                )
                 entry_iv = safe_float(details.get("entry_iv"), 0.0)
-                current_iv = safe_float(position.get("iv_rank", details.get("iv_rank", 0.0)), 0.0)
+                current_iv = safe_float(
+                    position.get("iv_rank", details.get("iv_rank", 0.0)), 0.0
+                )
                 iv_change = 0.0
                 if entry_iv > 0:
                     iv_change = (current_iv - entry_iv) / max(entry_iv, 1e-9)
@@ -4315,16 +4817,19 @@ class TradingBot:
 
         self._persist_runtime_exit_state(positions)
 
-        for signal in all_exit_signals:
-            if signal.action == "roll":
-                self._execute_roll(signal)
-                continue
-            self._execute_exit(signal)
+        for sig in all_exit_signals:
+            if sig.action == "roll":
+                self._execute_roll(sig)
+            else:
+                self._execute_exit(sig)
 
         for position, plan in adjustment_jobs:
-            self._execute_adjustment_plan(position, plan)
+            if hasattr(plan, "action") and "none" not in str(plan.action).lower():
+                self._execute_adjustment_plan(position, plan)
 
-    def _apply_correlated_loss_protection(self, positions: list[dict]) -> list[TradeSignal]:
+    def _apply_correlated_loss_protection(
+        self, positions: list[dict]
+    ) -> list[TradeSignal]:
         """Emergency protection when multiple positions are losing together."""
         now = self._now_eastern()
         existing = self.circuit_state.get("correlated_loss_pause_until")
@@ -4405,7 +4910,11 @@ class TradingBot:
         for position in positions:
             if str(position.get("status", "open")).lower() != "open":
                 continue
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             dte = safe_int(position.get("dte_remaining"), 999)
             underlying = safe_float(position.get("underlying_price"), 0.0)
             short_candidates = []
@@ -4420,7 +4929,9 @@ class TradingBot:
                 position["details"] = details
                 continue
 
-            nearest = min(abs(underlying - strike) / underlying for strike in short_candidates)
+            nearest = min(
+                abs(underlying - strike) / underlying for strike in short_candidates
+            )
             gamma_flag = nearest <= 0.02
             position["gamma_risk_flag"] = gamma_flag
             details["gamma_risk_flag"] = gamma_flag
@@ -4444,11 +4955,18 @@ class TradingBot:
 
     def _apply_correlation_stop_overrides(self, positions: list[dict]) -> None:
         """Widen stop-loss multipliers during correlation-crisis conditions."""
-        widen_scalar = max(1.0, safe_float(self.circuit_state.get("correlation_stop_widen_scalar"), 1.0))
+        widen_scalar = max(
+            1.0,
+            safe_float(self.circuit_state.get("correlation_stop_widen_scalar"), 1.0),
+        )
         for position in positions:
             if str(position.get("status", "open")).lower() != "open":
                 continue
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             if widen_scalar <= 1.0:
                 if details.get("correlation_stop_widened"):
                     details.pop("correlation_stop_widened", None)
@@ -4457,7 +4975,9 @@ class TradingBot:
             base_override = safe_float(details.get("stop_loss_override_multiple"), 0.0)
             if base_override <= 0:
                 base_override = 2.0
-            details["stop_loss_override_multiple"] = round(base_override * widen_scalar, 4)
+            details["stop_loss_override_multiple"] = round(
+                base_override * widen_scalar, 4
+            )
             details["correlation_stop_widened"] = True
             position["details"] = details
 
@@ -4465,8 +4985,16 @@ class TradingBot:
         """Apply generic leg-out partial exits for scaled positions."""
         if not bool(getattr(self.config.scaling, "enabled", False)):
             return []
-        target_pct = max(0.0, float(getattr(self.config.scaling, "partial_exit_pct", 0.40) or 0.40))
-        size_fraction = max(0.0, min(1.0, float(getattr(self.config.scaling, "partial_exit_size", 0.50) or 0.50)))
+        target_pct = max(
+            0.0, float(getattr(self.config.scaling, "partial_exit_pct", 0.40) or 0.40)
+        )
+        size_fraction = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(self.config.scaling, "partial_exit_size", 0.50) or 0.50),
+            ),
+        )
         if target_pct <= 0 or size_fraction <= 0:
             return []
 
@@ -4500,7 +5028,9 @@ class TradingBot:
             )
         return signals
 
-    def _apply_adversarial_llm_reviews(self, positions: list[dict]) -> list[TradeSignal]:
+    def _apply_adversarial_llm_reviews(
+        self, positions: list[dict]
+    ) -> list[TradeSignal]:
         """Run close-vs-hold LLM debates on deeply stressed positions."""
         if not self.llm_advisor:
             return []
@@ -4509,7 +5039,13 @@ class TradingBot:
 
         threshold = max(
             0.0,
-            min(1.0, float(getattr(self.config.llm, "adversarial_loss_threshold_pct", 0.50) or 0.50)),
+            min(
+                1.0,
+                float(
+                    getattr(self.config.llm, "adversarial_loss_threshold_pct", 0.50)
+                    or 0.50
+                ),
+            ),
         )
         signals: list[TradeSignal] = []
         for position in positions:
@@ -4521,7 +5057,9 @@ class TradingBot:
             entry_credit = safe_float(position.get("entry_credit"), 0.0)
             current_value = safe_float(position.get("current_value"), entry_credit)
             quantity = max(1, safe_int(position.get("quantity"), 1))
-            max_loss = max(0.0, safe_float(position.get("max_loss"), 0.0) * quantity * 100.0)
+            max_loss = max(
+                0.0, safe_float(position.get("max_loss"), 0.0) * quantity * 100.0
+            )
             if max_loss <= 0 or entry_credit <= 0:
                 continue
             unrealized_pnl = (entry_credit - current_value) * quantity * 100.0
@@ -4534,12 +5072,16 @@ class TradingBot:
                     position,
                     context={
                         "regime": self.circuit_state.get("regime"),
-                        "correlation_state": self.circuit_state.get("correlation_state", {}),
+                        "correlation_state": self.circuit_state.get(
+                            "correlation_state", {}
+                        ),
                         "portfolio_greeks": self.risk_manager.get_portfolio_greeks(),
                     },
                 )
             except Exception as exc:
-                logger.debug("Adversarial LLM review failed for %s: %s", position_id, exc)
+                logger.debug(
+                    "Adversarial LLM review failed for %s: %s", position_id, exc
+                )
                 continue
             if not isinstance(review, dict) or not review.get("should_exit"):
                 continue
@@ -4576,8 +5118,14 @@ class TradingBot:
             fields = {}
             detail_fields = {}
             if "trailing_stop_high" in position:
-                fields["trailing_stop_high"] = safe_float(position.get("trailing_stop_high"), 0.0)
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+                fields["trailing_stop_high"] = safe_float(
+                    position.get("trailing_stop_high"), 0.0
+                )
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             for key in ("trailing_stop_high", "max_profit_pct_seen"):
                 if key in details:
                     detail_fields[key] = safe_float(details.get(key), 0.0)
@@ -4625,7 +5173,9 @@ class TradingBot:
                 continue
 
             position_meta[position_id] = {
-                "underlying_price": float(chain_data.get("underlying_price", 0.0) or 0.0)
+                "underlying_price": float(
+                    chain_data.get("underlying_price", 0.0) or 0.0
+                )
             }
 
             mark = self._estimate_paper_position_value(position, chain_data)
@@ -4633,7 +5183,9 @@ class TradingBot:
                 position_marks[position_id] = mark
 
         if position_marks or position_meta:
-            self.paper_trader.update_position_values(position_marks, position_meta=position_meta)
+            self.paper_trader.update_position_values(
+                position_marks, position_meta=position_meta
+            )
 
     def _estimate_paper_position_value(
         self, position: dict, chain_data: dict
@@ -4644,7 +5196,9 @@ class TradingBot:
 
         if strategy == "calendar_spread":
             strike = details.get("strike", details.get("short_strike"))
-            front_exp = self._extract_expiration_key(details.get("front_expiration", details.get("expiration", "")))
+            front_exp = self._extract_expiration_key(
+                details.get("front_expiration", details.get("expiration", ""))
+            )
             back_exp = self._extract_expiration_key(details.get("back_expiration", ""))
             if not front_exp or not back_exp or strike is None:
                 return None
@@ -4686,7 +5240,12 @@ class TradingBot:
             put_long = self._find_option_mid(puts, details.get("put_long_strike"))
             call_short = self._find_option_mid(calls, details.get("call_short_strike"))
             call_long = self._find_option_mid(calls, details.get("call_long_strike"))
-            if None in (put_short, put_long, call_short, call_long):
+            if (
+                put_short is None
+                or put_long is None
+                or call_short is None
+                or call_long is None
+            ):
                 return None
             return round(max((put_short - put_long) + (call_short - call_long), 0.0), 2)
 
@@ -4721,7 +5280,9 @@ class TradingBot:
         return exp
 
     @staticmethod
-    def _find_option_mid(options: list[dict], strike: Optional[float]) -> Optional[float]:
+    def _find_option_mid(
+        options: list[dict], strike: Optional[float]
+    ) -> Optional[float]:
         """Locate an option by strike and return its mid price."""
         if strike is None:
             return None
@@ -4739,7 +5300,10 @@ class TradingBot:
 
     def _try_execute_entry(self, signal: TradeSignal) -> bool:
         """Attempt to execute an entry trade after risk approval."""
-        correlation_id = str(signal.metadata.get("correlation_id", "")).strip() or uuid.uuid4().hex[:12]
+        correlation_id = (
+            str(signal.metadata.get("correlation_id", "")).strip()
+            or uuid.uuid4().hex[:12]
+        )
         signal.metadata["correlation_id"] = correlation_id
 
         def _ui_reject(reason_text: str) -> None:
@@ -4767,10 +5331,18 @@ class TradingBot:
             if bool(getattr(self.config.execution_timing, "adaptive", False)):
                 preferred = self._preferred_execution_bucket(signal.strategy)
                 current_bucket = self._execution_time_bucket(self._now_eastern())
-                if preferred.get("active") and preferred.get("preferred_bucket") and current_bucket != preferred.get("preferred_bucket"):
-                    reason = f"adaptive_timing_prefers_{preferred.get('preferred_bucket')}"
+                if (
+                    preferred.get("active")
+                    and preferred.get("preferred_bucket")
+                    and current_bucket != preferred.get("preferred_bucket")
+                ):
+                    reason = (
+                        f"adaptive_timing_prefers_{preferred.get('preferred_bucket')}"
+                    )
                     signal.metadata["timing_bucket"] = current_bucket
-                    signal.metadata["preferred_timing_bucket"] = preferred.get("preferred_bucket")
+                    signal.metadata["preferred_timing_bucket"] = preferred.get(
+                        "preferred_bucket"
+                    )
                     self._queue_entry_signal(signal, reason)
                     logger.info(
                         "Queued entry signal %s on %s due to adaptive timing model: now=%s preferred=%s",
@@ -4800,12 +5372,16 @@ class TradingBot:
         quantity = self.risk_manager.calculate_position_size(signal)
         size_multiplier = max(0.1, float(signal.size_multiplier or 1.0))
         signal.quantity = max(1, int(round(quantity * size_multiplier)))
-        if bool(self._monte_carlo_state.get("high_risk", False)) and not bool(signal.metadata.get("is_hedge", False)):
+        if bool(self._monte_carlo_state.get("high_risk", False)) and not bool(
+            signal.metadata.get("is_hedge", False)
+        ):
             reduced = max(1, int(round(signal.quantity * 0.5)))
             signal.metadata["monte_carlo_size_reduction"] = {
                 "from": signal.quantity,
                 "to": reduced,
-                "var99_pct_account": safe_float(self._monte_carlo_state.get("var99_pct_account"), 0.0),
+                "var99_pct_account": safe_float(
+                    self._monte_carlo_state.get("var99_pct_account"), 0.0
+                ),
             }
             signal.quantity = reduced
         cooldown_scalar = self._strategy_cooldown_scalar(signal.strategy)
@@ -4829,10 +5405,16 @@ class TradingBot:
 
         analysis = signal.analysis
         if analysis is None:
-            logger.warning("Signal %s on %s missing analysis. Skipping.", signal.strategy, signal.symbol)
+            logger.warning(
+                "Signal %s on %s missing analysis. Skipping.",
+                signal.strategy,
+                signal.symbol,
+            )
             _ui_reject("missing analysis")
             return False
-        mtf_ok, mtf_agreement, mtf_votes = self._passes_multi_timeframe_confirmation(signal)
+        mtf_ok, mtf_agreement, mtf_votes = self._passes_multi_timeframe_confirmation(
+            signal
+        )
         signal.metadata["multi_timeframe"] = {
             "agreement": mtf_agreement,
             "votes": mtf_votes,
@@ -4858,7 +5440,10 @@ class TradingBot:
             return False
 
         self._refresh_theta_harvest_state()
-        if self._is_short_premium_strategy(signal.strategy) and self._theta_harvest_is_satisfied():
+        if (
+            self._is_short_premium_strategy(signal.strategy)
+            and self._theta_harvest_is_satisfied()
+        ):
             ratio = self._theta_harvest_ratio()
             reason = (
                 f"Theta harvest satisfied ({ratio:.0%} >= "
@@ -4887,12 +5472,22 @@ class TradingBot:
 
         signal_delta = abs(safe_float(getattr(analysis, "net_delta", 0.0), 0.0))
         signal_vega = abs(safe_float(getattr(analysis, "net_vega", 0.0), 0.0))
-        if (signal_delta + signal_vega) > 0 and bool(getattr(self.config.greeks_budget, "enabled", True)):
-            budget_ok, budget_qty, budget_reason = self.risk_manager.evaluate_greeks_budget(
-                signal,
-                regime=str(signal.metadata.get("regime", self.circuit_state.get("regime", "NORMAL"))),
-                quantity=signal.quantity,
-                allow_resize=bool(getattr(self.config.greeks_budget, "reduce_size_to_fit", True)),
+        if (signal_delta + signal_vega) > 0 and bool(
+            getattr(self.config.greeks_budget, "enabled", True)
+        ):
+            budget_ok, budget_qty, budget_reason = (
+                self.risk_manager.evaluate_greeks_budget(
+                    signal,
+                    regime=str(
+                        signal.metadata.get(
+                            "regime", self.circuit_state.get("regime", "NORMAL")
+                        )
+                    ),
+                    quantity=signal.quantity,
+                    allow_resize=bool(
+                        getattr(self.config.greeks_budget, "reduce_size_to_fit", True)
+                    ),
+                )
             )
             if not budget_ok:
                 self._append_audit_event(
@@ -5003,7 +5598,10 @@ class TradingBot:
             )
             logger.info(
                 "Trade REJECTED by risk manager: %s %s on %s — %s",
-                signal.strategy, signal.action, signal.symbol, reason,
+                signal.strategy,
+                signal.action,
+                signal.symbol,
+                reason,
             )
             _ui_reject(reason)
             return False
@@ -5043,9 +5641,13 @@ class TradingBot:
         logger.info(
             "EXECUTING TRADE: %s on %s | %d contracts | "
             "Credit: $%.2f | Max loss(proxy): $%.2f | POP: %.1f%% | Score: %.1f",
-            signal.strategy, signal.symbol, signal.quantity,
-            analysis.credit, effective_max_loss,
-            analysis.probability_of_profit * 100, analysis.score,
+            signal.strategy,
+            signal.symbol,
+            signal.quantity,
+            analysis.credit,
+            effective_max_loss,
+            analysis.probability_of_profit * 100,
+            analysis.score,
         )
 
         details = self._build_position_details(analysis)
@@ -5057,6 +5659,8 @@ class TradingBot:
         details.setdefault("entry_time", self._now_eastern().isoformat())
 
         if self.is_paper:
+            if self.paper_trader is None:
+                return False
             result = self.paper_trader.execute_open(
                 strategy=signal.strategy,
                 symbol=signal.symbol,
@@ -5187,27 +5791,51 @@ class TradingBot:
 
     def _entry_timing_state(self, now: Optional[datetime] = None) -> dict:
         """Return entry timing policy state for current market session."""
-        now_et = now.astimezone(EASTERN_TZ) if isinstance(now, datetime) and now.tzinfo else (now or self._now_eastern())
+        now_et = (
+            now.astimezone(EASTERN_TZ)
+            if isinstance(now, datetime) and now.tzinfo
+            else (now or self._now_eastern())
+        )
         if isinstance(now_et, datetime) and now_et.tzinfo is None:
             now_et = now_et.replace(tzinfo=EASTERN_TZ)
 
         market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-        first_block_end = market_open + timedelta(minutes=max(0, int(self.config.execution.block_first_minutes)))
-        last_block_start = market_close - timedelta(minutes=max(0, int(self.config.execution.block_last_minutes)))
+        first_block_end = market_open + timedelta(
+            minutes=max(0, int(self.config.execution.block_first_minutes))
+        )
+        last_block_start = market_close - timedelta(
+            minutes=max(0, int(self.config.execution.block_last_minutes))
+        )
         optimal_start = now_et.replace(hour=10, minute=30, second=0, microsecond=0)
         optimal_end = now_et.replace(hour=14, minute=30, second=0, microsecond=0)
 
         if now_et < first_block_end:
-            return {"allowed": False, "optimal": False, "reason": "opening_window_block"}
+            return {
+                "allowed": False,
+                "optimal": False,
+                "reason": "opening_window_block",
+            }
         if now_et >= last_block_start:
-            return {"allowed": False, "optimal": False, "reason": "closing_window_block"}
+            return {
+                "allowed": False,
+                "optimal": False,
+                "reason": "closing_window_block",
+            }
         if not (optimal_start <= now_et <= optimal_end):
-            return {"allowed": True, "optimal": False, "reason": "outside_optimal_window"}
+            return {
+                "allowed": True,
+                "optimal": False,
+                "reason": "outside_optimal_window",
+            }
         return {"allowed": True, "optimal": True, "reason": "optimal_window"}
 
     def _execution_time_bucket(self, now: Optional[datetime] = None) -> str:
-        now_et = now.astimezone(EASTERN_TZ) if isinstance(now, datetime) and now.tzinfo else (now or self._now_eastern())
+        now_et = (
+            now.astimezone(EASTERN_TZ)
+            if isinstance(now, datetime) and now.tzinfo
+            else (now or self._now_eastern())
+        )
         if isinstance(now_et, datetime) and now_et.tzinfo is None:
             now_et = now_et.replace(tzinfo=EASTERN_TZ)
         minutes = now_et.hour * 60 + now_et.minute
@@ -5252,23 +5880,36 @@ class TradingBot:
                 ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
             except ValueError:
                 continue
-            bucket = self._execution_time_bucket(ts if ts.tzinfo else ts.replace(tzinfo=EASTERN_TZ))
+            bucket = self._execution_time_bucket(
+                ts if ts.tzinfo else ts.replace(tzinfo=EASTERN_TZ)
+            )
             adverse = max(0.0, safe_float(row.get("adverse_slippage"), 0.0))
             stats = by_strategy.setdefault(strategy, {})
             bucket_stats = stats.setdefault(bucket, {"count": 0.0, "sum_adverse": 0.0})
             bucket_stats["count"] += 1
             bucket_stats["sum_adverse"] += adverse
 
-        min_fills = max(1, int(getattr(self.config.execution_timing, "min_fills_per_bucket", 20) or 20))
-        analysis: dict[str, dict] = {"generated_at": now_et.isoformat(), "by_strategy": {}}
+        min_fills = max(
+            1,
+            int(
+                getattr(self.config.execution_timing, "min_fills_per_bucket", 20) or 20
+            ),
+        )
+        analysis: dict[str, Any] = {
+            "generated_at": now_et.isoformat(),
+            "by_strategy": {},
+        }
         for strategy, buckets in by_strategy.items():
-            summarized: dict[str, dict] = {}
+            summarized: dict[str, Any] = {}
             candidates: list[tuple[float, str]] = []
-            for bucket, stats in buckets.items():
-                count = int(stats.get("count", 0) or 0)
-                total = safe_float(stats.get("sum_adverse"), 0.0)
+            for bucket, b_stats in buckets.items():
+                count = int(float(str(b_stats.get("count", 0)) or 0))
+                total = safe_float(b_stats.get("sum_adverse"), 0.0)
                 avg = (total / count) if count > 0 else 0.0
-                summarized[bucket] = {"count": count, "avg_adverse_slippage": round(avg, 6)}
+                summarized[bucket] = {
+                    "count": count,
+                    "avg_adverse_slippage": round(avg, 6),
+                }
                 if count >= min_fills:
                     candidates.append((avg, bucket))
             preferred_bucket = min(candidates)[1] if candidates else ""
@@ -5283,8 +5924,14 @@ class TradingBot:
 
     def _preferred_execution_bucket(self, strategy_name: str) -> dict:
         self._refresh_execution_timing_analysis()
-        payload = self._execution_timing_analysis if isinstance(self._execution_timing_analysis, dict) else {}
-        by_strategy = payload.get("by_strategy", {}) if isinstance(payload, dict) else {}
+        payload = (
+            self._execution_timing_analysis
+            if isinstance(self._execution_timing_analysis, dict)
+            else {}
+        )
+        by_strategy = (
+            payload.get("by_strategy", {}) if isinstance(payload, dict) else {}
+        )
         if not isinstance(by_strategy, dict):
             return {"active": False, "preferred_bucket": ""}
         strategy_key = self._strategy_group(str(strategy_name).lower())
@@ -5387,9 +6034,11 @@ class TradingBot:
 
         earnings_proximity = None
         if signal.analysis is not None:
-            in_window, earnings_date = self.risk_manager.earnings_calendar.earnings_within_window(
-                signal.symbol,
-                signal.analysis.expiration,
+            in_window, earnings_date = (
+                self.risk_manager.earnings_calendar.earnings_within_window(
+                    signal.symbol,
+                    signal.analysis.expiration,
+                )
             )
             if in_window:
                 earnings_proximity = {
@@ -5480,7 +6129,8 @@ class TradingBot:
             self._service_degradation["llm_down"] = True
             if (
                 self.config.degradation.rule_only_on_llm_failures
-                and self._llm_timeout_streak >= int(self.config.circuit_breakers.llm_timeout_streak)
+                and self._llm_timeout_streak
+                >= int(self.config.circuit_breakers.llm_timeout_streak)
             ):
                 self._service_degradation["rule_only_mode"] = True
             self._append_audit_event(
@@ -5609,51 +6259,86 @@ class TradingBot:
             if signal.strategy == "bull_put_spread":
                 spread_proxy = max(
                     0.05,
-                    abs(float(analysis.short_strike) - float(analysis.long_strike)) * 0.10,
+                    abs(float(analysis.short_strike) - float(analysis.long_strike))
+                    * 0.10,
                 )
-                order_factory = lambda price, qty=quantity: self.schwab.build_bull_put_spread(
-                    symbol=signal.symbol,
-                    expiration=analysis.expiration,
-                    short_strike=analysis.short_strike,
-                    long_strike=analysis.long_strike,
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_bull_put_spread(
+                                        symbol=signal.symbol,
+                                        expiration=analysis.expiration,
+                                        short_strike=analysis.short_strike,
+                                        long_strike=analysis.long_strike,
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             elif signal.strategy == "bear_call_spread":
                 spread_proxy = max(
                     0.05,
-                    abs(float(analysis.short_strike) - float(analysis.long_strike)) * 0.10,
+                    abs(float(analysis.short_strike) - float(analysis.long_strike))
+                    * 0.10,
                 )
-                order_factory = lambda price, qty=quantity: self.schwab.build_bear_call_spread(
-                    symbol=signal.symbol,
-                    expiration=analysis.expiration,
-                    short_strike=analysis.short_strike,
-                    long_strike=analysis.long_strike,
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_bear_call_spread(
+                                        symbol=signal.symbol,
+                                        expiration=analysis.expiration,
+                                        short_strike=analysis.short_strike,
+                                        long_strike=analysis.long_strike,
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             elif signal.strategy == "iron_condor":
                 spread_proxy = max(
                     0.05,
                     max(
-                        abs(float(analysis.put_short_strike) - float(analysis.put_long_strike)),
-                        abs(float(analysis.call_long_strike) - float(analysis.call_short_strike)),
+                        abs(
+                            float(
+                                analysis.put_short_strike
+                                if analysis.put_short_strike is not None
+                                else 0.0
+                            )
+                            - float(
+                                analysis.put_long_strike
+                                if analysis.put_long_strike is not None
+                                else 0.0
+                            )
+                        ),
+                        abs(
+                            float(
+                                analysis.call_long_strike
+                                if analysis.call_long_strike is not None
+                                else 0.0
+                            )
+                            - float(
+                                analysis.call_short_strike
+                                if analysis.call_short_strike is not None
+                                else 0.0
+                            )
+                        ),
                     )
                     * 0.10,
                 )
-                order_factory = lambda price, qty=quantity: self.schwab.build_iron_condor(
-                    symbol=signal.symbol,
-                    expiration=analysis.expiration,
-                    put_long_strike=analysis.put_long_strike,
-                    put_short_strike=analysis.put_short_strike,
-                    call_short_strike=analysis.call_short_strike,
-                    call_long_strike=analysis.call_long_strike,
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_iron_condor(
+                                        symbol=signal.symbol,
+                                        expiration=analysis.expiration,
+                                        put_long_strike=float(analysis.put_long_strike or 0.0),
+                                        put_short_strike=float(analysis.put_short_strike or 0.0),
+                                        call_short_strike=float(analysis.call_short_strike or 0.0),
+                                        call_long_strike=float(analysis.call_long_strike or 0.0),
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             elif signal.strategy == "covered_call":
                 if signal.analysis is None:
-                    logger.warning("Missing analysis for live covered call on %s.", signal.symbol)
+                    logger.warning(
+                        "Missing analysis for live covered call on %s.", signal.symbol
+                    )
                     return False
 
                 available_shares = self._get_live_equity_shares(signal.symbol)
@@ -5667,15 +6352,20 @@ class TradingBot:
                     )
                     return False
 
-                order_factory = lambda price, qty=quantity: self.schwab.build_covered_call_open(
-                    symbol=signal.symbol,
-                    expiration=analysis.expiration,
-                    short_strike=analysis.short_strike,
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_covered_call_open(
+                                        symbol=signal.symbol,
+                                        expiration=analysis.expiration,
+                                        short_strike=analysis.short_strike,
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             else:
-                logger.warning("Live execution not implemented for: %s", signal.strategy)
+                logger.warning(
+                    "Live execution not implemented for: %s", signal.strategy
+                )
                 return False
 
             result = self._submit_execution_order(
@@ -5705,7 +6395,11 @@ class TradingBot:
                 strategy=signal.strategy,
                 side="entry",
                 midpoint=float(result.get("midpoint_price", analysis.credit)),
-                fill_price=float(result.get("fill_price", result.get("requested_price", analysis.credit))),
+                fill_price=float(
+                    result.get(
+                        "fill_price", result.get("requested_price", analysis.credit)
+                    )
+                ),
                 status=status,
                 dte=safe_int(analysis.dte, 0),
             )
@@ -5715,9 +6409,15 @@ class TradingBot:
             details_payload["entry_midpoint"] = quality_row.get("midpoint")
             details_payload["entry_fill_price"] = quality_row.get("fill_price")
             details_payload["entry_slippage"] = quality_row.get("slippage")
-            details_payload["entry_slippage_vs_mid"] = quality_row.get("slippage_vs_mid")
-            details_payload["entry_adverse_slippage"] = quality_row.get("adverse_slippage")
-            details_payload["entry_fill_improvement_vs_mid"] = quality_row.get("fill_improvement_vs_mid")
+            details_payload["entry_slippage_vs_mid"] = quality_row.get(
+                "slippage_vs_mid"
+            )
+            details_payload["entry_adverse_slippage"] = quality_row.get(
+                "adverse_slippage"
+            )
+            details_payload["entry_fill_improvement_vs_mid"] = quality_row.get(
+                "fill_improvement_vs_mid"
+            )
             self._append_audit_event(
                 event_type="order_filled",
                 correlation_id=str(signal.metadata.get("correlation_id", "")) or None,
@@ -5759,7 +6459,9 @@ class TradingBot:
                         strategy=signal.strategy,
                         symbol=signal.symbol,
                         quantity=tracked_quantity,
-                        max_loss=max_loss_per_contract if max_loss_per_contract is not None else analysis.max_loss,
+                        max_loss=max_loss_per_contract
+                        if max_loss_per_contract is not None
+                        else analysis.max_loss,
                         entry_credit=analysis.credit,
                         details=details_payload,
                         entry_order_id=entry_order_id,
@@ -5775,7 +6477,9 @@ class TradingBot:
                         strategy=signal.strategy,
                         symbol=signal.symbol,
                         quantity=quantity,
-                        max_loss=max_loss_per_contract if max_loss_per_contract is not None else analysis.max_loss,
+                        max_loss=max_loss_per_contract
+                        if max_loss_per_contract is not None
+                        else analysis.max_loss,
                         entry_credit=analysis.credit,
                         details=details_payload,
                         entry_order_id="",
@@ -5798,15 +6502,22 @@ class TradingBot:
 
     def _execute_exit(self, signal: TradeSignal) -> None:
         """Execute an exit trade."""
-        correlation_id = str(signal.metadata.get("correlation_id", "")).strip() or str(signal.position_id or "")
+        correlation_id = str(signal.metadata.get("correlation_id", "")).strip() or str(
+            signal.position_id or ""
+        )
         logger.info(
             "CLOSING POSITION: %s | Reason: %s",
-            signal.position_id, signal.reason,
+            signal.position_id,
+            signal.reason,
         )
 
         if self.is_paper:
+            if self.paper_trader is None:
+                logger.warning("Paper trader not initialized during exit.")
+                return
+
             result = self.paper_trader.execute_close(
-                position_id=signal.position_id,
+                position_id=str(signal.position_id),
                 reason=signal.reason,
                 quantity=signal.quantity,
             )
@@ -5845,7 +6556,13 @@ class TradingBot:
                         "symbol": signal.symbol,
                         "regime": self.circuit_state.get("regime"),
                         "earnings_in_window": bool(
-                            (signal.metadata.get("earnings_proximity", {}) if isinstance(signal.metadata.get("earnings_proximity"), dict) else {}).get("in_window")
+                            (
+                                signal.metadata.get("earnings_proximity", {})
+                                if isinstance(
+                                    signal.metadata.get("earnings_proximity"), dict
+                                )
+                                else {}
+                            ).get("in_window")
                         ),
                     },
                 )
@@ -5911,10 +6628,16 @@ class TradingBot:
             None,
         )
         if not source_position:
-            logger.warning("Roll skipped: source position %s not found", signal.position_id)
+            logger.warning(
+                "Roll skipped: source position %s not found", signal.position_id
+            )
             return
 
-        details = source_position.get("details", {}) if isinstance(source_position.get("details"), dict) else {}
+        details = (
+            source_position.get("details", {})
+            if isinstance(source_position.get("details"), dict)
+            else {}
+        )
         roll_count = int(details.get("roll_count", 0) or 0)
         if roll_count >= int(self.config.rolling.max_rolls_per_position):
             logger.info("Roll skipped: max rolls reached for %s", signal.position_id)
@@ -5922,9 +6645,13 @@ class TradingBot:
 
         regime = str(self.circuit_state.get("regime", "normal"))
         decision = self.roll_manager.evaluate(source_position, regime=regime)
-        min_credit_required = float(signal.metadata.get("min_credit_required", 0.0) or 0.0)
+        min_credit_required = float(
+            signal.metadata.get("min_credit_required", 0.0) or 0.0
+        )
         if decision.should_roll:
-            min_credit_required = max(min_credit_required, float(decision.min_credit_required))
+            min_credit_required = max(
+                min_credit_required, float(decision.min_credit_required)
+            )
         elif not signal.metadata.get("force_roll"):
             logger.info("Roll skipped for %s: %s", signal.position_id, decision.reason)
             return
@@ -5956,33 +6683,54 @@ class TradingBot:
         rolled = False
         new_position_id: Optional[str] = None
         if self.is_paper:
+            if self.paper_trader is None:
+                logger.warning(
+                    "Paper trader not initialized during roll close in paper mode."
+                )
+                return
             close_result = self.paper_trader.execute_close(
                 position_id=str(signal.position_id),
                 reason=f"Roll close: {signal.reason}",
                 quantity=signal.quantity,
             )
             if str(close_result.get("status", "")).upper() != "FILLED":
-                logger.warning("Roll close failed for %s in paper mode.", signal.position_id)
+                logger.warning(
+                    "Roll close failed for %s in paper mode.", signal.position_id
+                )
                 return
             rolled = self._try_execute_entry(replacement)
             if rolled:
-                new_position_id = str(replacement.metadata.get("paper_position_id", "")).strip() or None
+                new_position_id = (
+                    str(replacement.metadata.get("paper_position_id", "")).strip()
+                    or None
+                )
         else:
-            if not self.live_ledger or not self.live_ledger.get_position(str(signal.position_id)):
+            if not self.live_ledger or not self.live_ledger.get_position(
+                str(signal.position_id)
+            ):
                 # Compatibility path for tests/mocks where live ledger is absent.
                 self._execute_exit(close_signal)
                 rolled = self._try_execute_entry(replacement)
             else:
                 submitted = self._execute_live_exit(close_signal)
                 if not submitted:
-                    logger.warning("Roll close order was not submitted for %s.", signal.position_id)
+                    logger.warning(
+                        "Roll close order was not submitted for %s.", signal.position_id
+                    )
                     return
-                if not self._wait_for_live_position_close(str(signal.position_id), timeout_seconds=330):
-                    logger.warning("Roll close did not fill in time for %s.", signal.position_id)
+                if not self._wait_for_live_position_close(
+                    str(signal.position_id), timeout_seconds=330
+                ):
+                    logger.warning(
+                        "Roll close did not fill in time for %s.", signal.position_id
+                    )
                     return
                 rolled = self._try_execute_entry(replacement)
                 if rolled:
-                    new_position_id = str(replacement.metadata.get("live_position_id", "")).strip() or None
+                    new_position_id = (
+                        str(replacement.metadata.get("live_position_id", "")).strip()
+                        or None
+                    )
 
         if not rolled:
             logger.warning("Roll replacement entry failed for %s.", signal.position_id)
@@ -6026,8 +6774,14 @@ class TradingBot:
         market_context = self._build_market_context(symbol, chain_data)
         market_context["roll_context"] = True
         current_dte = int(source_position.get("dte_remaining", 0) or 0)
-        source_details = source_position.get("details", {}) if isinstance(source_position.get("details"), dict) else {}
-        source_delta = safe_float(source_details.get("net_delta", source_position.get("net_delta", 0.0)), 0.0)
+        source_details = (
+            source_position.get("details", {})
+            if isinstance(source_position.get("details"), dict)
+            else {}
+        )
+        source_delta = safe_float(
+            source_details.get("net_delta", source_position.get("net_delta", 0.0)), 0.0
+        )
         candidates: list[TradeSignal] = []
 
         for strategy in self.strategies:
@@ -6045,11 +6799,15 @@ class TradingBot:
                     continue
                 if float(candidate.analysis.credit or 0.0) < min_credit_required:
                     continue
-                candidate_delta = safe_float(getattr(candidate.analysis, "net_delta", 0.0), 0.0)
+                candidate_delta = safe_float(
+                    getattr(candidate.analysis, "net_delta", 0.0), 0.0
+                )
                 if abs(candidate_delta - source_delta) > 0.25:
                     continue
                 self.roll_manager.annotate_roll_metadata(source_position, candidate)
-                candidate.metadata.setdefault("rolled_from_position_id", source_position.get("position_id"))
+                candidate.metadata.setdefault(
+                    "rolled_from_position_id", source_position.get("position_id")
+                )
                 candidate.metadata.setdefault(
                     "roll_count",
                     int(source_details.get("roll_count", 0) or 0) + 1,
@@ -6059,13 +6817,15 @@ class TradingBot:
 
         candidates.sort(
             key=lambda item: (
-                int(item.analysis.dte or 9999),
-                -(float(item.analysis.score or 0.0)),
+                int(item.analysis.dte if item.analysis else 9999),
+                -(float(item.analysis.score if item.analysis else 0.0)),
             ),
         )
         return candidates[0] if candidates else None
 
-    def _wait_for_live_position_close(self, position_id: str, *, timeout_seconds: int = 300) -> bool:
+    def _wait_for_live_position_close(
+        self, position_id: str, *, timeout_seconds: int = 300
+    ) -> bool:
         """Wait for a live position to reach a terminal post-exit status."""
         deadline = time.time() + max(5, int(timeout_seconds))
         while time.time() < deadline:
@@ -6093,11 +6853,16 @@ class TradingBot:
         """Persist roll linkage metadata for paper/live ledgers and analytics."""
         if self.is_paper and self.paper_trader:
             for trade in reversed(self.paper_trader.closed_trades):
+                if not isinstance(trade, dict):
+                    continue
                 if str(trade.get("position_id", "")) != source_position_id:
                     continue
                 trade["status"] = "rolled"
                 trade["rolled_to_position_id"] = target_position_id
-                details = trade.get("details") if isinstance(trade.get("details"), dict) else {}
+                details_raw = trade.get("details")
+                details: dict[str, Any] = (
+                    dict(details_raw) if isinstance(details_raw, dict) else {}
+                )
                 details["roll_status"] = "rolled"
                 if target_position_id:
                     details["rolled_to"] = target_position_id
@@ -6148,7 +6913,9 @@ class TradingBot:
                     metadata={"force_roll": True, "roll_type": "defensive"},
                 )
             )
-            self._bump_adjustment_state(position_id=position_id, additional_cost=0.0, action=action)
+            self._bump_adjustment_state(
+                position_id=position_id, additional_cost=0.0, action=action
+            )
             return
 
         chain_data, _ = self._get_chain_data(str(position.get("symbol", "")))
@@ -6156,10 +6923,14 @@ class TradingBot:
             return
 
         if action == "add_wing":
-            wing = self._select_adjustment_wing(position=position, chain_data=chain_data)
+            wing = self._select_adjustment_wing(
+                position=position, chain_data=chain_data
+            )
             if wing is None:
                 return
-            if not self._review_adjustment_with_llm(position, "add_wing", wing["cost"], note=wing["reason"]):
+            if not self._review_adjustment_with_llm(
+                position, "add_wing", wing["cost"], note=wing["reason"]
+            ):
                 return
             executed = self._execute_adjustment_long_option(
                 symbol=str(position.get("symbol", "")),
@@ -6180,10 +6951,14 @@ class TradingBot:
             return
 
         if action == "add_hedge":
-            hedge = self._select_adjustment_hedge(position=position, chain_data=chain_data)
+            hedge = self._select_adjustment_hedge(
+                position=position, chain_data=chain_data
+            )
             if hedge is None:
                 return
-            if not self._review_adjustment_with_llm(position, "add_hedge", hedge["cost"], note=hedge["reason"]):
+            if not self._review_adjustment_with_llm(
+                position, "add_hedge", hedge["cost"], note=hedge["reason"]
+            ):
                 return
             executed = self._execute_adjustment_debit_spread(
                 symbol=str(position.get("symbol", "")),
@@ -6203,18 +6978,28 @@ class TradingBot:
                     extra_details={"last_hedge": hedge["contract_type"]},
                 )
 
-    def _review_adjustment_with_llm(self, position: dict, action: str, cost: float, *, note: str = "") -> bool:
+    def _review_adjustment_with_llm(
+        self, position: dict, action: str, cost: float, *, note: str = ""
+    ) -> bool:
         """Run LLM trade advisor over adjustment proposals before execution."""
         if not self.llm_advisor:
             return True
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
         analysis = SpreadAnalysis(
             symbol=str(position.get("symbol", "")),
             strategy=f"adjustment_{action}",
             expiration=str(details.get("expiration", position.get("expiration", ""))),
             dte=safe_int(position.get("dte_remaining"), 0),
-            short_strike=safe_float(details.get("short_strike", details.get("put_short_strike", 0.0)), 0.0),
-            long_strike=safe_float(details.get("long_strike", details.get("put_long_strike", 0.0)), 0.0),
+            short_strike=safe_float(
+                details.get("short_strike", details.get("put_short_strike", 0.0)), 0.0
+            ),
+            long_strike=safe_float(
+                details.get("long_strike", details.get("put_long_strike", 0.0)), 0.0
+            ),
             credit=max(0.01, float(cost)),
             max_loss=max(0.01, float(cost)),
             probability_of_profit=0.5,
@@ -6230,22 +7015,40 @@ class TradingBot:
         )
         return self._review_entry_with_llm(signal)
 
-    def _select_adjustment_wing(self, *, position: dict, chain_data: dict) -> Optional[dict]:
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
-        expiration = self._extract_expiration_key(details.get("expiration", position.get("expiration", "")))
+    def _select_adjustment_wing(
+        self, *, position: dict, chain_data: dict
+    ) -> Optional[dict]:
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
+        expiration = self._extract_expiration_key(
+            details.get("expiration", position.get("expiration", ""))
+        )
         if not expiration:
             return None
 
         puts = chain_data.get("puts", {}).get(expiration, [])
         calls = chain_data.get("calls", {}).get(expiration, [])
         underlying = safe_float(position.get("underlying_price"), 0.0)
-        put_short = safe_float(details.get("put_short_strike", details.get("short_strike", 0.0)), 0.0)
+        put_short = safe_float(
+            details.get("put_short_strike", details.get("short_strike", 0.0)), 0.0
+        )
         call_short = safe_float(details.get("call_short_strike", 0.0), 0.0)
-        is_put_test = put_short > 0 and (underlying <= (put_short * 1.01) or call_short <= 0)
+        is_put_test = put_short > 0 and (
+            underlying <= (put_short * 1.01) or call_short <= 0
+        )
 
         if is_put_test and puts:
-            current_long = safe_float(details.get("put_long_strike", details.get("long_strike", 0.0)), 0.0)
-            width = abs(put_short - current_long) if put_short > 0 and current_long > 0 else 5.0
+            current_long = safe_float(
+                details.get("put_long_strike", details.get("long_strike", 0.0)), 0.0
+            )
+            width = (
+                abs(put_short - current_long)
+                if put_short > 0 and current_long > 0
+                else 5.0
+            )
             target_strike = max(0.01, current_long - max(1.0, width))
             option = self._closest_strike_option(puts, target_strike)
             if not option:
@@ -6259,8 +7062,14 @@ class TradingBot:
             }
 
         if calls:
-            current_long = safe_float(details.get("call_long_strike", details.get("long_strike", 0.0)), 0.0)
-            width = abs(current_long - call_short) if call_short > 0 and current_long > 0 else 5.0
+            current_long = safe_float(
+                details.get("call_long_strike", details.get("long_strike", 0.0)), 0.0
+            )
+            width = (
+                abs(current_long - call_short)
+                if call_short > 0 and current_long > 0
+                else 5.0
+            )
             target_strike = max(0.01, current_long + max(1.0, width))
             option = self._closest_strike_option(calls, target_strike)
             if not option:
@@ -6274,26 +7083,42 @@ class TradingBot:
             }
         return None
 
-    def _select_adjustment_hedge(self, *, position: dict, chain_data: dict) -> Optional[dict]:
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
-        expiration = self._extract_expiration_key(details.get("expiration", position.get("expiration", "")))
+    def _select_adjustment_hedge(
+        self, *, position: dict, chain_data: dict
+    ) -> Optional[dict]:
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
+        expiration = self._extract_expiration_key(
+            details.get("expiration", position.get("expiration", ""))
+        )
         if not expiration:
             return None
         puts = chain_data.get("puts", {}).get(expiration, [])
         calls = chain_data.get("calls", {}).get(expiration, [])
         underlying = safe_float(position.get("underlying_price"), 0.0)
-        put_short = safe_float(details.get("put_short_strike", details.get("short_strike", 0.0)), 0.0)
+        put_short = safe_float(
+            details.get("put_short_strike", details.get("short_strike", 0.0)), 0.0
+        )
         call_short = safe_float(details.get("call_short_strike", 0.0), 0.0)
-        is_put_test = put_short > 0 and (underlying <= (put_short * 1.01) or call_short <= 0)
+        is_put_test = put_short > 0 and (
+            underlying <= (put_short * 1.01) or call_short <= 0
+        )
 
         if is_put_test and len(puts) >= 2:
             long_leg = self._find_option_by_abs_delta(puts, 0.35)
             short_leg = self._find_option_by_abs_delta(puts, 0.20)
             if not long_leg or not short_leg:
                 return None
-            if safe_float(long_leg.get("strike"), 0.0) <= safe_float(short_leg.get("strike"), 0.0):
+            if safe_float(long_leg.get("strike"), 0.0) <= safe_float(
+                short_leg.get("strike"), 0.0
+            ):
                 return None
-            debit = safe_float(long_leg.get("mid"), 0.0) - safe_float(short_leg.get("mid"), 0.0)
+            debit = safe_float(long_leg.get("mid"), 0.0) - safe_float(
+                short_leg.get("mid"), 0.0
+            )
             if debit <= 0:
                 return None
             return {
@@ -6310,9 +7135,13 @@ class TradingBot:
             short_leg = self._find_option_by_abs_delta(calls, 0.20)
             if not long_leg or not short_leg:
                 return None
-            if safe_float(long_leg.get("strike"), 0.0) >= safe_float(short_leg.get("strike"), 0.0):
+            if safe_float(long_leg.get("strike"), 0.0) >= safe_float(
+                short_leg.get("strike"), 0.0
+            ):
                 return None
-            debit = safe_float(long_leg.get("mid"), 0.0) - safe_float(short_leg.get("mid"), 0.0)
+            debit = safe_float(long_leg.get("mid"), 0.0) - safe_float(
+                short_leg.get("mid"), 0.0
+            )
             if debit <= 0:
                 return None
             return {
@@ -6326,7 +7155,9 @@ class TradingBot:
         return None
 
     @staticmethod
-    def _closest_strike_option(options: list[dict], target_strike: float) -> Optional[dict]:
+    def _closest_strike_option(
+        options: list[dict], target_strike: float
+    ) -> Optional[dict]:
         best = None
         best_dist = float("inf")
         for option in options:
@@ -6367,6 +7198,8 @@ class TradingBot:
         debit = max(0.01, float(debit))
         quantity = max(1, int(quantity))
         if self.is_paper:
+            if self.paper_trader is None:
+                return False
             self.paper_trader.balance -= debit * quantity * 100.0
             self.paper_trader.orders.append(
                 {
@@ -6383,14 +7216,15 @@ class TradingBot:
             self.paper_trader._save_state()
             return True
 
-        order_factory = lambda price, qty=quantity: self.schwab.build_long_option_open(
-            symbol=symbol,
-            expiration=expiration,
-            contract_type=contract_type,
-            strike=strike,
-            quantity=qty,
-            price=price,
-        )
+        def order_factory(price, qty=quantity):
+            return self.schwab.build_long_option_open(
+                    symbol=symbol,
+                    expiration=expiration,
+                    contract_type=contract_type,
+                    strike=strike,
+                    quantity=qty,
+                    price=price,
+                )
         result = self._submit_execution_order(
             order_factory=order_factory,
             midpoint_price=debit,
@@ -6403,7 +7237,11 @@ class TradingBot:
             step_timeout_seconds=self.config.execution.exit_step_timeout_seconds,
             total_timeout_seconds=180,
         )
-        return str(result.get("status", "")).upper() not in {"CANCELED", "REJECTED", "EXPIRED"}
+        return str(result.get("status", "")).upper() not in {
+            "CANCELED",
+            "REJECTED",
+            "EXPIRED",
+        }
 
     def _execute_adjustment_debit_spread(
         self,
@@ -6420,6 +7258,8 @@ class TradingBot:
         debit = max(0.01, float(debit))
         quantity = max(1, int(quantity))
         if self.is_paper:
+            if self.paper_trader is None:
+                return False
             self.paper_trader.balance -= debit * quantity * 100.0
             self.paper_trader.orders.append(
                 {
@@ -6436,15 +7276,16 @@ class TradingBot:
             self.paper_trader._save_state()
             return True
 
-        order_factory = lambda price, qty=quantity: self.schwab.build_debit_spread_open(
-            symbol=symbol,
-            expiration=expiration,
-            contract_type=contract_type,
-            long_strike=long_strike,
-            short_strike=short_strike,
-            quantity=qty,
-            price=price,
-        )
+        def order_factory(price, qty=quantity):
+            return self.schwab.build_debit_spread_open(
+                    symbol=symbol,
+                    expiration=expiration,
+                    contract_type=contract_type,
+                    long_strike=long_strike,
+                    short_strike=short_strike,
+                    quantity=qty,
+                    price=price,
+                )
         result = self._submit_execution_order(
             order_factory=order_factory,
             midpoint_price=debit,
@@ -6457,7 +7298,11 @@ class TradingBot:
             step_timeout_seconds=self.config.execution.exit_step_timeout_seconds,
             total_timeout_seconds=180,
         )
-        return str(result.get("status", "")).upper() not in {"CANCELED", "REJECTED", "EXPIRED"}
+        return str(result.get("status", "")).upper() not in {
+            "CANCELED",
+            "REJECTED",
+            "EXPIRED",
+        }
 
     def _bump_adjustment_state(
         self,
@@ -6468,7 +7313,7 @@ class TradingBot:
         extra_details: Optional[dict] = None,
     ) -> None:
         """Increment adjustment counters and accumulated costs for a position."""
-        details_update = {
+        details_update: dict[str, Any] = {
             "last_adjustment": action,
         }
         if extra_details:
@@ -6476,12 +7321,20 @@ class TradingBot:
 
         if self.is_paper and self.paper_trader:
             for pos in self.paper_trader.positions:
+                if not isinstance(pos, dict):
+                    continue
                 if str(pos.get("position_id", "")) != position_id:
                     continue
-                details = pos.get("details") if isinstance(pos.get("details"), dict) else {}
-                details["adjustment_count"] = safe_int(details.get("adjustment_count"), 0) + 1
+                details_raw = pos.get("details")
+                details: dict[str, Any] = (
+                    dict(details_raw) if isinstance(details_raw, dict) else {}
+                )
+                details["adjustment_count"] = (
+                    safe_int(details.get("adjustment_count"), 0) + 1
+                )
                 details["adjustment_cost"] = round(
-                    safe_float(details.get("adjustment_cost"), 0.0) + safe_float(additional_cost, 0.0),
+                    safe_float(details.get("adjustment_cost"), 0.0)
+                    + safe_float(additional_cost, 0.0),
                     4,
                 )
                 details.update(details_update)
@@ -6494,10 +7347,12 @@ class TradingBot:
             tracked = self.live_ledger.get_position(position_id)
             if not tracked:
                 return
-            details = tracked.get("details") if isinstance(tracked.get("details"), dict) else {}
+            details_raw = tracked.get("details")
+            details = dict(details_raw) if isinstance(details_raw, dict) else {}
             next_count = safe_int(details.get("adjustment_count"), 0) + 1
             next_cost = round(
-                safe_float(details.get("adjustment_cost"), 0.0) + safe_float(additional_cost, 0.0),
+                safe_float(details.get("adjustment_cost"), 0.0)
+                + safe_float(additional_cost, 0.0),
                 4,
             )
             details_update["adjustment_count"] = next_count
@@ -6530,7 +7385,9 @@ class TradingBot:
             details.get("expiration", tracked.get("expiration", ""))
         )
         if not expiration:
-            logger.warning("Tracked live position %s missing expiration.", signal.position_id)
+            logger.warning(
+                "Tracked live position %s missing expiration.", signal.position_id
+            )
             return False
 
         quantity = max(1, int(tracked.get("quantity", 1)))
@@ -6544,42 +7401,54 @@ class TradingBot:
             order_factory = None
             spread_proxy = max(0.05, debit_limit * 0.20)
             if strategy == "bull_put_spread":
-                order_factory = lambda price, qty=quantity: self.schwab.build_bull_put_spread_close(
-                    symbol=symbol,
-                    expiration=expiration,
-                    short_strike=float(details.get("short_strike", 0.0)),
-                    long_strike=float(details.get("long_strike", 0.0)),
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_bull_put_spread_close(
+                                        symbol=symbol,
+                                        expiration=expiration,
+                                        short_strike=float(details.get("short_strike", 0.0)),
+                                        long_strike=float(details.get("long_strike", 0.0)),
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             elif strategy == "bear_call_spread":
-                order_factory = lambda price, qty=quantity: self.schwab.build_bear_call_spread_close(
-                    symbol=symbol,
-                    expiration=expiration,
-                    short_strike=float(details.get("short_strike", 0.0)),
-                    long_strike=float(details.get("long_strike", 0.0)),
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_bear_call_spread_close(
+                                        symbol=symbol,
+                                        expiration=expiration,
+                                        short_strike=float(details.get("short_strike", 0.0)),
+                                        long_strike=float(details.get("long_strike", 0.0)),
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             elif strategy == "covered_call":
-                order_factory = lambda price, qty=quantity: self.schwab.build_covered_call_close(
-                    symbol=symbol,
-                    expiration=expiration,
-                    short_strike=float(details.get("short_strike", 0.0)),
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_covered_call_close(
+                                        symbol=symbol,
+                                        expiration=expiration,
+                                        short_strike=float(details.get("short_strike", 0.0)),
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             elif strategy == "iron_condor":
-                order_factory = lambda price, qty=quantity: self.schwab.build_iron_condor_close(
-                    symbol=symbol,
-                    expiration=expiration,
-                    put_long_strike=float(details.get("put_long_strike", 0.0)),
-                    put_short_strike=float(details.get("put_short_strike", 0.0)),
-                    call_short_strike=float(details.get("call_short_strike", 0.0)),
-                    call_long_strike=float(details.get("call_long_strike", 0.0)),
-                    quantity=qty,
-                    price=price,
-                )
+                def order_factory(price, qty=quantity):
+                    return (
+                                    self.schwab.build_iron_condor_close(
+                                        symbol=symbol,
+                                        expiration=expiration,
+                                        put_long_strike=float(details.get("put_long_strike", 0.0)),
+                                        put_short_strike=float(details.get("put_short_strike", 0.0)),
+                                        call_short_strike=float(details.get("call_short_strike", 0.0)),
+                                        call_long_strike=float(details.get("call_long_strike", 0.0)),
+                                        quantity=qty,
+                                        price=price,
+                                    )
+                                )
             else:
                 logger.warning("Live exit not implemented for strategy: %s", strategy)
                 return False
@@ -6606,7 +7475,9 @@ class TradingBot:
                 strategy=strategy,
                 side="exit",
                 midpoint=float(result.get("midpoint_price", debit_limit)),
-                fill_price=float(result.get("fill_price", result.get("requested_price", debit_limit))),
+                fill_price=float(
+                    result.get("fill_price", result.get("requested_price", debit_limit))
+                ),
                 status=status,
                 dte=safe_int(tracked.get("dte_remaining"), 0),
             )
@@ -6619,12 +7490,15 @@ class TradingBot:
                         "exit_slippage": quality_row.get("slippage"),
                         "exit_slippage_vs_mid": quality_row.get("slippage_vs_mid"),
                         "exit_adverse_slippage": quality_row.get("adverse_slippage"),
-                        "exit_fill_improvement_vs_mid": quality_row.get("fill_improvement_vs_mid"),
+                        "exit_fill_improvement_vs_mid": quality_row.get(
+                            "fill_improvement_vs_mid"
+                        ),
                     },
                 )
             self._append_audit_event(
                 event_type="order_filled",
-                correlation_id=str(signal.metadata.get("correlation_id", "")) or str(signal.position_id or ""),
+                correlation_id=str(signal.metadata.get("correlation_id", ""))
+                or str(signal.position_id or ""),
                 details={
                     "symbol": symbol,
                     "strategy": strategy,
@@ -6664,7 +7538,11 @@ class TradingBot:
                 level="ERROR",
                 title="Live close order failed",
                 message=str(exc),
-                context={"strategy": strategy, "symbol": symbol, "position_id": signal.position_id},
+                context={
+                    "strategy": strategy,
+                    "symbol": symbol,
+                    "position_id": signal.position_id,
+                },
             )
             return False
 
@@ -6731,18 +7609,24 @@ class TradingBot:
 
         return 0.05
 
-    def _execution_ladder_settings(self, *, phase: str) -> tuple[list[float], list[int], int]:
+    def _execution_ladder_settings(
+        self, *, phase: str
+    ) -> tuple[list[float], list[int], int]:
         """Resolve ladder fractions/timeouts/max attempts for entry/exit phase."""
         cfg = self.config.execution
         smart_enabled = bool(getattr(cfg, "smart_ladder_enabled", True))
         if smart_enabled:
-            shifts = list(getattr(cfg, "ladder_width_fractions", []) or [0.0, 0.10, 0.25, 0.40])
+            shifts = list(
+                getattr(cfg, "ladder_width_fractions", []) or [0.0, 0.10, 0.25, 0.40]
+            )
         elif str(phase).lower() == "exit":
             shifts = list(getattr(cfg, "exit_ladder_shifts", []) or [0.0, 0.25, 0.50])
         else:
             shifts = list(getattr(cfg, "entry_ladder_shifts", []) or [0.0, 0.25, 0.50])
 
-        timeouts = list(getattr(cfg, "ladder_step_timeouts_seconds", []) or [45, 45, 45, 30])
+        timeouts = list(
+            getattr(cfg, "ladder_step_timeouts_seconds", []) or [45, 45, 45, 30]
+        )
         if not shifts:
             shifts = [0.0]
         max_attempts = max(1, min(int(cfg.max_ladder_attempts), len(shifts)))
@@ -6820,10 +7704,9 @@ class TradingBot:
             if ts.strftime("%Y-W%W") == week_key:
                 week_fills.append(item)
         if week_fills:
-            avg = (
-                sum(float(item.get("adverse_slippage", 0.0) or 0.0) for item in week_fills)
-                / len(week_fills)
-            )
+            avg = sum(
+                float(item.get("adverse_slippage", 0.0) or 0.0) for item in week_fills
+            ) / len(week_fills)
             meta = payload.get("meta")
             if not isinstance(meta, dict):
                 meta = {}
@@ -6853,7 +7736,12 @@ class TradingBot:
             },
         )
         if not isinstance(payload, dict):
-            payload = {"fills": [], "by_strategy": {}, "by_symbol": {}, "by_dte_bucket": {}}
+            payload = {
+                "fills": [],
+                "by_strategy": {},
+                "by_symbol": {},
+                "by_dte_bucket": {},
+            }
         fills = payload.get("fills")
         if not isinstance(fills, list):
             fills = []
@@ -6886,9 +7774,12 @@ class TradingBot:
                 }
                 area[key] = entry
             entry["count"] = safe_int(entry.get("count"), 0) + 1
-            entry["total_slippage"] = round(safe_float(entry.get("total_slippage"), 0.0) + slippage, 6)
+            entry["total_slippage"] = round(
+                safe_float(entry.get("total_slippage"), 0.0) + slippage, 6
+            )
             entry["avg_slippage"] = round(
-                safe_float(entry.get("total_slippage"), 0.0) / max(1, safe_int(entry.get("count"), 1)),
+                safe_float(entry.get("total_slippage"), 0.0)
+                / max(1, safe_int(entry.get("count"), 1)),
                 6,
             )
             entry["total_adverse_slippage"] = round(
@@ -6945,11 +7836,21 @@ class TradingBot:
     def _strategy_regime_min_score(self, signal: TradeSignal) -> float:
         """Dynamic score floor from historical strategy/regime performance."""
         base_min = 20.0
-        if self._is_short_premium_strategy(signal.strategy) and self._theta_harvest_is_underperforming():
+        if (
+            self._is_short_premium_strategy(signal.strategy)
+            and self._theta_harvest_is_underperforming()
+        ):
             base_min = max(0.0, base_min - 5.0)
         stats = self._strategy_stats if isinstance(self._strategy_stats, dict) else {}
         strategy_key = self._strategy_group(str(signal.strategy).lower())
-        regime = str(signal.metadata.get("regime", self.circuit_state.get("regime", "unknown"))).upper() or "UNKNOWN"
+        regime = (
+            str(
+                signal.metadata.get(
+                    "regime", self.circuit_state.get("regime", "unknown")
+                )
+            ).upper()
+            or "UNKNOWN"
+        )
         strategy_stats = stats.get(strategy_key, {})
         if not isinstance(strategy_stats, dict):
             return base_min
@@ -7021,12 +7922,16 @@ class TradingBot:
         for _, rows in sorted(grouped.items()):
             if not rows:
                 continue
-            ordered = sorted(rows, key=lambda item: str(item.get("datetime", item.get("date", ""))))
+            ordered = sorted(
+                rows, key=lambda item: str(item.get("datetime", item.get("date", "")))
+            )
             first = ordered[0]
             last = ordered[-1]
             high = max(safe_float(row.get("high"), 0.0) for row in ordered)
             low = min(safe_float(row.get("low"), 0.0) for row in ordered)
-            volume = sum(max(0.0, safe_float(row.get("volume"), 0.0)) for row in ordered)
+            volume = sum(
+                max(0.0, safe_float(row.get("volume"), 0.0)) for row in ordered
+            )
             out.append(
                 {
                     "open": safe_float(first.get("open"), 0.0),
@@ -7053,7 +7958,9 @@ class TradingBot:
             return bool(close <= sma50 and rsi <= 65.0 and macd_hist <= 0.15)
         return bool(between and 30.0 <= rsi <= 70.0)
 
-    def _passes_multi_timeframe_confirmation(self, signal: TradeSignal) -> tuple[bool, int, dict[str, bool]]:
+    def _passes_multi_timeframe_confirmation(
+        self, signal: TradeSignal
+    ) -> tuple[bool, int, dict[str, bool]]:
         if not bool(getattr(self.config.multi_timeframe, "enabled", False)):
             return True, 3, {"daily": True, "weekly": True, "hourly": True}
         votes = self._compute_multi_timeframe_votes(signal)
@@ -7061,7 +7968,10 @@ class TradingBot:
             # Graceful degradation: do not block trades when timeframe data is unavailable.
             return True, 0, {}
         agreement = sum(1 for val in votes.values() if bool(val))
-        required = max(1, min(3, int(getattr(self.config.multi_timeframe, "min_agreement", 2) or 2)))
+        required = max(
+            1,
+            min(3, int(getattr(self.config.multi_timeframe, "min_agreement", 2) or 2)),
+        )
         return agreement >= required, agreement, votes
 
     def _is_high_conviction_scale_candidate(self, signal: TradeSignal) -> bool:
@@ -7110,7 +8020,11 @@ class TradingBot:
             return
         if not self._pending_scale_ins:
             return
-        delay = timedelta(minutes=max(1, int(getattr(self.config.scaling, "scale_in_delay_minutes", 60) or 60)))
+        delay = timedelta(
+            minutes=max(
+                1, int(getattr(self.config.scaling, "scale_in_delay_minutes", 60) or 60)
+            )
+        )
         now = self._now_eastern()
         positions = {
             str(pos.get("position_id", "")): pos
@@ -7171,7 +8085,9 @@ class TradingBot:
             "iv_rank": iv_rank,
             "regime": self.circuit_state.get("regime", "normal"),
             "vix": self.circuit_state.get("vix"),
-            "account_balance": float(self.risk_manager.portfolio.account_balance or 0.0),
+            "account_balance": float(
+                self.risk_manager.portfolio.account_balance or 0.0
+            ),
             "service_degradation": dict(self._service_degradation),
             "max_signals_per_symbol_per_strategy": int(
                 getattr(self.config, "max_signals_per_symbol_per_strategy", 2) or 2
@@ -7179,8 +8095,12 @@ class TradingBot:
         }
         if self.current_regime_state:
             context["regime_confidence"] = self.current_regime_state.confidence
-            context["regime_weights"] = self.current_regime_state.recommended_strategy_weights
-            context["position_size_scalar"] = self.current_regime_state.recommended_position_size_scalar
+            context["regime_weights"] = (
+                self.current_regime_state.recommended_strategy_weights
+            )
+            context["position_size_scalar"] = (
+                self.current_regime_state.recommended_position_size_scalar
+            )
 
         if self.vol_surface_analyzer:
             try:
@@ -7210,7 +8130,9 @@ class TradingBot:
                 alt_payload = self.alt_data_engine.build_signals(
                     symbol=symbol,
                     chain_data=chain_data,
-                    flow_context=context.get("options_flow", {}),
+                    flow_context=context.get("options_flow")
+                    if isinstance(context.get("options_flow"), dict)
+                    else None,
                     previous_chain_data=self._chain_history_cache.get(symbol.upper()),
                 )
                 context["alt_data"] = alt_payload
@@ -7329,7 +8251,9 @@ class TradingBot:
 
         tracked_sets = [
             self._resolve_live_option_symbols(pos)
-            for pos in self.live_ledger.list_positions(statuses={"opening", "working", "open", "closing"})
+            for pos in self.live_ledger.list_positions(
+                statuses={"opening", "working", "open", "closing"}
+            )
         ]
 
         grouped: dict[tuple[str, str, int], list[dict]] = defaultdict(list)
@@ -7381,19 +8305,19 @@ class TradingBot:
     ) -> Optional[dict]:
         """Infer strategy metadata for pre-existing broker option positions."""
         short_puts = sorted(
-            [l for l in legs if l["contract_type"] == "P" and l["net_qty"] < 0],
+            [leg for leg in legs if leg["contract_type"] == "P" and leg["net_qty"] < 0],
             key=lambda x: x["strike"],
         )
         long_puts = sorted(
-            [l for l in legs if l["contract_type"] == "P" and l["net_qty"] > 0],
+            [leg for leg in legs if leg["contract_type"] == "P" and leg["net_qty"] > 0],
             key=lambda x: x["strike"],
         )
         short_calls = sorted(
-            [l for l in legs if l["contract_type"] == "C" and l["net_qty"] < 0],
+            [leg for leg in legs if leg["contract_type"] == "C" and leg["net_qty"] < 0],
             key=lambda x: x["strike"],
         )
         long_calls = sorted(
-            [l for l in legs if l["contract_type"] == "C" and l["net_qty"] > 0],
+            [leg for leg in legs if leg["contract_type"] == "C" and leg["net_qty"] > 0],
             key=lambda x: x["strike"],
         )
 
@@ -7408,9 +8332,13 @@ class TradingBot:
 
         if short_puts and long_puts and short_calls and long_calls:
             put_short = short_puts[-1]["strike"]
-            put_long_candidates = [l["strike"] for l in long_puts if l["strike"] < put_short]
+            put_long_candidates = [
+                leg["strike"] for leg in long_puts if leg["strike"] < put_short
+            ]
             call_short = short_calls[0]["strike"]
-            call_long_candidates = [l["strike"] for l in long_calls if l["strike"] > call_short]
+            call_long_candidates = [
+                leg["strike"] for leg in long_calls if leg["strike"] > call_short
+            ]
             if put_long_candidates and call_long_candidates:
                 put_long = max(put_long_candidates)
                 call_long = min(call_long_candidates)
@@ -7433,7 +8361,9 @@ class TradingBot:
 
         if short_puts and long_puts:
             put_short = short_puts[-1]["strike"]
-            put_long_candidates = [l["strike"] for l in long_puts if l["strike"] < put_short]
+            put_long_candidates = [
+                leg["strike"] for leg in long_puts if leg["strike"] < put_short
+            ]
             if put_long_candidates:
                 put_long = max(put_long_candidates)
                 width = put_short - put_long
@@ -7453,7 +8383,9 @@ class TradingBot:
 
         if short_calls and long_calls:
             call_short = short_calls[0]["strike"]
-            call_long_candidates = [l["strike"] for l in long_calls if l["strike"] > call_short]
+            call_long_candidates = [
+                leg["strike"] for leg in long_calls if leg["strike"] > call_short
+            ]
             if call_long_candidates:
                 call_long = min(call_long_candidates)
                 width = call_long - call_short
@@ -7684,7 +8616,9 @@ class TradingBot:
             mark = self._estimate_paper_position_value(position, chain_data)
             dte_remaining = position.get("dte_remaining")
             expiration = self._extract_expiration_key(
-                (position.get("details") or {}).get("expiration", position.get("expiration", ""))
+                (position.get("details") or {}).get(
+                    "expiration", position.get("expiration", "")
+                )
             )
             if expiration:
                 try:
@@ -7704,9 +8638,14 @@ class TradingBot:
                 underlying_price=underlying_price,
             )
 
-    def _resolve_external_close_metadata(self, position: dict, symbols: set[str]) -> dict:
+    def _resolve_external_close_metadata(
+        self, position: dict, symbols: set[str]
+    ) -> dict:
         """Estimate close metadata for positions closed outside bot-managed orders."""
-        metadata: dict = {"exit_order_status": "EXTERNAL", "exit_reason": "external_close"}
+        metadata: dict = {
+            "exit_order_status": "EXTERNAL",
+            "exit_reason": "external_close",
+        }
         if not symbols:
             return metadata
 
@@ -7766,7 +8705,10 @@ class TradingBot:
                     latest_time = fill_time
 
             instruction = str(fill.get("instruction", "")).upper()
-            if instruction in OPEN_LONG_INSTRUCTIONS or instruction in OPEN_SHORT_INSTRUCTIONS:
+            if (
+                instruction in OPEN_LONG_INSTRUCTIONS
+                or instruction in OPEN_SHORT_INSTRUCTIONS
+            ):
                 continue
 
             direction = 1.0 if instruction.startswith("SELL") else -1.0
@@ -7832,7 +8774,9 @@ class TradingBot:
                         "Falling back to local-time scheduling."
                     )
                     tz_fallback_warned = True
-                logger.info("Scheduled %s at %s (local timezone fallback)", label, at_time)
+                logger.info(
+                    "Scheduled %s at %s (local timezone fallback)", label, at_time
+                )
 
         # Schedule market scans
         for scan_time in sched_config.scan_times:
@@ -7846,30 +8790,29 @@ class TradingBot:
 
         # Schedule position monitoring
 
-
         interval = sched_config.position_check_interval
 
-
         if self.is_paper:
-
-
             schedule.every(interval).seconds.do(self._scheduled_position_check)
 
-
-            logger.info("Scheduled position checks every %d SECONDS (testing phase)", interval)
-
+            logger.info(
+                "Scheduled position checks every %d SECONDS (testing phase)", interval
+            )
 
         else:
-
-
             schedule.every(interval).minutes.do(self._scheduled_position_check)
-
 
             logger.info("Scheduled position checks every %d minutes", interval)
         if not self.is_paper:
-            recon_interval = max(5, int(getattr(self.config.reconciliation, "interval_minutes", 30) or 30))
+            recon_interval = max(
+                5,
+                int(getattr(self.config.reconciliation, "interval_minutes", 30) or 30),
+            )
             schedule.every(recon_interval).minutes.do(self._scheduled_reconciliation)
-            logger.info("Scheduled live reconciliation watchdog every %d minutes", recon_interval)
+            logger.info(
+                "Scheduled live reconciliation watchdog every %d minutes",
+                recon_interval,
+            )
 
         # Daily performance report
         _schedule_at(
@@ -7887,8 +8830,12 @@ class TradingBot:
         )
         logger.info("Scheduled dashboard generation at 16:10 ET")
         if bool(self.config.ml_scorer.enabled):
-            retrain_day = str(self.config.ml_scorer.retrain_day or "sunday").strip().lower()
-            retrain_time = str(self.config.ml_scorer.retrain_time or "18:00").strip() or "18:00"
+            retrain_day = (
+                str(self.config.ml_scorer.retrain_day or "sunday").strip().lower()
+            )
+            retrain_time = (
+                str(self.config.ml_scorer.retrain_time or "18:00").strip() or "18:00"
+            )
             day_job = getattr(schedule.every(), retrain_day, None)
             if day_job is not None:
                 _schedule_at(
@@ -7916,7 +8863,6 @@ class TradingBot:
         open_count = len(self.risk_manager.portfolio.open_positions)
 
         if not self.is_paper and open_count > 0:
-
             return
 
         if not self._is_market_open_now() and not self.is_paper:
@@ -7978,6 +8924,8 @@ class TradingBot:
         analytics_summary = compute_analytics(self._recent_closed_trades()).core_metrics
         attribution_summary = self._record_daily_pnl_attribution()
         if self.is_paper:
+            if self.paper_trader is None:
+                return
             summary = self.paper_trader.get_performance_summary()
             logger.info("=" * 60)
             logger.info("DAILY PERFORMANCE REPORT")
@@ -8001,7 +8949,9 @@ class TradingBot:
                     "win_rate": analytics_summary.get("win_rate", 0.0),
                     "calmar": analytics_summary.get("calmar", 0.0),
                     "profit_factor": analytics_summary.get("profit_factor", 0.0),
-                    "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
+                    "expectancy_per_trade": analytics_summary.get(
+                        "expectancy_per_trade", 0.0
+                    ),
                     "delta_pnl": attribution_summary.get("delta_pnl", 0.0),
                     "theta_pnl": attribution_summary.get("theta_pnl", 0.0),
                     "vega_pnl": attribution_summary.get("vega_pnl", 0.0),
@@ -8017,7 +8967,9 @@ class TradingBot:
                         "sortino": analytics_summary.get("sortino", 0.0),
                         "calmar": analytics_summary.get("calmar", 0.0),
                         "profit_factor": analytics_summary.get("profit_factor", 0.0),
-                        "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
+                        "expectancy_per_trade": analytics_summary.get(
+                            "expectancy_per_trade", 0.0
+                        ),
                         "delta_pnl": attribution_summary.get("delta_pnl", 0.0),
                         "theta_pnl": attribution_summary.get("theta_pnl", 0.0),
                     },
@@ -8045,7 +8997,8 @@ class TradingBot:
         logger.info("Open strategy positions: %d", ledger_summary.get("open", 0))
         logger.info(
             "Pending entries: %d",
-            safe_int(ledger_summary.get("opening"), 0) + safe_int(ledger_summary.get("working"), 0),
+            safe_int(ledger_summary.get("opening"), 0)
+            + safe_int(ledger_summary.get("working"), 0),
         )
         logger.info("Pending exits: %d", ledger_summary.get("closing", 0))
         logger.info("Closed today: %d", ledger_summary.get("closed_today", 0))
@@ -8070,7 +9023,9 @@ class TradingBot:
                 "win_rate": analytics_summary.get("win_rate", 0.0),
                 "calmar": analytics_summary.get("calmar", 0.0),
                 "profit_factor": analytics_summary.get("profit_factor", 0.0),
-                "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
+                "expectancy_per_trade": analytics_summary.get(
+                    "expectancy_per_trade", 0.0
+                ),
                 "delta_pnl": attribution_summary.get("delta_pnl", 0.0),
                 "theta_pnl": attribution_summary.get("theta_pnl", 0.0),
                 "vega_pnl": attribution_summary.get("vega_pnl", 0.0),
@@ -8086,7 +9041,9 @@ class TradingBot:
                     "sortino": analytics_summary.get("sortino", 0.0),
                     "calmar": analytics_summary.get("calmar", 0.0),
                     "profit_factor": analytics_summary.get("profit_factor", 0.0),
-                    "expectancy_per_trade": analytics_summary.get("expectancy_per_trade", 0.0),
+                    "expectancy_per_trade": analytics_summary.get(
+                        "expectancy_per_trade", 0.0
+                    ),
                     "delta_pnl": attribution_summary.get("delta_pnl", 0.0),
                     "theta_pnl": attribution_summary.get("theta_pnl", 0.0),
                 },
@@ -8128,15 +9085,23 @@ class TradingBot:
             if not isinstance(position, dict):
                 continue
             symbol = str(position.get("symbol", "")).upper()
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             entry_iv = safe_float(details.get("entry_iv"), 0.0)
             current_iv = safe_float(details.get("current_iv"), entry_iv)
             if current_iv and entry_iv:
                 iv_changes[symbol] = current_iv - entry_iv
-        attribution = self.pnl_attribution.compute_attribution(positions, price_changes, iv_changes)
+        attribution = self.pnl_attribution.compute_attribution(
+            positions, price_changes, iv_changes
+        )
         day_iso = self._now_eastern().date().isoformat()
         self.pnl_attribution.record_daily_snapshot(day_iso, attribution)
-        portfolio = attribution.get("portfolio", {}) if isinstance(attribution, dict) else {}
+        portfolio = (
+            attribution.get("portfolio", {}) if isinstance(attribution, dict) else {}
+        )
         return {
             "delta_pnl": safe_float(portfolio.get("delta_pnl"), 0.0),
             "gamma_pnl": safe_float(portfolio.get("gamma_pnl"), 0.0),
@@ -8169,8 +9134,12 @@ class TradingBot:
         ).to_dict()
         result["timestamp"] = now_et.isoformat()
         self._monte_carlo_state = result
-        self.circuit_state["monte_carlo_high_risk"] = bool(result.get("high_risk", False))
-        self.circuit_state["monte_carlo_var99_pct"] = safe_float(result.get("var99_pct_account"), 0.0)
+        self.circuit_state["monte_carlo_high_risk"] = bool(
+            result.get("high_risk", False)
+        )
+        self.circuit_state["monte_carlo_var99_pct"] = safe_float(
+            result.get("var99_pct_account"), 0.0
+        )
 
     def _scheduled_dashboard(self) -> None:
         """Scheduled dashboard generation wrapper."""
@@ -8183,7 +9152,9 @@ class TradingBot:
             if trained:
                 logger.info("ML scorer retrain complete.")
             else:
-                logger.info("ML scorer retrain skipped (insufficient data or disabled).")
+                logger.info(
+                    "ML scorer retrain skipped (insufficient data or disabled)."
+                )
         except Exception as exc:
             logger.warning("ML scorer retrain failed: %s", exc)
 
@@ -8218,10 +9189,18 @@ class TradingBot:
         order_ids: set[str] = set()
         if self.live_ledger:
             try:
-                order_ids.update(str(oid).strip() for oid in self.live_ledger.pending_entry_order_ids())
-                order_ids.update(str(oid).strip() for oid in self.live_ledger.pending_exit_order_ids())
+                order_ids.update(
+                    str(oid).strip()
+                    for oid in self.live_ledger.pending_entry_order_ids()
+                )
+                order_ids.update(
+                    str(oid).strip()
+                    for oid in self.live_ledger.pending_exit_order_ids()
+                )
             except Exception as exc:
-                logger.warning("Failed to enumerate pending order IDs on shutdown: %s", exc)
+                logger.warning(
+                    "Failed to enumerate pending order IDs on shutdown: %s", exc
+                )
 
         try:
             orders = self.schwab.get_orders(days_back=2)
@@ -8256,7 +9235,11 @@ class TradingBot:
                 logger.info("Shutdown canceled order %s", order_id)
                 outstanding.add(order_id)
             except Exception as exc:
-                logger.warning("Failed to cancel pending order %s during shutdown: %s", order_id, exc)
+                logger.warning(
+                    "Failed to cancel pending order %s during shutdown: %s",
+                    order_id,
+                    exc,
+                )
 
         if not outstanding:
             return
@@ -8283,7 +9266,9 @@ class TradingBot:
                 ", ".join(sorted(outstanding)),
             )
 
-    def _handle_shutdown(self, signum, frame) -> None:  # pragma: no cover - invoked by OS signals
+    def _handle_shutdown(
+        self, signum, frame
+    ) -> None:  # pragma: no cover - invoked by OS signals
         """Gracefully stop loop, cancel pending live orders, and persist final state."""
         if self._shutdown_in_progress:
             return
@@ -8295,10 +9280,14 @@ class TradingBot:
             event_type="paused",
             message=f"Shutdown signal received ({signum}).",
         )
-        self._write_runtime_state(clean_shutdown=False, note=f"shutdown_signal:{signum}")
+        self._write_runtime_state(
+            clean_shutdown=False, note=f"shutdown_signal:{signum}"
+        )
 
         if not self.is_paper:
-            self._cancel_live_orders_for_shutdown(timeout_seconds=30, poll_interval_seconds=1.0)
+            self._cancel_live_orders_for_shutdown(
+                timeout_seconds=30, poll_interval_seconds=1.0
+            )
 
         if self.live_ledger and hasattr(self.live_ledger, "save"):
             try:
@@ -8324,7 +9313,9 @@ class TradingBot:
     def _maybe_log_heartbeat(self) -> None:
         """Emit a periodic liveness heartbeat in long-running mode."""
         now_et = self._now_eastern()
-        if self._last_heartbeat_time and (now_et - self._last_heartbeat_time) < timedelta(minutes=5):
+        if self._last_heartbeat_time and (
+            now_et - self._last_heartbeat_time
+        ) < timedelta(minutes=5):
             return
 
         positions = len(self.risk_manager.portfolio.open_positions)
@@ -8347,7 +9338,9 @@ class TradingBot:
             return
         self._service_degradation["stream_down"] = True
         now_et = self._now_eastern()
-        if self._last_stream_retry_time and (now_et - self._last_stream_retry_time) < timedelta(minutes=5):
+        if self._last_stream_retry_time and (
+            now_et - self._last_stream_retry_time
+        ) < timedelta(minutes=5):
             return
         self._last_stream_retry_time = now_et
         self._setup_streaming()
@@ -8368,14 +9361,28 @@ class TradingBot:
             source_positions = self.paper_trader.get_positions()
             closed_source = self.paper_trader.closed_trades
         else:
-            source_positions = self.live_ledger.list_positions(statuses={"open", "opening", "working", "closing"}) if self.live_ledger else []
-            closed_source = self.live_ledger.list_positions(statuses={"closed", "closed_external", "rolled"}) if self.live_ledger else []
+            source_positions = (
+                self.live_ledger.list_positions(
+                    statuses={"open", "opening", "working", "closing"}
+                )
+                if self.live_ledger
+                else []
+            )
+            closed_source = (
+                self.live_ledger.list_positions(
+                    statuses={"closed", "closed_external", "rolled"}
+                )
+                if self.live_ledger
+                else []
+            )
         initial_equity = (
             safe_float(self._equity_history[0].get("equity"), 0.0)
             if self._equity_history
             else safe_float(self.risk_manager.portfolio.account_balance, 100_000.0)
         )
-        analytics_report = compute_analytics(closed_source, initial_equity=max(1.0, initial_equity))
+        analytics_report = compute_analytics(
+            closed_source, initial_equity=max(1.0, initial_equity)
+        )
 
         for trade in closed_source:
             pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
@@ -8390,7 +9397,14 @@ class TradingBot:
 
             entry = strategy_breakdown.setdefault(
                 strategy,
-                {"wins": 0, "count": 0, "total_pnl": 0.0, "sum_wins": 0.0, "sum_losses": 0.0, "losses": 0},
+                {
+                    "wins": 0,
+                    "count": 0,
+                    "total_pnl": 0.0,
+                    "sum_wins": 0.0,
+                    "sum_losses": 0.0,
+                    "losses": 0,
+                },
             )
             entry["count"] += 1
             if pnl > 0:
@@ -8401,8 +9415,14 @@ class TradingBot:
                 entry["sum_losses"] += pnl
             entry["total_pnl"] += pnl
 
-            details = trade.get("details", {}) if isinstance(trade.get("details"), dict) else {}
-            regime_key = str(trade.get("regime", details.get("regime", "unknown")) or "unknown")
+            details = (
+                trade.get("details", {})
+                if isinstance(trade.get("details"), dict)
+                else {}
+            )
+            regime_key = str(
+                trade.get("regime", details.get("regime", "unknown")) or "unknown"
+            )
             regime_entry = regime_breakdown.setdefault(
                 regime_key,
                 {"count": 0, "wins": 0, "total_pnl": 0.0},
@@ -8414,7 +9434,10 @@ class TradingBot:
 
             row = {"symbol": trade.get("symbol", ""), "pnl": pnl}
             (winners if pnl >= 0 else losers).append(row)
-            if str(trade.get("status", "")).lower() == "rolled" or str(details.get("roll_status", "")).lower() == "rolled":
+            if (
+                str(trade.get("status", "")).lower() == "rolled"
+                or str(details.get("roll_status", "")).lower() == "rolled"
+            ):
                 rolled_credits.append(safe_float(trade.get("entry_credit"), 0.0))
 
         strategy_view = dict(analytics_report.strategy_metrics)
@@ -8430,9 +9453,15 @@ class TradingBot:
         risk_metrics.update(
             {
                 "calmar": safe_float(analytics_report.core_metrics.get("calmar"), 0.0),
-                "profit_factor": safe_float(analytics_report.core_metrics.get("profit_factor"), 0.0),
-                "expectancy_per_trade": safe_float(analytics_report.core_metrics.get("expectancy_per_trade"), 0.0),
-                "max_drawdown_duration": safe_int(analytics_report.core_metrics.get("max_drawdown_duration"), 0),
+                "profit_factor": safe_float(
+                    analytics_report.core_metrics.get("profit_factor"), 0.0
+                ),
+                "expectancy_per_trade": safe_float(
+                    analytics_report.core_metrics.get("expectancy_per_trade"), 0.0
+                ),
+                "max_drawdown_duration": safe_int(
+                    analytics_report.core_metrics.get("max_drawdown_duration"), 0
+                ),
             }
         )
         sector_total = sum(self.risk_manager.portfolio.sector_risk.values()) or 1.0
@@ -8448,30 +9477,54 @@ class TradingBot:
             current_value = safe_float(position.get("current_value"), 0.0)
             quantity = max(1, safe_int(position.get("quantity"), 1))
             pnl = (entry_credit - current_value) * quantity * 100.0
-            details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+            details = (
+                position.get("details", {})
+                if isinstance(position.get("details"), dict)
+                else {}
+            )
             open_positions_table.append(
                 {
                     "symbol": position.get("symbol", ""),
                     "strategy": position.get("strategy", ""),
                     "quantity": quantity,
-                    "dte_remaining": position.get("dte_remaining", details.get("dte", "")),
+                    "dte_remaining": position.get(
+                        "dte_remaining", details.get("dte", "")
+                    ),
                     "pnl": round(pnl, 2),
-                    "delta": safe_float(details.get("net_delta", position.get("net_delta", 0.0)), 0.0),
-                    "theta": safe_float(details.get("net_theta", position.get("net_theta", 0.0)), 0.0),
-                    "gamma": safe_float(details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0),
-                    "vega": safe_float(details.get("net_vega", position.get("net_vega", 0.0)), 0.0),
+                    "delta": safe_float(
+                        details.get("net_delta", position.get("net_delta", 0.0)), 0.0
+                    ),
+                    "theta": safe_float(
+                        details.get("net_theta", position.get("net_theta", 0.0)), 0.0
+                    ),
+                    "gamma": safe_float(
+                        details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0
+                    ),
+                    "vega": safe_float(
+                        details.get("net_vega", position.get("net_vega", 0.0)), 0.0
+                    ),
                     "gamma_risk_flag": bool(
-                        position.get("gamma_risk_flag", details.get("gamma_risk_flag", False))
+                        position.get(
+                            "gamma_risk_flag", details.get("gamma_risk_flag", False)
+                        )
                     ),
                 }
             )
 
-        trade_journal_payload = load_json(Path(self.config.llm.journal_file), {"entries": []})
-        trade_journal = trade_journal_payload.get("entries", []) if isinstance(trade_journal_payload, dict) else []
+        trade_journal_payload = load_json(
+            Path(self.config.llm.journal_file), {"entries": []}
+        )
+        trade_journal = (
+            trade_journal_payload.get("entries", [])
+            if isinstance(trade_journal_payload, dict)
+            else []
+        )
         if not isinstance(trade_journal, list):
             trade_journal = []
         hedge_payload = load_json(HEDGE_COSTS_PATH, {"entries": []})
-        hedge_entries = hedge_payload.get("entries", []) if isinstance(hedge_payload, dict) else []
+        hedge_entries = (
+            hedge_payload.get("entries", []) if isinstance(hedge_payload, dict) else []
+        )
         if not isinstance(hedge_entries, list):
             hedge_entries = []
         month_key = self._now_eastern().strftime("%Y-%m")
@@ -8493,7 +9546,9 @@ class TradingBot:
             "daily_pnl_calendar": daily_calendar,
             "strategy_breakdown": strategy_view,
             "regime_performance": regime_view,
-            "top_winners": sorted(winners, key=lambda row: row["pnl"], reverse=True)[:5],
+            "top_winners": sorted(winners, key=lambda row: row["pnl"], reverse=True)[
+                :5
+            ],
             "top_losers": sorted(losers, key=lambda row: row["pnl"])[:5],
             "risk_metrics": risk_metrics,
             "portfolio_greeks": self.risk_manager.get_portfolio_greeks(),
@@ -8521,14 +9576,18 @@ class TradingBot:
             "roll_metrics": {
                 "rolled_count": len(rolled_credits),
                 "avg_roll_credit_captured": round(
-                    (sum(rolled_credits) / len(rolled_credits)) if rolled_credits else 0.0,
+                    (sum(rolled_credits) / len(rolled_credits))
+                    if rolled_credits
+                    else 0.0,
                     4,
                 ),
             },
             "top_ranked_signals": list(self._last_ranked_signals),
             "strategy_stats": dict(self._strategy_stats),
             "strategy_cooldown_state": dict(self._strategy_cooldown_state),
-            "portfolio_halt_until": self._portfolio_halt_until.isoformat() if self._portfolio_halt_until else None,
+            "portfolio_halt_until": self._portfolio_halt_until.isoformat()
+            if self._portfolio_halt_until
+            else None,
             "closed_trades": len(closed_trades),
             "open_positions": len(source_positions),
         }
@@ -8537,25 +9596,46 @@ class TradingBot:
     @staticmethod
     def _compute_equity_risk_metrics(equity_history: list[dict]) -> dict:
         if not equity_history:
-            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0}
+            return {
+                "sharpe": 0.0,
+                "sortino": 0.0,
+                "max_drawdown": 0.0,
+                "current_drawdown": 0.0,
+            }
 
-        values = [float(point.get("equity", 0.0) or 0.0) for point in equity_history if point.get("equity") is not None]
+        values = [
+            float(point.get("equity", 0.0) or 0.0)
+            for point in equity_history
+            if point.get("equity") is not None
+        ]
         if len(values) < 2:
-            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0}
+            return {
+                "sharpe": 0.0,
+                "sortino": 0.0,
+                "max_drawdown": 0.0,
+                "current_drawdown": 0.0,
+            }
 
         returns = []
         for prev, current in zip(values[:-1], values[1:]):
             if prev > 0:
                 returns.append((current / prev) - 1.0)
         if not returns:
-            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0}
+            return {
+                "sharpe": 0.0,
+                "sortino": 0.0,
+                "max_drawdown": 0.0,
+                "current_drawdown": 0.0,
+            }
 
         mean_ret = sum(returns) / len(returns)
-        variance = sum((value - mean_ret) ** 2 for value in returns) / max(1, (len(returns) - 1))
-        std = variance ** 0.5
+        variance = sum((value - mean_ret) ** 2 for value in returns) / max(
+            1, (len(returns) - 1)
+        )
+        std = variance**0.5
         downside = [value for value in returns if value < 0]
         downside_std = (
-            (sum(value ** 2 for value in downside) / max(1, len(downside))) ** 0.5
+            (sum(value**2 for value in downside) / max(1, len(downside))) ** 0.5
             if downside
             else 0.0
         )
@@ -8570,8 +9650,8 @@ class TradingBot:
         if peak > 0:
             current_drawdown = (values[-1] - peak) / peak
 
-        sharpe = (mean_ret / std * (252 ** 0.5)) if std > 0 else 0.0
-        sortino = (mean_ret / downside_std * (252 ** 0.5)) if downside_std > 0 else 0.0
+        sharpe = (mean_ret / std * (252**0.5)) if std > 0 else 0.0
+        sortino = (mean_ret / downside_std * (252**0.5)) if downside_std > 0 else 0.0
         return {
             "sharpe": round(sharpe, 4),
             "sortino": round(sortino, 4),
@@ -8609,9 +9689,7 @@ class TradingBot:
 
         # Run an initial scan immediately on startup.
 
-
         logger.info("Running initial scan...")
-
 
         self.scan_and_trade()
 

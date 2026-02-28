@@ -40,11 +40,20 @@ class RLPromptOptimizerTests(unittest.TestCase):
                     },
                 )
 
-            payload = json.loads((base / "learned_rules.json").read_text(encoding="utf-8"))
+            payload = json.loads(
+                (base / "learned_rules.json").read_text(encoding="utf-8")
+            )
             rules = payload.get("rules", [])
             self.assertTrue(rules)
-            self.assertTrue(any(str(row.get("pattern_key", "")).startswith("strategy_regime:") for row in rules))
-            self.assertTrue(all(str(row.get("rule", "")).startswith("RULE:") for row in rules))
+            self.assertTrue(
+                any(
+                    str(row.get("pattern_key", "")).startswith("strategy_regime:")
+                    for row in rules
+                )
+            )
+            self.assertTrue(
+                all(str(row.get("rule", "")).startswith("RULE:") for row in rules)
+            )
 
     def test_max_rules_pruning_keeps_most_recent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -77,7 +86,9 @@ class RLPromptOptimizerTests(unittest.TestCase):
                         trade_context={"strategy": strategy, "regime": regime},
                     )
 
-            payload = json.loads((base / "learned_rules.json").read_text(encoding="utf-8"))
+            payload = json.loads(
+                (base / "learned_rules.json").read_text(encoding="utf-8")
+            )
             rules = payload.get("rules", [])
             self.assertEqual(len(rules), 2)
             keys = [str(row.get("pattern_key", "")) for row in rules]
@@ -131,7 +142,9 @@ class RLPromptOptimizerTests(unittest.TestCase):
             advisor._review_trade_ensemble("{}")
 
             rendered = "\n".join(system_prompts)
-            self.assertIn("Hard constraints from post-trade reinforcement learning", rendered)
+            self.assertIn(
+                "Hard constraints from post-trade reinforcement learning", rendered
+            )
             self.assertIn("RULE: Avoid low-confidence approvals", rendered)
 
 

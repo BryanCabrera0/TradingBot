@@ -1,9 +1,9 @@
+import json
 import signal
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
-import json
+from unittest import mock
 
 from bot.config import BotConfig
 from bot.orchestrator import TradingBot
@@ -114,7 +114,12 @@ class OrchestratorShutdownTests(unittest.TestCase):
             bot._runtime_state_path = state_path
             with self.assertLogs("bot.orchestrator", level="WARNING") as captured:
                 bot._warn_if_unclean_previous_shutdown()
-            self.assertTrue(any("clean shutdown flag missing" in line.lower() for line in captured.output))
+            self.assertTrue(
+                any(
+                    "clean shutdown flag missing" in line.lower()
+                    for line in captured.output
+                )
+            )
 
 
 if __name__ == "__main__":

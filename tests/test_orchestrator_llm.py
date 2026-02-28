@@ -242,7 +242,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         symbols = bot.schwab.stream_option_level_one.call_args.args[0]
         self.assertEqual(set(symbols), {"SPY_041726C100", "SPY_041726P100"})
 
-    def test_portfolio_strategist_close_long_dte_directive_executes_closes(self) -> None:
+    def test_portfolio_strategist_close_long_dte_directive_executes_closes(
+        self,
+    ) -> None:
         bot = TradingBot(make_config("advisory"))
         bot.llm_strategist = mock.Mock()
         bot.llm_strategist.review_portfolio.return_value = [
@@ -314,7 +316,9 @@ class OrchestratorLLMTests(unittest.TestCase):
                 "position_size_scalar": 0.8,
             }
         )
-        bot._filter_signals_by_context = mock.Mock(side_effect=lambda signals, _ctx: signals)
+        bot._filter_signals_by_context = mock.Mock(
+            side_effect=lambda signals, _ctx: signals
+        )
         bot._try_execute_entry = mock.Mock(return_value=False)
 
         sig = make_signal("SPY")
@@ -343,7 +347,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         bot = TradingBot(make_config("advisory"))
         bot.config.watchlist = ["AAA", "BBB"]
         bot.config.signal_ranking.enabled = True
-        bot.risk_manager.can_open_more_positions = mock.Mock(side_effect=[True, True, True, False])
+        bot.risk_manager.can_open_more_positions = mock.Mock(
+            side_effect=[True, True, True, False]
+        )
         bot._get_chain_data = mock.Mock(
             return_value=(
                 {"calls": {"2026-03-20": [{}]}, "puts": {"2026-03-20": [{}]}},
@@ -352,7 +358,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         )
         bot._subscribe_option_stream_for_symbol = mock.Mock()
         bot.technicals.get_context = mock.Mock(return_value=None)
-        bot._filter_signals_by_context = mock.Mock(side_effect=lambda signals, _ctx: signals)
+        bot._filter_signals_by_context = mock.Mock(
+            side_effect=lambda signals, _ctx: signals
+        )
 
         def _context_for_symbol(symbol: str, _chain: dict) -> dict:
             spread = 2.0 if symbol == "AAA" else 3.0
@@ -379,7 +387,11 @@ class OrchestratorLLMTests(unittest.TestCase):
 
         strategy = SimpleNamespace(
             name="credit_spreads",
-            scan_for_entries=mock.Mock(side_effect=lambda symbol, *_args, **_kwargs: [sig_a] if symbol == "AAA" else [sig_b]),
+            scan_for_entries=mock.Mock(
+                side_effect=lambda symbol, *_args, **_kwargs: (
+                    [sig_a] if symbol == "AAA" else [sig_b]
+                )
+            ),
         )
         bot.strategies = [strategy]
 
@@ -429,7 +441,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertEqual(context.get("ml_flag"), "low_confidence")
         self.assertAlmostEqual(float(context.get("ml_score")), 0.22, places=4)
 
-    def test_strategy_regime_gate_rejects_when_historical_win_rate_is_weak(self) -> None:
+    def test_strategy_regime_gate_rejects_when_historical_win_rate_is_weak(
+        self,
+    ) -> None:
         bot = TradingBot(make_config("advisory"))
         bot._strategy_stats = {
             "credit_spreads": {
@@ -448,7 +462,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertFalse(executed)
         bot.risk_manager.approve_trade.assert_not_called()
 
-    def test_strategy_regime_gate_relaxes_when_historical_win_rate_is_strong(self) -> None:
+    def test_strategy_regime_gate_relaxes_when_historical_win_rate_is_strong(
+        self,
+    ) -> None:
         bot = TradingBot(make_config("advisory"))
         bot.llm_advisor = None
         bot._strategy_stats = {
@@ -458,7 +474,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         }
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
 
         signal = make_signal("SPY")
@@ -475,7 +493,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         bot.llm_advisor = None
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
         bot._refresh_theta_harvest_state = mock.Mock()
         bot._theta_harvest_state = {
             "date": bot._now_eastern().date().isoformat(),
@@ -483,7 +503,9 @@ class OrchestratorLLMTests(unittest.TestCase):
             "theta_earned": 85.0,
             "ratio": 0.85,
         }
-        bot._now_eastern = mock.Mock(return_value=bot._now_eastern().replace(hour=14, minute=5))
+        bot._now_eastern = mock.Mock(
+            return_value=bot._now_eastern().replace(hour=14, minute=5)
+        )
 
         executed = bot._try_execute_entry(make_signal("SPY"))
 
@@ -500,7 +522,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         }
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
         now_et = bot._now_eastern().replace(hour=14, minute=10)
         bot._now_eastern = mock.Mock(return_value=now_et)
@@ -526,7 +550,9 @@ class OrchestratorLLMTests(unittest.TestCase):
         bot._monte_carlo_state = {"high_risk": True, "var99_pct_account": 4.2}
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=4)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
         bot._refresh_monte_carlo_risk = mock.Mock()
 
@@ -537,14 +563,23 @@ class OrchestratorLLMTests(unittest.TestCase):
         _, kwargs = bot.paper_trader.execute_open.call_args
         self.assertEqual(kwargs["quantity"], 2)
 
-    def test_portfolio_strategist_context_includes_regime_streak_and_risk_contributors(self) -> None:
+    def test_portfolio_strategist_context_includes_regime_streak_and_risk_contributors(
+        self,
+    ) -> None:
         bot = TradingBot(make_config("advisory"))
         bot.llm_strategist = mock.Mock()
         bot.llm_strategist.review_portfolio.return_value = []
         bot._recent_regime_states = mock.Mock(return_value=[{"regime": "BULL_TREND"}])
-        bot._strategy_streak_summary = mock.Mock(return_value={"credit_spreads": {"streak": 2, "type": "wins"}})
-        bot._top_risk_contributors = mock.Mock(return_value=[{"symbol": "SPY", "risk_dollars": 1200.0}])
-        bot.current_regime_state.sub_signals = {"term_structure_steepness": 0.12, "term_structure_momentum": -0.01}
+        bot._strategy_streak_summary = mock.Mock(
+            return_value={"credit_spreads": {"streak": 2, "type": "wins"}}
+        )
+        bot._top_risk_contributors = mock.Mock(
+            return_value=[{"symbol": "SPY", "risk_dollars": 1200.0}]
+        )
+        bot.current_regime_state.sub_signals = {
+            "term_structure_steepness": 0.12,
+            "term_structure_momentum": -0.01,
+        }
 
         bot._apply_portfolio_strategist()
 

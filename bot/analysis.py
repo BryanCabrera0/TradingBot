@@ -1,11 +1,11 @@
 """Options analysis engine — Greeks, probabilities, IV analysis, and strike selection."""
 
-import math
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
-from scipy.stats import norm
+from scipy.stats import norm  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class OptionMetrics:
     """Computed metrics for an options trade."""
+
     symbol: str
     expiration: str
     dte: int
@@ -39,6 +40,7 @@ class OptionMetrics:
 @dataclass
 class SpreadAnalysis:
     """Analysis results for an options spread."""
+
     symbol: str
     strategy: str
     expiration: str
@@ -113,15 +115,11 @@ def compute_probability_of_profit_spread(
     if contract_type.upper() in ("PUT", "P"):
         breakeven = short_strike - credit
         # Need price to stay above breakeven
-        return compute_probability_otm(
-            underlying_price, breakeven, dte, iv, "PUT"
-        )
+        return compute_probability_otm(underlying_price, breakeven, dte, iv, "PUT")
     else:
         breakeven = short_strike + credit
         # Need price to stay below breakeven
-        return compute_probability_otm(
-            underlying_price, breakeven, dte, iv, "CALL"
-        )
+        return compute_probability_otm(underlying_price, breakeven, dte, iv, "CALL")
 
 
 def compute_probability_of_profit_condor(
@@ -191,10 +189,16 @@ def analyze_credit_spread(
     # Score: weighted combination of probability, credit quality, and theta
     score = _score_spread(pop, credit_pct, risk_reward, short_option, long_option)
 
-    strategy = "bull_put_spread" if contract_type.upper() in ("PUT", "P") else "bear_call_spread"
+    strategy = (
+        "bull_put_spread"
+        if contract_type.upper() in ("PUT", "P")
+        else "bear_call_spread"
+    )
 
     return SpreadAnalysis(
-        symbol=short_option.get("symbol", "").split(" ")[0] if short_option.get("symbol") else "",
+        symbol=short_option.get("symbol", "").split(" ")[0]
+        if short_option.get("symbol")
+        else "",
         strategy=strategy,
         expiration=short_option.get("expiration", ""),
         dte=dte,
@@ -211,7 +215,8 @@ def analyze_credit_spread(
         net_delta=round(long_option["delta"] - short_option["delta"], 4),
         net_theta=round(long_option["theta"] - short_option["theta"], 4),
         net_gamma=round(
-            float(long_option.get("gamma", 0.0)) - float(short_option.get("gamma", 0.0)),
+            float(long_option.get("gamma", 0.0))
+            - float(short_option.get("gamma", 0.0)),
             4,
         ),
         net_vega=round(long_option["vega"] - short_option["vega"], 4),
@@ -234,7 +239,9 @@ def analyze_iron_condor(
     put_width = abs(put_short["strike"] - put_long["strike"])
     call_width = abs(call_long["strike"] - call_short["strike"])
     max_width = max(put_width, call_width)
-    max_loss = round(max(max_width - total_credit, 0.0), 2) if total_credit > 0 else max_width
+    max_loss = (
+        round(max(max_width - total_credit, 0.0), 2) if total_credit > 0 else max_width
+    )
 
     if max_loss > 0:
         risk_reward = round(total_credit / max_loss, 3)
@@ -259,10 +266,18 @@ def analyze_iron_condor(
     ev = round(pop * total_credit * 100 - (1 - pop) * max_loss * 100, 2)
 
     net_delta = round(
-        -put_short["delta"] + put_long["delta"] - call_short["delta"] + call_long["delta"], 4
+        -put_short["delta"]
+        + put_long["delta"]
+        - call_short["delta"]
+        + call_long["delta"],
+        4,
     )
     net_theta = round(
-        -put_short["theta"] + put_long["theta"] - call_short["theta"] + call_long["theta"], 4
+        -put_short["theta"]
+        + put_long["theta"]
+        - call_short["theta"]
+        + call_long["theta"],
+        4,
     )
     net_gamma = round(
         -float(put_short.get("gamma", 0.0))
@@ -272,7 +287,8 @@ def analyze_iron_condor(
         4,
     )
     net_vega = round(
-        -put_short["vega"] + put_long["vega"] - call_short["vega"] + call_long["vega"], 4
+        -put_short["vega"] + put_long["vega"] - call_short["vega"] + call_long["vega"],
+        4,
     )
 
     score = _score_condor(pop, credit_pct, risk_reward, net_theta, dte)
@@ -347,6 +363,7 @@ def find_spread_wing(
 
 
 # ── Scoring ──────────────────────────────────────────────────────────
+
 
 def _score_spread(
     pop: float,

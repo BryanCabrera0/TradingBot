@@ -1,5 +1,5 @@
-import unittest
 import tempfile
+import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -44,7 +44,9 @@ class RegimeDetectorTests(unittest.TestCase):
             }
         )
         self.assertEqual(state.regime, BULL_TREND)
-        self.assertGreaterEqual(state.recommended_strategy_weights["credit_spreads"], 1.3)
+        self.assertGreaterEqual(
+            state.recommended_strategy_weights["credit_spreads"], 1.3
+        )
 
     def test_detects_high_vol_chop(self) -> None:
         state = self.detector.detect_from_inputs(
@@ -98,7 +100,11 @@ class RegimeDetectorTests(unittest.TestCase):
 
     def test_collect_inputs_estimates_missing_vix_curve_from_chain(self) -> None:
         get_quote = mock.Mock(
-            side_effect=lambda symbol: {"quote": {"lastPrice": 18.0}} if symbol in {"$VIX", "^VIX", "VIX"} else {}
+            side_effect=lambda symbol: (
+                {"quote": {"lastPrice": 18.0}}
+                if symbol in {"$VIX", "^VIX", "VIX"}
+                else {}
+            )
         )
         option_chain = {
             "callExpDateMap": {
@@ -113,7 +119,9 @@ class RegimeDetectorTests(unittest.TestCase):
             },
         }
         detector = MarketRegimeDetector(
-            get_price_history=mock.Mock(return_value=[{"close": 400.0 + i} for i in range(260)]),
+            get_price_history=mock.Mock(
+                return_value=[{"close": 400.0 + i} for i in range(260)]
+            ),
             get_quote=get_quote,
             get_option_chain=mock.Mock(return_value=option_chain),
         )
@@ -129,7 +137,9 @@ class RegimeDetectorTests(unittest.TestCase):
     def test_detect_uses_cache_within_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             history = Path(tmp_dir) / "regime_history.json"
-            get_price_history = mock.Mock(return_value=[{"close": 400.0 + i * 0.2} for i in range(300)])
+            get_price_history = mock.Mock(
+                return_value=[{"close": 400.0 + i * 0.2} for i in range(300)]
+            )
             get_quote = mock.Mock(return_value={"quote": {"lastPrice": 18.0}})
             get_chain = mock.Mock(return_value={"calls": {}, "puts": {}})
             detector = MarketRegimeDetector(
@@ -154,13 +164,30 @@ class RegimeDetectorTests(unittest.TestCase):
                 history,
                 {
                     "entries": [
-                        {"timestamp": (base_ts).isoformat().replace("+00:00", "Z"), "regime": "BULL_TREND", "confidence": 0.6, "sub_signals": {}},
-                        {"timestamp": (base_ts).isoformat().replace("+00:00", "Z"), "regime": "BULL_TREND", "confidence": 0.6, "sub_signals": {}},
-                        {"timestamp": (base_ts).isoformat().replace("+00:00", "Z"), "regime": "BULL_TREND", "confidence": 0.6, "sub_signals": {}},
+                        {
+                            "timestamp": (base_ts).isoformat().replace("+00:00", "Z"),
+                            "regime": "BULL_TREND",
+                            "confidence": 0.6,
+                            "sub_signals": {},
+                        },
+                        {
+                            "timestamp": (base_ts).isoformat().replace("+00:00", "Z"),
+                            "regime": "BULL_TREND",
+                            "confidence": 0.6,
+                            "sub_signals": {},
+                        },
+                        {
+                            "timestamp": (base_ts).isoformat().replace("+00:00", "Z"),
+                            "regime": "BULL_TREND",
+                            "confidence": 0.6,
+                            "sub_signals": {},
+                        },
                     ]
                 },
             )
-            detector = MarketRegimeDetector(config={"cache_seconds": 0, "history_file": str(history)})
+            detector = MarketRegimeDetector(
+                config={"cache_seconds": 0, "history_file": str(history)}
+            )
             state = detector.detect_from_inputs(
                 {
                     "vix_level": 16.0,

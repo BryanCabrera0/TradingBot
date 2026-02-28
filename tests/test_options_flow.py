@@ -3,18 +3,44 @@ import unittest
 from bot.options_flow import OptionsFlowAnalyzer
 
 
-def _chain(call_vol: int = 200, put_vol: int = 400, call_oi: int = 300, put_oi: int = 500) -> dict:
+def _chain(
+    call_vol: int = 200, put_vol: int = 400, call_oi: int = 300, put_oi: int = 500
+) -> dict:
     return {
         "calls": {
             "2026-03-20": [
-                {"volume": call_vol, "open_interest": call_oi, "iv": 24.0, "delta": 0.25, "strike": 105.0},
-                {"volume": call_vol // 2, "open_interest": call_oi, "iv": 23.0, "delta": 0.15, "strike": 110.0},
+                {
+                    "volume": call_vol,
+                    "open_interest": call_oi,
+                    "iv": 24.0,
+                    "delta": 0.25,
+                    "strike": 105.0,
+                },
+                {
+                    "volume": call_vol // 2,
+                    "open_interest": call_oi,
+                    "iv": 23.0,
+                    "delta": 0.15,
+                    "strike": 110.0,
+                },
             ]
         },
         "puts": {
             "2026-03-20": [
-                {"volume": put_vol, "open_interest": put_oi, "iv": 27.0, "delta": -0.25, "strike": 95.0},
-                {"volume": put_vol // 2, "open_interest": put_oi, "iv": 26.0, "delta": -0.15, "strike": 90.0},
+                {
+                    "volume": put_vol,
+                    "open_interest": put_oi,
+                    "iv": 27.0,
+                    "delta": -0.25,
+                    "strike": 95.0,
+                },
+                {
+                    "volume": put_vol // 2,
+                    "open_interest": put_oi,
+                    "iv": 26.0,
+                    "delta": -0.15,
+                    "strike": 90.0,
+                },
             ]
         },
     }
@@ -36,7 +62,9 @@ class OptionsFlowTests(unittest.TestCase):
         analyzer = OptionsFlowAnalyzer(unusual_volume_multiple=5.0)
         previous = _chain(call_vol=100, put_vol=100, call_oi=200, put_oi=200)
         current = _chain(call_vol=100, put_vol=100, call_oi=500, put_oi=500)
-        context = analyzer.analyze(symbol="IWM", chain_data=current, previous_chain_data=previous)
+        context = analyzer.analyze(
+            symbol="IWM", chain_data=current, previous_chain_data=previous
+        )
         self.assertGreater(context.open_interest_change, 0.0)
 
     def test_to_dict_contains_required_fields(self) -> None:
@@ -50,4 +78,3 @@ class OptionsFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

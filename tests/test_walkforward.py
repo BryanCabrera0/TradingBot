@@ -54,7 +54,9 @@ class WalkForwardTests(unittest.TestCase):
                 return_value=[SimpleNamespace(name="credit_spreads")]
             )
 
-            def eval_side_effect(*, strategy_name: str, params: dict, start: str, end: str) -> dict:
+            def eval_side_effect(
+                *, strategy_name: str, params: dict, start: str, end: str
+            ) -> dict:
                 bias = 0.02 if float(params.get("short_delta", 0.0)) == 0.25 else 0.01
                 return {
                     "total_return": bias,
@@ -64,9 +66,13 @@ class WalkForwardTests(unittest.TestCase):
                     "closed_trades": 12,
                 }
 
-            backtester._walkforward_eval_window = mock.Mock(side_effect=eval_side_effect)
+            backtester._walkforward_eval_window = mock.Mock(
+                side_effect=eval_side_effect
+            )
 
-            result = backtester.run_walkforward(train_days=60, test_days=20, step_days=20)
+            result = backtester.run_walkforward(
+                train_days=60, test_days=20, step_days=20
+            )
 
             self.assertIn("strategies", result)
             self.assertIn("credit_spreads", result["strategies"])

@@ -7,6 +7,7 @@ Run this module directly to complete the initial browser-based auth:
 from pathlib import Path
 
 import schwab
+
 from bot.config import load_config
 from bot.file_security import tighten_file_permissions, validate_sensitive_file
 

@@ -41,7 +41,9 @@ class CreditSpreadStrategy(BaseStrategy):
         calls = chain_data.get("calls", {})
         puts = chain_data.get("puts", {})
         avg_iv = self._average_chain_iv(calls, puts)
-        iv_rank = self.iv_history.update_and_rank(symbol, avg_iv) if avg_iv > 0 else 50.0
+        iv_rank = (
+            self.iv_history.update_and_rank(symbol, avg_iv) if avg_iv > 0 else 50.0
+        )
         put_call_skew = self._put_call_skew_pct(calls, puts, underlying_price)
 
         min_dte, max_dte = base_min_dte, base_max_dte
@@ -178,7 +180,9 @@ class CreditSpreadStrategy(BaseStrategy):
             analysis.score = min(100.0, analysis.score + 15.0)
         flow_bias = str(flow_context.get("directional_bias", "neutral")).lower()
         unusual = bool(flow_context.get("unusual_activity_flag", False))
-        inst_dir = str(flow_context.get("institutional_flow_direction", "neutral")).lower()
+        inst_dir = str(
+            flow_context.get("institutional_flow_direction", "neutral")
+        ).lower()
         if flow_bias == "bearish":
             analysis.score = max(0.0, analysis.score - 15.0)
         if unusual and inst_dir in {"bearish", "down"}:
@@ -193,7 +197,12 @@ class CreditSpreadStrategy(BaseStrategy):
             is_call_side=False,
         )
         analysis.score = round(
-            max(0.0, min(100.0, analysis.score + float(div_risk.get("score_adjustment", 0.0)))),
+            max(
+                0.0,
+                min(
+                    100.0, analysis.score + float(div_risk.get("score_adjustment", 0.0))
+                ),
+            ),
             1,
         )
 
@@ -250,11 +259,15 @@ class CreditSpreadStrategy(BaseStrategy):
         short_call = find_option_by_delta(calls, target_delta)
         if not short_call:
             return signals
-        long_call = find_spread_wing(calls, short_call["strike"], spread_width, "higher")
+        long_call = find_spread_wing(
+            calls, short_call["strike"], spread_width, "higher"
+        )
         if not long_call:
             return signals
 
-        analysis = analyze_credit_spread(underlying_price, short_call, long_call, "CALL")
+        analysis = analyze_credit_spread(
+            underlying_price, short_call, long_call, "CALL"
+        )
         analysis.symbol = symbol
 
         if analysis.credit_pct_of_width < min_credit_pct:
@@ -267,7 +280,9 @@ class CreditSpreadStrategy(BaseStrategy):
             analysis.score = min(100.0, analysis.score + 15.0)
         flow_bias = str(flow_context.get("directional_bias", "neutral")).lower()
         unusual = bool(flow_context.get("unusual_activity_flag", False))
-        inst_dir = str(flow_context.get("institutional_flow_direction", "neutral")).lower()
+        inst_dir = str(
+            flow_context.get("institutional_flow_direction", "neutral")
+        ).lower()
         if flow_bias == "bullish":
             analysis.score = max(0.0, analysis.score - 15.0)
         if unusual and inst_dir in {"bullish", "up"}:
@@ -282,7 +297,12 @@ class CreditSpreadStrategy(BaseStrategy):
             is_call_side=True,
         )
         analysis.score = round(
-            max(0.0, min(100.0, analysis.score + float(div_risk.get("score_adjustment", 0.0)))),
+            max(
+                0.0,
+                min(
+                    100.0, analysis.score + float(div_risk.get("score_adjustment", 0.0))
+                ),
+            ),
             1,
         )
 
@@ -348,7 +368,11 @@ class CreditSpreadStrategy(BaseStrategy):
                 continue
 
             # Partial-profit scaling before full target.
-            if quantity >= 2 and not pos.get("partial_closed", False) and pnl_pct >= 0.40:
+            if (
+                quantity >= 2
+                and not pos.get("partial_closed", False)
+                and pnl_pct >= 0.40
+            ):
                 signals.append(
                     TradeSignal(
                         action="close",
@@ -361,7 +385,12 @@ class CreditSpreadStrategy(BaseStrategy):
                 )
                 continue
 
-            max_seen = float(details.get("max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)) or pnl_pct)
+            max_seen = float(
+                details.get(
+                    "max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)
+                )
+                or pnl_pct
+            )
             max_seen = max(max_seen, pnl_pct)
             details["max_profit_pct_seen"] = max_seen
             pos["max_profit_pct_seen"] = max_seen
@@ -390,7 +419,11 @@ class CreditSpreadStrategy(BaseStrategy):
 
                 if not exit_reason and pnl_pct >= profit_target_pct:
                     exit_reason = f"Profit target reached ({pnl_pct:.1%})"
-                elif not exit_reason and pnl < 0 and abs(pnl) >= entry_credit * stop_loss_pct:
+                elif (
+                    not exit_reason
+                    and pnl < 0
+                    and abs(pnl) >= entry_credit * stop_loss_pct
+                ):
                     exit_reason = f"Stop loss triggered (loss {abs(pnl):.2f})"
 
             if not exit_reason and dte_remaining <= 5:
@@ -421,7 +454,9 @@ class CreditSpreadStrategy(BaseStrategy):
         return 0.50
 
     @staticmethod
-    def _trailing_lock_pct(*, max_seen: float, activation: float, floor: float) -> float:
+    def _trailing_lock_pct(
+        *, max_seen: float, activation: float, floor: float
+    ) -> float:
         gain_above_activation = max(0.0, max_seen - activation)
         lock = floor + (gain_above_activation * 0.50)
         lock = min(max_seen - 0.01, lock)
@@ -429,7 +464,11 @@ class CreditSpreadStrategy(BaseStrategy):
 
     @staticmethod
     def _stop_loss_for_position(position: dict, base_stop_loss_pct: float) -> float:
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
         override = safe_float(details.get("stop_loss_override_multiple"), 0.0)
         regime = str(position.get("regime", details.get("regime", ""))).upper()
         iv_rank = float(position.get("iv_rank", details.get("iv_rank", 50.0)) or 50.0)
@@ -443,7 +482,9 @@ class CreditSpreadStrategy(BaseStrategy):
         return max(1.0, result)
 
     @staticmethod
-    def _is_short_strike_tested(position: dict, underlying_price: float, details: dict) -> bool:
+    def _is_short_strike_tested(
+        position: dict, underlying_price: float, details: dict
+    ) -> bool:
         if underlying_price <= 0:
             return False
         strategy = str(position.get("strategy", ""))

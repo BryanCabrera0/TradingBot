@@ -24,7 +24,9 @@ def make_live_config() -> BotConfig:
 
 class LiveReadinessTests(unittest.TestCase):
     def test_market_hours_convert_to_eastern_time(self) -> None:
-        pacific_time = datetime(2026, 1, 7, 7, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+        pacific_time = datetime(
+            2026, 1, 7, 7, 0, tzinfo=ZoneInfo("America/Los_Angeles")
+        )
         self.assertTrue(TradingBot.is_market_open(pacific_time))
 
         pacific_after_close = datetime(
@@ -53,7 +55,10 @@ class LiveReadinessTests(unittest.TestCase):
         bot.connect = mock.Mock()
         bot.schwab.get_quote = mock.Mock(return_value={"quote": {"lastPrice": 100.0}})
         bot._get_chain_data = mock.Mock(
-            return_value=({"underlying_price": 100.0, "calls": {"2026-03-20": []}}, 100.0)
+            return_value=(
+                {"underlying_price": 100.0, "calls": {"2026-03-20": []}},
+                100.0,
+            )
         )
 
         bot.validate_live_readiness()
@@ -108,7 +113,9 @@ class LiveReadinessTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             bot.validate_live_readiness()
 
-    def test_live_configuration_readiness_passes_without_token_requirement(self) -> None:
+    def test_live_configuration_readiness_passes_without_token_requirement(
+        self,
+    ) -> None:
         cfg = make_live_config()
         cfg.schwab.token_path = "/tmp/nonexistent-token.json"
         cfg.credit_spreads.enabled = True

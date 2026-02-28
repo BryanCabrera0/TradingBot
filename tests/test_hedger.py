@@ -2,25 +2,37 @@ import unittest
 from unittest import mock
 
 from bot.config import BotConfig
-from bot.hedger import HedgeAction
-from bot.hedger import PortfolioHedger
+from bot.hedger import HedgeAction, PortfolioHedger
 from bot.orchestrator import TradingBot
 
 
 class HedgerTests(unittest.TestCase):
     def test_disabled_hedger_returns_no_actions(self) -> None:
         hedger = PortfolioHedger({"enabled": False})
-        actions = hedger.propose(account_value=100000, net_delta=80, sector_exposure={}, regime="normal")
+        actions = hedger.propose(
+            account_value=100000, net_delta=80, sector_exposure={}, regime="normal"
+        )
         self.assertEqual(actions, [])
 
     def test_delta_hedge_triggers(self) -> None:
-        hedger = PortfolioHedger({"enabled": True, "delta_hedge_trigger": 50, "max_hedge_cost_pct": 2.0})
-        actions = hedger.propose(account_value=100000, net_delta=90, sector_exposure={}, regime="normal")
+        hedger = PortfolioHedger(
+            {"enabled": True, "delta_hedge_trigger": 50, "max_hedge_cost_pct": 2.0}
+        )
+        actions = hedger.propose(
+            account_value=100000, net_delta=90, sector_exposure={}, regime="normal"
+        )
         self.assertTrue(any(action.symbol == "SPY" for action in actions))
 
     def test_tail_risk_hedge_when_low_vol(self) -> None:
-        hedger = PortfolioHedger({"enabled": True, "tail_risk_enabled": True, "max_hedge_cost_pct": 2.0})
-        actions = hedger.propose(account_value=100000, net_delta=0, sector_exposure={}, regime="LOW_VOL_GRIND")
+        hedger = PortfolioHedger(
+            {"enabled": True, "tail_risk_enabled": True, "max_hedge_cost_pct": 2.0}
+        )
+        actions = hedger.propose(
+            account_value=100000,
+            net_delta=0,
+            sector_exposure={},
+            regime="LOW_VOL_GRIND",
+        )
         self.assertTrue(any(action.symbol == "VIX" for action in actions))
 
     def test_sector_concentration_hedge(self) -> None:
@@ -35,7 +47,12 @@ class HedgerTests(unittest.TestCase):
 
     def test_max_hedge_cost_cap_applied(self) -> None:
         hedger = PortfolioHedger(
-            {"enabled": True, "tail_risk_enabled": True, "delta_hedge_trigger": 10, "max_hedge_cost_pct": 0.05}
+            {
+                "enabled": True,
+                "tail_risk_enabled": True,
+                "delta_hedge_trigger": 10,
+                "max_hedge_cost_pct": 0.05,
+            }
         )
         actions = hedger.propose(
             account_value=100000,
@@ -56,7 +73,9 @@ class HedgerTests(unittest.TestCase):
         cfg.hedging.auto_execute = True
         cfg.hedging.max_hedge_cost_pct = 2.0
         bot = TradingBot(cfg)
-        bot.risk_manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        bot.risk_manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
         bot.hedger = mock.Mock()
         bot.hedger.propose.return_value = [
             HedgeAction(
@@ -86,7 +105,9 @@ class HedgerTests(unittest.TestCase):
         cfg.news.enabled = False
         cfg.llm.enabled = False
         bot = TradingBot(cfg)
-        bot.risk_manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        bot.risk_manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
         bot._select_hedge_option = mock.Mock(
             return_value={
                 "expiration": "2026-04-17",
@@ -115,7 +136,9 @@ class HedgerTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
-        self.assertTrue(any(pos.get("strategy") == "hedge" for pos in bot.paper_trader.positions))
+        self.assertTrue(
+            any(pos.get("strategy") == "hedge" for pos in bot.paper_trader.positions)
+        )
 
 
 if __name__ == "__main__":

@@ -40,11 +40,18 @@ class StranglesStrategy(BaseStrategy):
         vol_surface = (market_context or {}).get("vol_surface", {})
         if isinstance(vol_surface, dict) and vol_surface:
             vol_of_vol = float(vol_surface.get("vol_of_vol", 0.0) or 0.0)
-            max_vov = float(self.config.get("max_vol_of_vol", self.config.get("max_vol_of_vol_for_condors", 0.20)))
+            max_vov = float(
+                self.config.get(
+                    "max_vol_of_vol",
+                    self.config.get("max_vol_of_vol_for_condors", 0.20),
+                )
+            )
             if vol_of_vol > max_vov:
                 return []
 
-        account_balance = float((market_context or {}).get("account_balance", 0.0) or 0.0)
+        account_balance = float(
+            (market_context or {}).get("account_balance", 0.0) or 0.0
+        )
         min_account_balance = float(self.config.get("min_account_balance", 25_000.0))
         if account_balance > 0 and account_balance < min_account_balance:
             return []
@@ -57,7 +64,10 @@ class StranglesStrategy(BaseStrategy):
         min_dte = int(self.config.get("min_dte", 20))
         max_dte = int(self.config.get("max_dte", 45))
         target_delta = float(self.config.get("short_delta", 0.16))
-        allow_straddles = {str(item).upper() for item in self.config.get("allow_straddles_on", ["SPY", "QQQ", "IWM"])}
+        allow_straddles = {
+            str(item).upper()
+            for item in self.config.get("allow_straddles_on", ["SPY", "QQQ", "IWM"])
+        }
 
         signals: list[TradeSignal] = []
         for exp in sorted(set(calls.keys()) & set(puts.keys())):
@@ -73,14 +83,27 @@ class StranglesStrategy(BaseStrategy):
             short_put = find_option_by_delta(exp_puts, target_delta)
             if not short_call or not short_put:
                 continue
-            if float(short_put.get("strike", 0.0)) >= float(short_call.get("strike", 0.0)):
+            if float(short_put.get("strike", 0.0)) >= float(
+                short_call.get("strike", 0.0)
+            ):
                 continue
 
-            credit = float(short_call.get("mid", 0.0) or 0.0) + float(short_put.get("mid", 0.0) or 0.0)
+            credit = float(short_call.get("mid", 0.0) or 0.0) + float(
+                short_put.get("mid", 0.0) or 0.0
+            )
             if credit <= 0:
                 continue
             max_loss_proxy = max(underlying_price * 0.20 - credit, credit)
-            pop = max(0.0, min(1.0, 1.0 - (abs(float(short_put.get("delta", 0.0))) + abs(float(short_call.get("delta", 0.0)))))
+            pop = max(
+                0.0,
+                min(
+                    1.0,
+                    1.0
+                    - (
+                        abs(float(short_put.get("delta", 0.0)))
+                        + abs(float(short_call.get("delta", 0.0)))
+                    ),
+                ),
             )
 
             analysis = SpreadAnalysis(
@@ -97,19 +120,23 @@ class StranglesStrategy(BaseStrategy):
                 max_profit=round(credit, 4),
                 probability_of_profit=round(pop, 4),
                 net_delta=round(
-                    -float(short_put.get("delta", 0.0) or 0.0) - float(short_call.get("delta", 0.0) or 0.0),
+                    -float(short_put.get("delta", 0.0) or 0.0)
+                    - float(short_call.get("delta", 0.0) or 0.0),
                     4,
                 ),
                 net_theta=round(
-                    -float(short_put.get("theta", 0.0) or 0.0) - float(short_call.get("theta", 0.0) or 0.0),
+                    -float(short_put.get("theta", 0.0) or 0.0)
+                    - float(short_call.get("theta", 0.0) or 0.0),
                     4,
                 ),
                 net_gamma=round(
-                    -float(short_put.get("gamma", 0.0) or 0.0) - float(short_call.get("gamma", 0.0) or 0.0),
+                    -float(short_put.get("gamma", 0.0) or 0.0)
+                    - float(short_call.get("gamma", 0.0) or 0.0),
                     4,
                 ),
                 net_vega=round(
-                    -float(short_put.get("vega", 0.0) or 0.0) - float(short_call.get("vega", 0.0) or 0.0),
+                    -float(short_put.get("vega", 0.0) or 0.0)
+                    - float(short_call.get("vega", 0.0) or 0.0),
                     4,
                 ),
                 score=round(min(100.0, pop * 100.0 + min(credit / 2.0, 15.0)), 1),
@@ -126,7 +153,11 @@ class StranglesStrategy(BaseStrategy):
 
             if symbol.upper() in allow_straddles:
                 atm_strike = min(
-                    [float(item.get("strike", 0.0) or 0.0) for item in exp_calls if float(item.get("strike", 0.0) or 0.0) > 0],
+                    [
+                        float(item.get("strike", 0.0) or 0.0)
+                        for item in exp_calls
+                        if float(item.get("strike", 0.0) or 0.0) > 0
+                    ],
                     key=lambda strike: abs(strike - underlying_price),
                     default=0.0,
                 )
@@ -134,7 +165,9 @@ class StranglesStrategy(BaseStrategy):
                     atm_call = find_option_by_strike(exp_calls, atm_strike)
                     atm_put = find_option_by_strike(exp_puts, atm_strike)
                     if atm_call and atm_put:
-                        straddle_credit = float(atm_call.get("mid", 0.0) or 0.0) + float(atm_put.get("mid", 0.0) or 0.0)
+                        straddle_credit = float(
+                            atm_call.get("mid", 0.0) or 0.0
+                        ) + float(atm_put.get("mid", 0.0) or 0.0)
                         if straddle_credit > 0:
                             straddle_analysis = SpreadAnalysis(
                                 symbol=symbol,
@@ -146,10 +179,18 @@ class StranglesStrategy(BaseStrategy):
                                 put_short_strike=atm_strike,
                                 call_short_strike=atm_strike,
                                 credit=round(straddle_credit, 4),
-                                max_loss=round(max(underlying_price * 0.25 - straddle_credit, straddle_credit), 4),
+                                max_loss=round(
+                                    max(
+                                        underlying_price * 0.25 - straddle_credit,
+                                        straddle_credit,
+                                    ),
+                                    4,
+                                ),
                                 max_profit=round(straddle_credit, 4),
                                 probability_of_profit=0.50,
-                                score=round(min(100.0, 55.0 + min(straddle_credit, 10.0)), 1),
+                                score=round(
+                                    min(100.0, 55.0 + min(straddle_credit, 10.0)), 1
+                                ),
                             )
                             signals.append(
                                 TradeSignal(
@@ -161,7 +202,9 @@ class StranglesStrategy(BaseStrategy):
                                 )
                             )
 
-        signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
+        signals.sort(
+            key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True
+        )
         max_signals = int(
             (market_context or {}).get(
                 "max_signals_per_symbol_per_strategy",
@@ -188,8 +231,12 @@ class StranglesStrategy(BaseStrategy):
             dte_remaining = int(pos.get("dte_remaining", 999) or 999)
             if entry_credit <= 0:
                 continue
-            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
-            stop_override = float(details.get("stop_loss_override_multiple", 0.0) or 0.0)
+            details = (
+                pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            )
+            stop_override = float(
+                details.get("stop_loss_override_multiple", 0.0) or 0.0
+            )
             effective_stop_multiple = stop_multiple
             if stop_override > 0:
                 effective_stop_multiple = min(effective_stop_multiple, stop_override)
@@ -199,7 +246,10 @@ class StranglesStrategy(BaseStrategy):
                 if adaptive_targets
                 else float(self.config.get("profit_target_pct", 0.50))
             )
-            trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
+            trailing_high = float(
+                pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0))
+                or 0.0
+            )
             if trailing_enabled and pnl_pct >= trail_activation:
                 trailing_high = max(trailing_high, pnl_pct)
                 pos["trailing_stop_high"] = trailing_high
@@ -211,7 +261,11 @@ class StranglesStrategy(BaseStrategy):
                 and trailing_high > 0
                 and pnl_pct <= max(0.0, trailing_high - trail_floor)
             )
-            if pnl_pct >= target or trailing_triggered or current_value >= entry_credit * effective_stop_multiple:
+            if (
+                pnl_pct >= target
+                or trailing_triggered
+                or current_value >= entry_credit * effective_stop_multiple
+            ):
                 if trailing_triggered:
                     reason = "Trailing stop"
                 elif pnl_pct >= target:

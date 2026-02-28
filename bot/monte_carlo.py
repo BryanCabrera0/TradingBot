@@ -97,16 +97,31 @@ class MonteCarloRiskEngine:
             high_risk=bool(var99_pct > self.var_limit_pct),
         )
 
-    def _simulate_position_pnl(self, position: dict, horizon_days: int, sims: int) -> np.ndarray:
-        details = position.get("details", {}) if isinstance(position.get("details"), dict) else {}
+    def _simulate_position_pnl(
+        self, position: dict, horizon_days: int, sims: int
+    ) -> np.ndarray:
+        details = (
+            position.get("details", {})
+            if isinstance(position.get("details"), dict)
+            else {}
+        )
         quantity = max(1, safe_int(position.get("quantity"), 1))
-        delta = safe_float(details.get("net_delta", position.get("net_delta", 0.0)), 0.0)
-        gamma = safe_float(details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0)
-        theta = safe_float(details.get("net_theta", position.get("net_theta", 0.0)), 0.0)
+        delta = safe_float(
+            details.get("net_delta", position.get("net_delta", 0.0)), 0.0
+        )
+        gamma = safe_float(
+            details.get("net_gamma", position.get("net_gamma", 0.0)), 0.0
+        )
+        theta = safe_float(
+            details.get("net_theta", position.get("net_theta", 0.0)), 0.0
+        )
         vega = safe_float(details.get("net_vega", position.get("net_vega", 0.0)), 0.0)
         rho = safe_float(details.get("net_rho", position.get("net_rho", 0.0)), 0.0)
         underlying = max(0.01, safe_float(position.get("underlying_price"), 100.0))
-        iv_raw = safe_float(details.get("current_iv", details.get("entry_iv", details.get("iv", 25.0))), 25.0)
+        iv_raw = safe_float(
+            details.get("current_iv", details.get("entry_iv", details.get("iv", 25.0))),
+            25.0,
+        )
         iv = iv_raw / 100.0 if iv_raw > 2.0 else iv_raw
         iv = max(0.05, min(2.0, iv))
         vol_of_vol = safe_float(details.get("vol_of_vol"), 0.20)

@@ -65,7 +65,11 @@ class LiveTradeLedgerTests(unittest.TestCase):
                 quantity=2,
                 max_loss=4.0,
                 entry_credit=1.4,
-                details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95},
+                details={
+                    "expiration": "2026-03-20",
+                    "short_strike": 100,
+                    "long_strike": 95,
+                },
                 entry_order_id="entry-partial",
             )
 
@@ -119,7 +123,11 @@ class LiveTradeLedgerTests(unittest.TestCase):
                 quantity=3,
                 max_loss=4.0,
                 entry_credit=1.2,
-                details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95},
+                details={
+                    "expiration": "2026-03-20",
+                    "short_strike": 100,
+                    "long_strike": 95,
+                },
                 entry_order_id="",
                 entry_order_status="FILLED",
                 opened_at="2026-02-23T09:45:00-05:00",

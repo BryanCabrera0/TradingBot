@@ -12,9 +12,17 @@ from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-import schwab
-from schwab.orders.generic import OrderBuilder
-from schwab.orders.options import (
+import schwab  # type: ignore[import-untyped]
+from schwab.orders.common import (  # type: ignore[import-untyped]
+    ComplexOrderStrategyType,
+    Duration,
+    OptionInstruction,
+    OrderStrategyType,
+    OrderType,
+    Session,
+)
+from schwab.orders.generic import OrderBuilder  # type: ignore[import-untyped]
+from schwab.orders.options import (  # type: ignore[import-untyped]
     bear_call_vertical_close,
     bear_call_vertical_open,
     bull_put_vertical_close,
@@ -23,14 +31,6 @@ from schwab.orders.options import (
     option_buy_to_close_market,
     option_sell_to_open_limit,
     option_sell_to_open_market,
-)
-from schwab.orders.common import (
-    ComplexOrderStrategyType,
-    Duration,
-    OptionInstruction,
-    OrderStrategyType,
-    OrderType,
-    Session,
 )
 
 from bot.config import SchwabConfig
@@ -94,9 +94,7 @@ class SchwabClient:
             logger.info("Authenticated via existing token file.")
 
         except FileNotFoundError:
-            logger.info(
-                "No token file found. You need to run the initial auth flow."
-            )
+            logger.info("No token file found. You need to run the initial auth flow.")
             logger.info(
                 "Run: python3 -m bot.auth to complete browser-based authentication."
             )
@@ -190,7 +188,9 @@ class SchwabClient:
                 if pending:
                     for task in pending:
                         task.cancel()
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
                 loop.close()
 
             self._stream_loop_thread = threading.Thread(
@@ -227,11 +227,16 @@ class SchwabClient:
             return future.result(timeout=max(0.1, float(timeout_seconds)))
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
-            raise RuntimeError("Timed out waiting for Schwab streaming operation.") from exc
+            raise RuntimeError(
+                "Timed out waiting for Schwab streaming operation."
+            ) from exc
 
     def _run_in_stream_loop(self, func, *args, timeout_seconds: float = 15.0, **kwargs):
         """Run a synchronous callable on the dedicated stream loop thread."""
-        if self._stream_loop_thread and threading.current_thread() is self._stream_loop_thread:
+        if (
+            self._stream_loop_thread
+            and threading.current_thread() is self._stream_loop_thread
+        ):
             return func(*args, **kwargs)
 
         loop = self._ensure_stream_loop()
@@ -248,7 +253,9 @@ class SchwabClient:
             return result_future.result(timeout=max(0.1, float(timeout_seconds)))
         except concurrent.futures.TimeoutError as exc:
             result_future.cancel()
-            raise RuntimeError("Timed out waiting for Schwab stream loop callback.") from exc
+            raise RuntimeError(
+                "Timed out waiting for Schwab stream loop callback."
+            ) from exc
 
     async def _stream_message_loop(self) -> None:
         """Continuously process stream messages while connected."""
@@ -295,7 +302,9 @@ class SchwabClient:
         except Exception:
             pass
 
-    def _run_stream_callable(self, func, *args, timeout_seconds: float = 15.0, **kwargs):
+    def _run_stream_callable(
+        self, func, *args, timeout_seconds: float = 15.0, **kwargs
+    ):
         result = self._run_in_stream_loop(
             func,
             *args,
@@ -339,7 +348,9 @@ class SchwabClient:
             self._stream_client = None
             self._stop_stream_message_loop()
             self._stop_stream_loop()
-            logger.warning("Schwab streaming unavailable, using polling fallback: %s", exc)
+            logger.warning(
+                "Schwab streaming unavailable, using polling fallback: %s", exc
+            )
             return False
 
     def stop_streaming(self) -> None:
@@ -369,7 +380,9 @@ class SchwabClient:
         if not self._stream_connected and not self.start_streaming():
             return False
         try:  # pragma: no cover - runtime integration
-            add_handler = getattr(self._stream_client, "add_level_one_equity_handler", None)
+            add_handler = getattr(
+                self._stream_client, "add_level_one_equity_handler", None
+            )
             subscribe = getattr(self._stream_client, "level_one_equity_subs", None)
             if callable(add_handler):
                 self._run_stream_callable(add_handler, handler)
@@ -393,12 +406,16 @@ class SchwabClient:
         if not self._stream_connected and not self.start_streaming():
             return False
         try:  # pragma: no cover - runtime integration
-            add_handler = getattr(self._stream_client, "add_level_one_option_handler", None)
+            add_handler = getattr(
+                self._stream_client, "add_level_one_option_handler", None
+            )
             subscribe = getattr(self._stream_client, "level_one_option_subs", None)
             if callable(add_handler):
                 self._run_stream_callable(add_handler, handler)
             if callable(subscribe):
-                self._run_stream_callable(subscribe, option_symbols, timeout_seconds=20.0)
+                self._run_stream_callable(
+                    subscribe, option_symbols, timeout_seconds=20.0
+                )
             return True
         except Exception as exc:
             self._stream_last_error = str(exc)
@@ -411,7 +428,9 @@ class SchwabClient:
         if not self._stream_connected and not self.start_streaming():
             return False
         try:  # pragma: no cover - runtime integration
-            add_handler = getattr(self._stream_client, "add_account_activity_handler", None)
+            add_handler = getattr(
+                self._stream_client, "add_account_activity_handler", None
+            )
             subscribe = getattr(self._stream_client, "account_activity_sub", None)
             if callable(add_handler):
                 self._run_stream_callable(add_handler, handler)
@@ -463,13 +482,16 @@ class SchwabClient:
                     ) from exc
 
                 if status_code == 400:
-                    logger.warning("Schwab API call failed with 400 Bad Request. Aborting retries for this symbol. (%s)", err_msg)
+                    logger.warning(
+                        "Schwab API call failed with 400 Bad Request. Aborting retries for this symbol. (%s)",
+                        err_msg,
+                    )
                     raise
 
                 if attempt >= retries:
                     raise
 
-                delay = delay_base * (2 ** attempt) + random.uniform(0.0, 1.0)
+                delay = delay_base * (2**attempt) + random.uniform(0.0, 1.0)
                 logger.warning(
                     "Schwab API call failed (%s) attempt %d/%d: %s. Retrying in %.2fs",
                     getattr(func, "__name__", "api_call"),
@@ -485,6 +507,7 @@ class SchwabClient:
 
     def _request_with_status(self, func, *args, **kwargs):
         """Execute request-like call and retry on failures until status is OK."""
+
         def _call():
             response = func(*args, **kwargs)
             response.raise_for_status()
@@ -513,9 +536,7 @@ class SchwabClient:
         account_hashes = self._fetch_account_hashes()
         if not account_hashes:
             if require_unique:
-                raise RuntimeError(
-                    "No linked Schwab accounts found for this token."
-                )
+                raise RuntimeError("No linked Schwab accounts found for this token.")
             return None
 
         if self.config.account_index >= 0:
@@ -558,7 +579,9 @@ class SchwabClient:
                 {
                     "name": str(getattr(account, "name", "")).strip(),
                     "hash": str(getattr(account, "hash", "")).strip(),
-                    "risk_profile": str(getattr(account, "risk_profile", "moderate")).strip(),
+                    "risk_profile": str(
+                        getattr(account, "risk_profile", "moderate")
+                    ).strip(),
                 }
             )
         return out
@@ -604,9 +627,7 @@ class SchwabClient:
     def get_positions(self) -> list:
         """Get all current positions."""
         account = self.get_account()
-        return (
-            account.get("securitiesAccount", {}).get("positions", [])
-        )
+        return account.get("securitiesAccount", {}).get("positions", [])
 
     # ── Market Data ───────────────────────────────────────────────────
 
@@ -650,7 +671,9 @@ class SchwabClient:
                 need_previous_close=True,
             )
         else:
-            raise RuntimeError("Schwab client does not expose a price-history endpoint.")
+            raise RuntimeError(
+                "Schwab client does not expose a price-history endpoint."
+            )
 
         payload = response.json()
         candles = payload.get("candles", [])
@@ -721,10 +744,12 @@ class SchwabClient:
             puts: {expiration_date: [option_dicts]}
         """
         underlying_price = safe_float(
-            chain_data.get("underlyingPrice", chain_data.get("underlying", {}).get("mark", 0))
+            chain_data.get(
+                "underlyingPrice", chain_data.get("underlying", {}).get("mark", 0)
+            )
         )
 
-        result = {
+        result: dict[str, Any] = {
             "underlying_price": underlying_price,
             "calls": {},
             "puts": {},
@@ -761,7 +786,9 @@ class SchwabClient:
     def place_order(self, order_spec) -> dict:
         """Place an order and return the response."""
         account_hash = self._require_account_hash()
-        resp = self._request_with_status(self.client.place_order, account_hash, order_spec)
+        resp = self._request_with_status(
+            self.client.place_order, account_hash, order_spec
+        )
         # Extract order ID from Location header
         order_id = None
         location = resp.headers.get("Location", "")
@@ -792,7 +819,7 @@ class SchwabClient:
 
         midpoint = max(0.01, float(midpoint_price))
         spread = max(0.01, float(spread_width))
-        last_result = {"status": "REJECTED"}
+        last_result: dict[str, Any] = {"status": "REJECTED"}
         last_price = midpoint
         total_timeout = (
             max(5, int(total_timeout_seconds))
@@ -816,7 +843,9 @@ class SchwabClient:
                 if timeout_from_steps is not None:
                     wait_timeout = min(timeout_from_steps, max(5, int(remaining_total)))
                 elif attempt_index < len(shifts):
-                    wait_timeout = min(max(5, int(step_timeout_seconds)), max(5, int(remaining_total)))
+                    wait_timeout = min(
+                        max(5, int(step_timeout_seconds)), max(5, int(remaining_total))
+                    )
                 else:
                     # Final attempt receives remaining time budget.
                     wait_timeout = max(5, int(remaining_total))
@@ -883,7 +912,9 @@ class SchwabClient:
                 return last_result
 
             if status in {"CANCELED", "REJECTED", "EXPIRED"}:
-                last_result.update({"status": status or "CANCELED", "order_id": order_id})
+                last_result.update(
+                    {"status": status or "CANCELED", "order_id": order_id}
+                )
                 continue
 
             try:
@@ -898,7 +929,7 @@ class SchwabClient:
         """Poll order status until terminal status or timeout."""
         timeout_seconds = max(5, int(timeout_seconds))
         start = time.time()
-        latest = {"status": "UNKNOWN"}
+        latest: dict[str, Any] = {"status": "UNKNOWN"}
 
         while (time.time() - start) < timeout_seconds:
             try:
@@ -1081,13 +1112,19 @@ class SchwabClient:
         price: Optional[float] = None,
     ):
         """Build a single-leg long-option open order (debit)."""
-        option_sym = _make_option_symbol(symbol, expiration, contract_type.upper(), strike)
+        option_sym = _make_option_symbol(
+            symbol, expiration, contract_type.upper(), strike
+        )
         order = (
             OrderBuilder()
             .set_order_strategy_type(OrderStrategyType.SINGLE)
-            .set_order_type(OrderType.MARKET if price is None or price <= 0 else OrderType.LIMIT)
+            .set_order_type(
+                OrderType.MARKET if price is None or price <= 0 else OrderType.LIMIT
+            )
             .set_quantity(max(1, int(quantity)))
-            .add_option_leg(OptionInstruction.BUY_TO_OPEN, option_sym, max(1, int(quantity)))
+            .add_option_leg(
+                OptionInstruction.BUY_TO_OPEN, option_sym, max(1, int(quantity))
+            )
         )
         if price is not None and price > 0:
             order.set_price(price)
@@ -1123,8 +1160,12 @@ class SchwabClient:
             .set_complex_order_strategy_type(ComplexOrderStrategyType.VERTICAL)
             .set_quantity(max(1, int(quantity)))
             .set_price(price)
-            .add_option_leg(OptionInstruction.BUY_TO_OPEN, long_sym, max(1, int(quantity)))
-            .add_option_leg(OptionInstruction.SELL_TO_OPEN, short_sym, max(1, int(quantity)))
+            .add_option_leg(
+                OptionInstruction.BUY_TO_OPEN, long_sym, max(1, int(quantity))
+            )
+            .add_option_leg(
+                OptionInstruction.SELL_TO_OPEN, short_sym, max(1, int(quantity))
+            )
         )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
@@ -1205,6 +1246,7 @@ class SchwabClient:
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+
 def _normalize_contract(contract: dict, strike: float, expiration_date: str) -> dict:
     """Normalize a raw options contract from the API."""
     bid = safe_float(contract.get("bid"))
@@ -1254,7 +1296,9 @@ def _make_option_symbol(
     expiration_key = expiration.split("T", 1)[0].split(":", 1)[0]
     expiration_date = datetime.strptime(expiration_key, "%Y-%m-%d").date()
     strike_text = f"{float(strike):.3f}".rstrip("0").rstrip(".")
-    return f"{underlying.upper()}_{expiration_date:%m%d%y}{put_call.upper()}{strike_text}"
+    return (
+        f"{underlying.upper()}_{expiration_date:%m%d%y}{put_call.upper()}{strike_text}"
+    )
 
 
 def _extract_account_hashes(raw_accounts: object) -> list[str]:

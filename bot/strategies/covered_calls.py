@@ -30,7 +30,7 @@ class CoveredCallStrategy(BaseStrategy):
         market_context: Optional[dict] = None,
     ) -> list[TradeSignal]:
         """Scan for covered call opportunities on stocks we own."""
-        signals = []
+        signals: list[TradeSignal] = []
         min_dte = int(self.config.get("min_dte", 20))
         max_dte = int(self.config.get("max_dte", 45))
         target_delta = float(self.config.get("short_delta", 0.30))
@@ -88,7 +88,9 @@ class CoveredCallStrategy(BaseStrategy):
                 net_theta=float(short_call["theta"]),
                 net_gamma=float(short_call.get("gamma", 0.0) or 0.0),
                 net_vega=float(short_call["vega"]),
-                score=self._score_covered_call(short_call, premium, annualized_roc, dte),
+                score=self._score_covered_call(
+                    short_call, premium, annualized_roc, dte
+                ),
             )
 
             div_risk = self.dividend_calendar.assess_trade_risk(
@@ -100,7 +102,13 @@ class CoveredCallStrategy(BaseStrategy):
                 is_call_side=True,
             )
             analysis.score = round(
-                max(0.0, min(100.0, analysis.score + float(div_risk.get("score_adjustment", 0.0)))),
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        analysis.score + float(div_risk.get("score_adjustment", 0.0)),
+                    ),
+                ),
                 1,
             )
 
@@ -142,7 +150,11 @@ class CoveredCallStrategy(BaseStrategy):
             pnl = entry_credit - current_value
             pnl_pct = (pnl / entry_credit) if entry_credit > 0 else 0.0
 
-            if quantity >= 2 and not pos.get("partial_closed", False) and pnl_pct >= 0.40:
+            if (
+                quantity >= 2
+                and not pos.get("partial_closed", False)
+                and pnl_pct >= 0.40
+            ):
                 signals.append(
                     TradeSignal(
                         action="close",
@@ -156,7 +168,12 @@ class CoveredCallStrategy(BaseStrategy):
                 continue
 
             details = pos.get("details", {}) or {}
-            max_seen = float(details.get("max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)) or pnl_pct)
+            max_seen = float(
+                details.get(
+                    "max_profit_pct_seen", pos.get("max_profit_pct_seen", pnl_pct)
+                )
+                or pnl_pct
+            )
             max_seen = max(max_seen, pnl_pct)
             details["max_profit_pct_seen"] = max_seen
             pos["max_profit_pct_seen"] = max_seen
@@ -178,7 +195,9 @@ class CoveredCallStrategy(BaseStrategy):
                         floor=trail_floor,
                     )
                     if pnl_pct <= trail_lock:
-                        exit_reason = f"Trailing stop hit ({pnl_pct:.1%} <= {trail_lock:.1%})"
+                        exit_reason = (
+                            f"Trailing stop hit ({pnl_pct:.1%} <= {trail_lock:.1%})"
+                        )
                 if not exit_reason and pnl_pct >= target_pct:
                     exit_reason = f"Profit target reached ({pnl_pct:.1%})"
             elif dte_remaining <= 3:
@@ -209,7 +228,9 @@ class CoveredCallStrategy(BaseStrategy):
         return 0.50
 
     @staticmethod
-    def _trailing_lock_pct(*, max_seen: float, activation: float, floor: float) -> float:
+    def _trailing_lock_pct(
+        *, max_seen: float, activation: float, floor: float
+    ) -> float:
         gain_above_activation = max(0.0, max_seen - activation)
         lock = floor + (gain_above_activation * 0.50)
         lock = min(max_seen - 0.01, lock)
@@ -236,7 +257,9 @@ class CoveredCallStrategy(BaseStrategy):
         elif 14 <= dte < 20 or 45 < dte <= 55:
             score += 5
 
-        ba_spread = float(call_option.get("ask", 0) or 0) - float(call_option.get("bid", 0) or 0)
+        ba_spread = float(call_option.get("ask", 0) or 0) - float(
+            call_option.get("bid", 0) or 0
+        )
         tightness = max(0.0, 1.0 - ba_spread / 0.30)
         score += tightness * 10
 
@@ -244,7 +267,7 @@ class CoveredCallStrategy(BaseStrategy):
 
     @staticmethod
     def _average_call_iv(calls: dict) -> float:
-        ivs = []
+        ivs: list[float] = []
         for exp_options in calls.values():
             ivs.extend(
                 float(option.get("iv", 0.0) or 0.0)

@@ -108,8 +108,12 @@ class RiskManagerTests(unittest.TestCase):
         manager.earnings_calendar = mock.Mock(
             earnings_within_window=mock.Mock(return_value=(True, "2026-03-10"))
         )
-        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
-        signal = self._make_signal(symbol="AAPL", net_delta=5.0, net_vega=0.5, max_loss=3.8)
+        manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
+        signal = self._make_signal(
+            symbol="AAPL", net_delta=5.0, net_vega=0.5, max_loss=3.8
+        )
 
         approved, reason = manager.approve_trade(signal)
 
@@ -123,10 +127,19 @@ class RiskManagerTests(unittest.TestCase):
         )
         manager.update_portfolio(
             account_balance=100_000,
-            open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 52.0}}],
+            open_positions=[
+                {
+                    "symbol": "SPY",
+                    "quantity": 1,
+                    "max_loss": 1.0,
+                    "details": {"net_delta": 52.0},
+                }
+            ],
             daily_pnl=0.0,
         )
-        signal = self._make_signal(symbol="QQQ", net_delta=6.0, net_vega=0.1, max_loss=4.0)
+        signal = self._make_signal(
+            symbol="QQQ", net_delta=6.0, net_vega=0.1, max_loss=4.0
+        )
 
         approved, reason = manager.approve_trade(signal)
 
@@ -138,7 +151,9 @@ class RiskManagerTests(unittest.TestCase):
         manager.earnings_calendar = mock.Mock(
             earnings_within_window=mock.Mock(return_value=(True, "2026-03-10"))
         )
-        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
 
         approved, reason = manager.approve_trade(self._make_signal())
 
@@ -152,11 +167,20 @@ class RiskManagerTests(unittest.TestCase):
         )
         manager.update_portfolio(
             account_balance=100_000,
-            open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 48.0}}],
+            open_positions=[
+                {
+                    "symbol": "SPY",
+                    "quantity": 1,
+                    "max_loss": 1.0,
+                    "details": {"net_delta": 48.0},
+                }
+            ],
             daily_pnl=0.0,
         )
 
-        approved, reason = manager.approve_trade(self._make_signal(symbol="QQQ", net_delta=5.0))
+        approved, reason = manager.approve_trade(
+            self._make_signal(symbol="QQQ", net_delta=5.0)
+        )
 
         self.assertFalse(approved)
         self.assertIn("delta limit", reason.lower())
@@ -173,11 +197,20 @@ class RiskManagerTests(unittest.TestCase):
         )
         manager.update_portfolio(
             account_balance=100_000,
-            open_positions=[{"symbol": "SPY", "quantity": 1, "max_loss": 1.0, "details": {"net_delta": 48.0}}],
+            open_positions=[
+                {
+                    "symbol": "SPY",
+                    "quantity": 1,
+                    "max_loss": 1.0,
+                    "details": {"net_delta": 48.0},
+                }
+            ],
             daily_pnl=0.0,
         )
 
-        approved, _ = manager.approve_trade(self._make_signal(symbol="QQQ", net_delta=-5.0))
+        approved, _ = manager.approve_trade(
+            self._make_signal(symbol="QQQ", net_delta=-5.0)
+        )
 
         self.assertTrue(approved)
 
@@ -186,9 +219,13 @@ class RiskManagerTests(unittest.TestCase):
         manager.earnings_calendar = mock.Mock(
             earnings_within_window=mock.Mock(return_value=(False, None))
         )
-        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
 
-        approved, reason = manager.approve_trade(self._make_signal(symbol="QQQ", net_vega=6.0))
+        approved, reason = manager.approve_trade(
+            self._make_signal(symbol="QQQ", net_vega=6.0)
+        )
 
         self.assertFalse(approved)
         self.assertIn("vega limit", reason.lower())
@@ -212,7 +249,9 @@ class RiskManagerTests(unittest.TestCase):
             daily_pnl=0.0,
         )
 
-        approved, reason = manager.approve_trade(self._make_signal(symbol="MSFT", max_loss=3.0))
+        approved, reason = manager.approve_trade(
+            self._make_signal(symbol="MSFT", max_loss=3.0)
+        )
 
         self.assertFalse(approved)
         self.assertIn("Sector concentration", reason)
@@ -230,7 +269,9 @@ class RiskManagerTests(unittest.TestCase):
         )
         manager.update_portfolio(
             account_balance=100_000,
-            open_positions=[{"symbol": "AAPL", "quantity": 1, "max_loss": 2.0, "details": {}}],
+            open_positions=[
+                {"symbol": "AAPL", "quantity": 1, "max_loss": 2.0, "details": {}}
+            ],
             daily_pnl=0.0,
         )
 
@@ -245,7 +286,9 @@ class RiskManagerTests(unittest.TestCase):
             return []
 
         manager.set_price_history_provider(provider)
-        approved, reason = manager.approve_trade(self._make_signal(symbol="MSFT", max_loss=2.0))
+        approved, reason = manager.approve_trade(
+            self._make_signal(symbol="MSFT", max_loss=2.0)
+        )
 
         self.assertFalse(approved)
         self.assertIn("Correlation guard", reason)
@@ -260,7 +303,9 @@ class RiskManagerTests(unittest.TestCase):
                 "max_scale_down": 0.50,
             }
         )
-        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
         manager.update_trade_history([{"pnl": 120.0} for _ in range(20)])
 
         scalar = manager._equity_curve_risk_scalar()
@@ -278,7 +323,9 @@ class RiskManagerTests(unittest.TestCase):
                 "max_scale_down": 0.50,
             }
         )
-        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
         manager.update_trade_history([{"pnl": -180.0} for _ in range(20)])
 
         scalar = manager._equity_curve_risk_scalar()

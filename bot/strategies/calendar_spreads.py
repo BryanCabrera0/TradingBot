@@ -152,7 +152,9 @@ class CalendarSpreadStrategy(BaseStrategy):
                     )
                 )
 
-        signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
+        signals.sort(
+            key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True
+        )
         return signals
 
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
@@ -218,7 +220,9 @@ class CalendarSpreadStrategy(BaseStrategy):
         return matches
 
     @staticmethod
-    def _find_atm_option(options: list[dict], underlying_price: float) -> Optional[dict]:
+    def _find_atm_option(
+        options: list[dict], underlying_price: float
+    ) -> Optional[dict]:
         best = None
         best_diff = float("inf")
         for option in options:
@@ -232,7 +236,9 @@ class CalendarSpreadStrategy(BaseStrategy):
         return best
 
     @staticmethod
-    def _score_setup(*, debit: float, front_mid: float, front_iv: float, back_iv: float) -> float:
+    def _score_setup(
+        *, debit: float, front_mid: float, front_iv: float, back_iv: float
+    ) -> float:
         score = 0.0
         cost_ratio = debit / max(front_mid, 0.01)
         score += max(0.0, 1.0 - min(cost_ratio / 0.5, 1.0)) * 45.0

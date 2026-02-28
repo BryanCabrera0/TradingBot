@@ -87,7 +87,9 @@ class TechnicalAnalyzer:
         dump_json(self.cache_path, payload)
 
 
-def build_technical_context(symbol: str, bars: list[dict]) -> Optional[TechnicalContext]:
+def build_technical_context(
+    symbol: str, bars: list[dict]
+) -> Optional[TechnicalContext]:
     """Build technical indicators from a list of daily OHLCV bars."""
     if not bars:
         return None
@@ -95,7 +97,9 @@ def build_technical_context(symbol: str, bars: list[dict]) -> Optional[Technical
     df = pd.DataFrame(bars)
     required = {"open", "high", "low", "close", "volume"}
     if not required.issubset(set(df.columns)):
-        logger.debug("Missing OHLCV fields for %s. Got columns: %s", symbol, sorted(df.columns))
+        logger.debug(
+            "Missing OHLCV fields for %s. Got columns: %s", symbol, sorted(df.columns)
+        )
         return None
 
     for col in ("open", "high", "low", "close", "volume"):

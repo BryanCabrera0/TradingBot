@@ -74,7 +74,9 @@ class MultiTimeframeTests(unittest.TestCase):
         )
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
 
         executed = bot._try_execute_entry(make_signal())

@@ -1,8 +1,8 @@
 import json
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-import tempfile
 from types import SimpleNamespace
 from unittest import mock
 
@@ -112,7 +112,14 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
             ),
         )
 
-        opened = bot._execute_live_entry(signal, details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95})
+        opened = bot._execute_live_entry(
+            signal,
+            details={
+                "expiration": "2026-03-20",
+                "short_strike": 100,
+                "long_strike": 95,
+            },
+        )
 
         self.assertTrue(opened)
         kwargs = bot.schwab.place_order_with_ladder.call_args.kwargs
@@ -156,7 +163,11 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
         opened = bot._execute_live_entry(
             signal,
-            details={"expiration": "2026-03-20", "short_strike": 100, "long_strike": 95},
+            details={
+                "expiration": "2026-03-20",
+                "short_strike": 100,
+                "long_strike": 95,
+            },
         )
 
         self.assertTrue(opened)
@@ -183,7 +194,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
                 "long_strike": 95,
             },
         }
-        bot.schwab.build_bull_put_spread_close = mock.Mock(return_value={"order": "close"})
+        bot.schwab.build_bull_put_spread_close = mock.Mock(
+            return_value={"order": "close"}
+        )
         bot.schwab.place_order = mock.Mock(
             return_value={"order_id": "close123", "status": "PLACED"}
         )
@@ -251,7 +264,10 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
             "entry_order_time": "2026-02-23T09:00:00-05:00"
         }
         bot.schwab.get_order = mock.Mock(
-            return_value={"status": "WORKING", "enteredTime": "2026-02-23T09:00:00-05:00"}
+            return_value={
+                "status": "WORKING",
+                "enteredTime": "2026-02-23T09:00:00-05:00",
+            }
         )
         bot.schwab.cancel_order = mock.Mock()
         bot._now_eastern = mock.Mock(
@@ -283,7 +299,12 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
             "entry_credit": 1.3,
             "details": {"entry_underlying_price": 100.0},
         }
-        bot.schwab.get_order = mock.Mock(return_value={"status": "WORKING", "enteredTime": "2026-02-23T09:00:00-05:00"})
+        bot.schwab.get_order = mock.Mock(
+            return_value={
+                "status": "WORKING",
+                "enteredTime": "2026-02-23T09:00:00-05:00",
+            }
+        )
         bot.schwab.get_quote = mock.Mock(return_value={"quote": {"lastPrice": 102.0}})
         bot._cancel_stale_live_order = mock.Mock()
         bot._reenter_canceled_working_entry = mock.Mock()
@@ -301,12 +322,18 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot.schwab.get_positions = mock.Mock(
             return_value=[
                 {
-                    "instrument": {"assetType": "OPTION", "symbol": "SPY  260320P00100000"},
+                    "instrument": {
+                        "assetType": "OPTION",
+                        "symbol": "SPY  260320P00100000",
+                    },
                     "longQuantity": 0.0,
                     "shortQuantity": 1.0,
                 },
                 {
-                    "instrument": {"assetType": "OPTION", "symbol": "SPY  260320P00095000"},
+                    "instrument": {
+                        "assetType": "OPTION",
+                        "symbol": "SPY  260320P00095000",
+                    },
                     "longQuantity": 1.0,
                     "shortQuantity": 0.0,
                 },
@@ -333,7 +360,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
             ]
         )
         bot.roll_manager.evaluate = mock.Mock(
-            return_value=mock.Mock(should_roll=True, reason="ok", min_credit_required=0.1)
+            return_value=mock.Mock(
+                should_roll=True, reason="ok", min_credit_required=0.1
+            )
         )
         bot._get_chain_data = mock.Mock(return_value=({"calls": {}, "puts": {}}, 0.0))
         bot._execute_exit = mock.Mock()
@@ -368,9 +397,19 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
             ]
         )
         bot.roll_manager.evaluate = mock.Mock(
-            return_value=mock.Mock(should_roll=True, reason="ok", min_credit_required=0.1)
+            return_value=mock.Mock(
+                should_roll=True, reason="ok", min_credit_required=0.1
+            )
         )
-        bot._get_chain_data = mock.Mock(return_value=({"calls": {"2026-04-17": [{"dte": 40}]}, "puts": {"2026-04-17": [{"dte": 40}]}}, 500.0))
+        bot._get_chain_data = mock.Mock(
+            return_value=(
+                {
+                    "calls": {"2026-04-17": [{"dte": 40}]},
+                    "puts": {"2026-04-17": [{"dte": 40}]},
+                },
+                500.0,
+            )
+        )
         bot.technicals.get_context = mock.Mock(return_value=None)
         candidate = TradeSignal(
             action="open",
@@ -458,7 +497,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         )
         bot._find_roll_replacement_signal = mock.Mock(return_value=replacement)
         bot._try_execute_entry = mock.Mock(
-            side_effect=lambda signal: signal.metadata.__setitem__("paper_position_id", "paper_new") or True
+            side_effect=lambda signal: (
+                signal.metadata.__setitem__("paper_position_id", "paper_new") or True
+            )
         )
 
         bot._execute_roll(
@@ -519,7 +560,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         plan = SimpleNamespace(action="add_wing", reason="short strike tested")
         bot._execute_adjustment_plan(position, plan)
 
-        self.assertTrue(any(order.get("type") == "adjustment" for order in bot.paper_trader.orders))
+        self.assertTrue(
+            any(order.get("type") == "adjustment" for order in bot.paper_trader.orders)
+        )
         details = bot.paper_trader.positions[0]["details"]
         self.assertEqual(details.get("adjustment_count"), 1)
         self.assertGreater(float(details.get("adjustment_cost", 0.0)), 0.0)
@@ -543,7 +586,10 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot._get_broker_positions = mock.Mock(
             return_value=[
                 {
-                    "instrument": {"assetType": "OPTION", "symbol": "QQQ   260320P00100000"},
+                    "instrument": {
+                        "assetType": "OPTION",
+                        "symbol": "QQQ   260320P00100000",
+                    },
                     "shortQuantity": 1.0,
                     "longQuantity": 0.0,
                 }
@@ -565,7 +611,10 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot._get_broker_positions = mock.Mock(
             return_value=[
                 {
-                    "instrument": {"assetType": "OPTION", "symbol": "QQQ   260320P00100000"},
+                    "instrument": {
+                        "assetType": "OPTION",
+                        "symbol": "QQQ   260320P00100000",
+                    },
                     "shortQuantity": 1.0,
                     "longQuantity": 0.0,
                 }
@@ -589,7 +638,10 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot._get_broker_positions = mock.Mock(
             return_value=[
                 {
-                    "instrument": {"assetType": "OPTION", "symbol": "QQQ   260320P00100000"},
+                    "instrument": {
+                        "assetType": "OPTION",
+                        "symbol": "QQQ   260320P00100000",
+                    },
                     "shortQuantity": 1.0,
                     "longQuantity": 0.0,
                 }
@@ -647,7 +699,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
                 "open_positions": 2,
             }
         )
-        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-20T16:10:00-05:00"))
+        bot._now_eastern = mock.Mock(
+            return_value=datetime.fromisoformat("2026-02-20T16:10:00-05:00")
+        )
         bot.alerts = mock.Mock()
         bot._auto_generate_dashboard_if_due = mock.Mock()
 
@@ -662,7 +716,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         self.assertIn("expectancy_per_trade", daily_ctx)
         self.assertIn("calmar", weekly_ctx)
 
-    def test_persist_runtime_exit_state_writes_trailing_fields_to_live_ledger(self) -> None:
+    def test_persist_runtime_exit_state_writes_trailing_fields_to_live_ledger(
+        self,
+    ) -> None:
         bot = TradingBot(make_live_config())
         bot.live_ledger = mock.Mock()
         positions = [
@@ -690,12 +746,21 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
                 "quantity": 1,
                 "entry_credit": 1.2,
                 "current_value": 1.0,
-                "details": {"net_delta": 2.0, "net_gamma": 0.1, "net_theta": 0.1, "net_vega": 0.5},
+                "details": {
+                    "net_delta": 2.0,
+                    "net_gamma": 0.1,
+                    "net_theta": 0.1,
+                    "net_vega": 0.5,
+                },
             }
         ]
-        bot.schwab.get_price_history = mock.Mock(return_value=[{"close": 500.0}, {"close": 503.0}])
+        bot.schwab.get_price_history = mock.Mock(
+            return_value=[{"close": 500.0}, {"close": 503.0}]
+        )
         bot.pnl_attribution = mock.Mock()
-        bot.pnl_attribution.compute_attribution = mock.Mock(return_value={"portfolio": {"delta_pnl": 5.0}})
+        bot.pnl_attribution.compute_attribution = mock.Mock(
+            return_value={"portfolio": {"delta_pnl": 5.0}}
+        )
         bot.pnl_attribution.record_daily_snapshot = mock.Mock()
 
         summary = bot._record_daily_pnl_attribution()
@@ -706,8 +771,12 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
     def test_entry_timing_block_queues_signal(self) -> None:
         bot = TradingBot(make_paper_config())
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
-        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T09:35:00-05:00"))
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
+        bot._now_eastern = mock.Mock(
+            return_value=datetime.fromisoformat("2026-02-23T09:35:00-05:00")
+        )
 
         signal = TradeSignal(
             action="open",
@@ -740,9 +809,13 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         bot.risk_manager.can_open_more_positions = mock.Mock(return_value=True)
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "pq1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "pq1"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
-        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T11:00:00-05:00"))
+        bot._now_eastern = mock.Mock(
+            return_value=datetime.fromisoformat("2026-02-23T11:00:00-05:00")
+        )
 
         signal = TradeSignal(
             action="open",
@@ -771,10 +844,14 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
     def test_timing_bypass_allows_priority_entry_outside_window(self) -> None:
         bot = TradingBot(make_paper_config())
-        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T09:35:00-05:00"))
+        bot._now_eastern = mock.Mock(
+            return_value=datetime.fromisoformat("2026-02-23T09:35:00-05:00")
+        )
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=1)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p2"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p2"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
 
         signal = TradeSignal(
@@ -803,12 +880,20 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
 
     def test_adaptive_execution_timing_queues_non_preferred_bucket(self) -> None:
         bot = TradingBot(make_paper_config())
-        bot._now_eastern = mock.Mock(return_value=datetime.fromisoformat("2026-02-23T11:20:00-05:00"))
-        bot._entry_timing_state = mock.Mock(return_value={"allowed": True, "optimal": True, "reason": "optimal_window"})
+        bot._now_eastern = mock.Mock(
+            return_value=datetime.fromisoformat("2026-02-23T11:20:00-05:00")
+        )
+        bot._entry_timing_state = mock.Mock(
+            return_value={"allowed": True, "optimal": True, "reason": "optimal_window"}
+        )
         bot._refresh_execution_timing_analysis = mock.Mock()
-        bot._preferred_execution_bucket = mock.Mock(return_value={"active": True, "preferred_bucket": "10:00-11:00"})
+        bot._preferred_execution_bucket = mock.Mock(
+            return_value={"active": True, "preferred_bucket": "10:00-11:00"}
+        )
         bot._execution_time_bucket = mock.Mock(return_value="11:00-13:00")
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p2"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p2"}
+        )
 
         signal = TradeSignal(
             action="open",
@@ -835,7 +920,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
         self.assertEqual(len(bot.signal_queue), 1)
         bot.paper_trader.execute_open.assert_not_called()
 
-    def test_record_slippage_history_applies_symbol_penalty_after_threshold(self) -> None:
+    def test_record_slippage_history_applies_symbol_penalty_after_threshold(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             slippage_path = Path(tmp_dir) / "slippage_history.json"
             with mock.patch("bot.orchestrator.SLIPPAGE_HISTORY_PATH", slippage_path):
@@ -852,7 +939,9 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
                 self.assertEqual(bot._symbol_slippage_penalty("ILLQ"), 0.0)
 
                 bot._record_slippage_history(dict(row))
-                self.assertAlmostEqual(bot._symbol_slippage_penalty("ILLQ"), 0.12, places=4)
+                self.assertAlmostEqual(
+                    bot._symbol_slippage_penalty("ILLQ"), 0.12, places=4
+                )
 
     def test_slippage_penalty_rejects_low_credit_signal(self) -> None:
         bot = TradingBot(make_paper_config())
@@ -892,8 +981,16 @@ class OrchestratorLiveExecutionTests(unittest.TestCase):
                 bot = TradingBot(make_paper_config())
                 bot._refresh_strategy_stats(
                     [
-                        {"strategy": "bull_put_spread", "regime": "BULL_TREND", "pnl": 120.0},
-                        {"strategy": "bear_call_spread", "regime": "BULL_TREND", "pnl": -80.0},
+                        {
+                            "strategy": "bull_put_spread",
+                            "regime": "BULL_TREND",
+                            "pnl": 120.0,
+                        },
+                        {
+                            "strategy": "bear_call_spread",
+                            "regime": "BULL_TREND",
+                            "pnl": -80.0,
+                        },
                     ]
                 )
 

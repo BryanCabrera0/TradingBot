@@ -13,7 +13,9 @@ from bot.data_store import dump_json, ensure_data_dir, load_json
 
 logger = logging.getLogger(__name__)
 
-YAHOO_CALENDAR_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+YAHOO_CALENDAR_URL = (
+    "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+)
 EARNINGS_CACHE_PATH = Path("bot/data/earnings_cache.json")
 
 
@@ -29,7 +31,9 @@ class EarningsCalendar:
         self.request_timeout_seconds = max(2, int(request_timeout_seconds))
         ensure_data_dir(self.cache_path.parent)
 
-    def earnings_within_window(self, symbol: str, expiration: str) -> tuple[bool, Optional[str]]:
+    def earnings_within_window(
+        self, symbol: str, expiration: str
+    ) -> tuple[bool, Optional[str]]:
         """Return True when earnings fall on/before trade expiration date."""
         earnings_dt = self.get_earnings_date(symbol)
         exp_date = _parse_date(expiration)

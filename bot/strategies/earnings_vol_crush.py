@@ -19,7 +19,9 @@ class EarningsVolCrushStrategy(BaseStrategy):
     def __init__(self, config: dict):
         super().__init__("earnings_vol_crush", config)
         self.earnings_calendar = EarningsCalendar()
-        self.moves_path = Path(self.config.get("earnings_moves_file", "bot/data/earnings_moves.json"))
+        self.moves_path = Path(
+            self.config.get("earnings_moves_file", "bot/data/earnings_moves.json")
+        )
 
     def scan_for_entries(
         self,
@@ -76,10 +78,18 @@ class EarningsVolCrushStrategy(BaseStrategy):
                 continue
 
             short_put = find_option_by_delta(exp_puts, target_delta)
-            long_put = find_spread_wing(exp_puts, short_put["strike"], wing_width, "lower") if short_put else None
+            long_put = (
+                find_spread_wing(exp_puts, short_put["strike"], wing_width, "lower")
+                if short_put
+                else None
+            )
             short_call = find_option_by_delta(exp_calls, target_delta)
-            long_call = find_spread_wing(exp_calls, short_call["strike"], wing_width, "higher") if short_call else None
-            if None in (short_put, long_put, short_call, long_call):
+            long_call = (
+                find_spread_wing(exp_calls, short_call["strike"], wing_width, "higher")
+                if short_call
+                else None
+            )
+            if not short_put or not long_put or not short_call or not long_call:
                 continue
             if float(short_put["strike"]) >= float(short_call["strike"]):
                 continue
@@ -116,7 +126,9 @@ class EarningsVolCrushStrategy(BaseStrategy):
                     },
                 )
             )
-        signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
+        signals.sort(
+            key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True
+        )
         return signals
 
     def _earnings_move_profile(self, symbol: str) -> dict:
@@ -144,8 +156,13 @@ class EarningsVolCrushStrategy(BaseStrategy):
                 continue
             pnl_pct = (entry_credit - current) / entry_credit
             target_pct = self._profit_target_for_dte(dte) if adaptive_targets else 0.35
-            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
-            trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
+            details = (
+                pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            )
+            trailing_high = float(
+                pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0))
+                or 0.0
+            )
             if trailing_enabled and pnl_pct >= trail_activation:
                 trailing_high = max(trailing_high, pnl_pct)
                 pos["trailing_stop_high"] = trailing_high
@@ -167,7 +184,11 @@ class EarningsVolCrushStrategy(BaseStrategy):
                         reason=(
                             "Trailing stop"
                             if trailing_triggered
-                            else ("Post-earnings crush capture" if pnl_pct >= target_pct else "Event complete")
+                            else (
+                                "Post-earnings crush capture"
+                                if pnl_pct >= target_pct
+                                else "Event complete"
+                            )
                         ),
                         quantity=max(1, int(pos.get("quantity", 1))),
                     )

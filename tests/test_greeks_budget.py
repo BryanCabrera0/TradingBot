@@ -43,7 +43,9 @@ class GreeksBudgetTests(unittest.TestCase):
         manager.earnings_calendar = mock.Mock(
             earnings_within_window=mock.Mock(return_value=(False, None))
         )
-        manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
         return manager
 
     def test_regime_budget_rejects_when_breached(self) -> None:

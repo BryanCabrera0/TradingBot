@@ -18,7 +18,9 @@ class IVHistory:
         self.path = Path(path)
         ensure_data_dir(self.path.parent)
 
-    def update_and_rank(self, symbol: str, iv_value: float, *, as_of: str | None = None) -> float:
+    def update_and_rank(
+        self, symbol: str, iv_value: float, *, as_of: str | None = None
+    ) -> float:
         symbol_key = symbol.upper().strip()
         as_of_key = as_of or date.today().isoformat()
         state = load_json(self.path, {"symbols": {}})
@@ -47,7 +49,11 @@ class IVHistory:
 
         # Keep ~1 trading year history.
         series = sorted(
-            [item for item in series if isinstance(item, dict) and "iv" in item and "date" in item],
+            [
+                item
+                for item in series
+                if isinstance(item, dict) and "iv" in item and "date" in item
+            ],
             key=lambda item: str(item.get("date")),
         )[-252:]
         symbols[symbol_key] = series

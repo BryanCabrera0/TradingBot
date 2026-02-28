@@ -111,7 +111,9 @@ class DataFetcherTests(unittest.TestCase):
             _FakeSchwab().get_option_chain("SPY"),
         ]
         with tempfile.TemporaryDirectory() as tmp_dir:
-            fetcher = HistoricalDataFetcher(client, data_dir=tmp_dir, max_attempts=5, backoff_seconds=0.01)
+            fetcher = HistoricalDataFetcher(
+                client, data_dir=tmp_dir, max_attempts=5, backoff_seconds=0.01
+            )
             with mock.patch("bot.data_fetcher.time.sleep", return_value=None):
                 result = fetcher.fetch_day(symbol="SPY", trading_day=date(2026, 2, 20))
 

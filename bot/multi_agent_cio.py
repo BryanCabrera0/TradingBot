@@ -1,11 +1,19 @@
-"""Multi-agent CIO debate orchestration for LLM trade decisions."""
+"""Multi-agent CIO debate orchestration for LLM trade decisions.
+
+SIMPLE EXPLANATION:
+The Multi-Agent CIO (Chief Investment Officer) is the final decision-maker. 
+It acts like a committee of different expert personas (like a Macro Economist, a Volatility 
+Analyst, and a Risk Manager) who "debate" the current market conditions. 
+After all personas weigh in, the CIO synthesizes their views and makes a 
+final call on whether it's safe to trade overall.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +92,13 @@ class MultiAgentCIO:
     ):
         self._query_model = query_model
         self._parse_decision = parse_decision
-        self.primary_model = str(primary_model or "gpt-5.2-pro").strip() or "gpt-5.2-pro"
+        self.primary_model = (
+            str(primary_model or "gpt-5.2-pro").strip() or "gpt-5.2-pro"
+        )
         self.fallback_model = str(fallback_model or "gpt-5.2").strip() or "gpt-5.2"
         self.provider = str(provider or "openai").strip().lower() or "openai"
         self.learned_rules = [
-            str(rule).strip()
-            for rule in (learned_rules or [])
-            if str(rule).strip()
+            str(rule).strip() for rule in (learned_rules or []) if str(rule).strip()
         ][:25]
 
     def run(self, prompt: str) -> DebateResult:
@@ -147,8 +155,12 @@ class MultiAgentCIO:
         else:
             cio_final = cio_initial
 
-        votes.append(self._to_model_vote(cio_final, round_number=2 if debate_needed else 1))
-        final_payload = self._finalize_cio_payload(cio_final, debate_needed=debate_needed)
+        votes.append(
+            self._to_model_vote(cio_final, round_number=2 if debate_needed else 1)
+        )
+        final_payload = self._finalize_cio_payload(
+            cio_final, debate_needed=debate_needed
+        )
 
         transcript = {
             "provider": self.provider,
@@ -331,11 +343,24 @@ class MultiAgentCIO:
                 if valid and parsed:
                     normalized = {
                         **parsed,
-                        "verdict": str(getattr(decision, "verdict", "reject")).strip().lower() or "reject",
-                        "confidence": float(getattr(decision, "confidence_pct", 0.0) or 0.0),
-                        "reasoning": str(getattr(decision, "reasoning", "LLM response missing reason"))[:280],
-                        "suggested_adjustment": getattr(decision, "suggested_adjustment", None),
-                        "risk_adjustment": float(getattr(decision, "risk_adjustment", 1.0) or 1.0),
+                        "verdict": str(getattr(decision, "verdict", "reject"))
+                        .strip()
+                        .lower()
+                        or "reject",
+                        "confidence": float(
+                            getattr(decision, "confidence_pct", 0.0) or 0.0
+                        ),
+                        "reasoning": str(
+                            getattr(
+                                decision, "reasoning", "LLM response missing reason"
+                            )
+                        )[:280],
+                        "suggested_adjustment": getattr(
+                            decision, "suggested_adjustment", None
+                        ),
+                        "risk_adjustment": float(
+                            getattr(decision, "risk_adjustment", 1.0) or 1.0
+                        ),
                     }
                     return raw, normalized, model_name, used_fallback
                 raise RuntimeError("invalid or non-JSON decision payload")
@@ -354,7 +379,12 @@ class MultiAgentCIO:
             "risk_adjustment": 1.0,
             "capital_allocation_scalar": 1.0,
         }
-        return json.dumps(fallback, separators=(",", ":")), fallback, self.fallback_model, True
+        return (
+            json.dumps(fallback, separators=(",", ":")),
+            fallback,
+            self.fallback_model,
+            True,
+        )
 
     def _normalize_agent_payload(
         self,
@@ -374,7 +404,9 @@ class MultiAgentCIO:
         if confidence <= 1.0:
             confidence *= 100.0
 
-        risk_adjustment = self._clamp_float(parsed.get("risk_adjustment", 1.0), 0.1, 1.0)
+        risk_adjustment = self._clamp_float(
+            parsed.get("risk_adjustment", 1.0), 0.1, 1.0
+        )
         allocation_scalar = self._clamp_float(
             parsed.get("capital_allocation_scalar", risk_adjustment),
             0.1,
@@ -394,13 +426,17 @@ class MultiAgentCIO:
 
         disagreements = parsed.get("disagreements", [])
         if isinstance(disagreements, list):
-            disagreements = [str(item).strip()[:180] for item in disagreements if str(item).strip()][:6]
+            disagreements = [
+                str(item).strip()[:180] for item in disagreements if str(item).strip()
+            ][:6]
         else:
             disagreements = []
 
         key_risks = parsed.get("key_risks", [])
         if isinstance(key_risks, list):
-            key_risks = [str(item).strip()[:180] for item in key_risks if str(item).strip()][:6]
+            key_risks = [
+                str(item).strip()[:180] for item in key_risks if str(item).strip()
+            ][:6]
         else:
             key_risks = []
 
@@ -414,7 +450,9 @@ class MultiAgentCIO:
             "round": int(round_number),
             "verdict": verdict,
             "confidence": confidence,
-            "reasoning": str(parsed.get("reasoning", "LLM response missing reason")).strip()[:280],
+            "reasoning": str(
+                parsed.get("reasoning", "LLM response missing reason")
+            ).strip()[:280],
             "suggested_adjustment": parsed.get("suggested_adjustment"),
             "risk_adjustment": risk_adjustment,
             "capital_allocation_scalar": allocation_scalar,
@@ -423,7 +461,9 @@ class MultiAgentCIO:
             "bull_case": str(parsed.get("bull_case") or "").strip()[:280],
             "bear_case": str(parsed.get("bear_case") or "").strip()[:280],
             "key_risk": str(parsed.get("key_risk") or "").strip()[:180],
-            "expected_duration": str(parsed.get("expected_duration") or "").strip()[:120],
+            "expected_duration": str(parsed.get("expected_duration") or "").strip()[
+                :120
+            ],
             "confidence_drivers": explanation_drivers,
             "raw": raw,
         }
@@ -441,20 +481,30 @@ class MultiAgentCIO:
             "round": int(round_number),
             "used_fallback_model": bool(payload.get("used_fallback_model")),
             "verdict": str(payload.get("verdict", "reject")).lower(),
-            "confidence": MultiAgentCIO._clamp_float(payload.get("confidence", 0.0), 0.0, 100.0),
-            "risk_adjustment": MultiAgentCIO._clamp_float(payload.get("risk_adjustment", 1.0), 0.1, 1.0),
+            "confidence": MultiAgentCIO._clamp_float(
+                payload.get("confidence", 0.0), 0.0, 100.0
+            ),
+            "risk_adjustment": MultiAgentCIO._clamp_float(
+                payload.get("risk_adjustment", 1.0), 0.1, 1.0
+            ),
             "reasoning": str(payload.get("reasoning", ""))[:280],
             "weight": 1.0,
         }
 
     @staticmethod
     def _detect_contradictions(theses: list[dict]) -> list[str]:
-        verdicts = {str(row.get("verdict", "")).lower() for row in theses if isinstance(row, dict)}
+        verdicts = {
+            str(row.get("verdict", "")).lower()
+            for row in theses
+            if isinstance(row, dict)
+        }
         contradictions: list[str] = []
         if "approve" in verdicts and "reject" in verdicts:
             contradictions.append("Analysts disagree on go/no-go (approve vs reject).")
         if len(verdicts) > 1 and "reduce_size" in verdicts:
-            contradictions.append("At least one analyst recommends sizing down while others differ.")
+            contradictions.append(
+                "At least one analyst recommends sizing down while others differ."
+            )
 
         confidences = [
             MultiAgentCIO._clamp_float(row.get("confidence", 0.0), 0.0, 100.0)
@@ -462,7 +512,9 @@ class MultiAgentCIO:
             if isinstance(row, dict)
         ]
         if confidences and (max(confidences) - min(confidences) >= 25.0):
-            contradictions.append("Large confidence dispersion across analysts (>=25 points).")
+            contradictions.append(
+                "Large confidence dispersion across analysts (>=25 points)."
+            )
 
         return contradictions[:6]
 
@@ -475,14 +527,20 @@ class MultiAgentCIO:
         if confidence <= 1.0:
             confidence *= 100.0
 
-        allocation = self._clamp_float(cio_payload.get("capital_allocation_scalar", 1.0), 0.1, 1.0)
-        risk_adjustment = self._clamp_float(cio_payload.get("risk_adjustment", allocation), 0.1, 1.0)
+        allocation = self._clamp_float(
+            cio_payload.get("capital_allocation_scalar", 1.0), 0.1, 1.0
+        )
+        risk_adjustment = self._clamp_float(
+            cio_payload.get("risk_adjustment", allocation), 0.1, 1.0
+        )
         risk_adjustment = min(risk_adjustment, allocation)
 
         return {
             "verdict": verdict,
             "confidence": confidence,
-            "reasoning": str(cio_payload.get("reasoning", "CIO decision unavailable")).strip()[:280],
+            "reasoning": str(
+                cio_payload.get("reasoning", "CIO decision unavailable")
+            ).strip()[:280],
             "suggested_adjustment": cio_payload.get("suggested_adjustment"),
             "risk_adjustment": risk_adjustment,
             "capital_allocation_scalar": allocation,
@@ -491,7 +549,9 @@ class MultiAgentCIO:
             "bull_case": str(cio_payload.get("bull_case") or "").strip()[:280],
             "bear_case": str(cio_payload.get("bear_case") or "").strip()[:280],
             "key_risk": str(cio_payload.get("key_risk") or "").strip()[:180],
-            "expected_duration": str(cio_payload.get("expected_duration") or "").strip()[:120],
+            "expected_duration": str(
+                cio_payload.get("expected_duration") or ""
+            ).strip()[:120],
             "confidence_drivers": cio_payload.get("confidence_drivers", []),
             "contradiction_summary": cio_payload.get("contradiction_summary", []),
         }
@@ -517,9 +577,9 @@ class MultiAgentCIO:
         return {}
 
     @staticmethod
-    def _clamp_float(value: object, minimum: float, maximum: float) -> float:
+    def _clamp_float(value: Any, minimum: float, maximum: float) -> float:
         try:
-            parsed = float(value)
+            parsed = float(str(value))
         except (TypeError, ValueError):
             parsed = minimum
         return max(minimum, min(maximum, parsed))

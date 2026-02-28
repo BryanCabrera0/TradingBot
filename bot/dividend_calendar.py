@@ -13,7 +13,9 @@ from bot.data_store import dump_json, ensure_data_dir, load_json
 
 logger = logging.getLogger(__name__)
 
-YAHOO_CALENDAR_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+YAHOO_CALENDAR_URL = (
+    "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+)
 DIVIDEND_CACHE_PATH = Path("bot/data/dividend_cache.json")
 
 
@@ -85,9 +87,8 @@ class DividendCalendar:
                 "ex_dividend_date": ex_div.isoformat(),
             }
 
-        proximity = (
-            abs(float(underlying_price) - float(short_strike))
-            / max(1.0, float(underlying_price))
+        proximity = abs(float(underlying_price) - float(short_strike)) / max(
+            1.0, float(underlying_price)
         )
         pin_risk = proximity <= 0.01
         if "spread" in strategy_key and pin_risk:

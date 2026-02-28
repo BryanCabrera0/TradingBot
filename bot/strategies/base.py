@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TradeSignal:
     """A signal to open or close a trade."""
+
     action: str  # "open", "close", or "roll"
     strategy: str
     symbol: str
@@ -50,9 +51,7 @@ class BaseStrategy(ABC):
         """
 
     @abstractmethod
-    def check_exits(
-        self, positions: list, market_client
-    ) -> list[TradeSignal]:
+    def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
         """Check existing positions for exit signals.
 
         Returns a list of TradeSignals for positions to close.

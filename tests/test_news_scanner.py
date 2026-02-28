@@ -1,10 +1,9 @@
+import os
 import unittest
 from unittest import mock
-import os
 
 from bot.config import NewsConfig
 from bot.news_scanner import NewsScanner, _parse_rss_items
-
 
 RSS_SAMPLE = """\
 <rss version="2.0">
@@ -93,7 +92,11 @@ class NewsScannerTests(unittest.TestCase):
         scanner = NewsScanner(NewsConfig(enabled=True))
         policy = scanner.trade_direction_policy(
             "AAPL",
-            sentiment={"sentiment": "bullish", "confidence": 75, "key_event": "FDA approval"},
+            sentiment={
+                "sentiment": "bullish",
+                "confidence": 75,
+                "key_event": "FDA approval",
+            },
         )
         self.assertTrue(policy["block_all"])
         self.assertFalse(policy["allow_bull_put"])
@@ -101,14 +104,31 @@ class NewsScannerTests(unittest.TestCase):
 
     def test_finnhub_news_parsing(self) -> None:
         scanner = NewsScanner(
-            NewsConfig(enabled=True, finnhub_api_key="test-key", request_timeout_seconds=5)
+            NewsConfig(
+                enabled=True, finnhub_api_key="test-key", request_timeout_seconds=5
+            )
         )
         response = mock.Mock()
         response.raise_for_status.return_value = None
         response.json.return_value = [
-            {"headline": "AAPL wins major contract", "url": "https://example.com/1", "source": "Finnhub", "datetime": 1760000000},
-            {"headline": "AAPL faces lawsuit risk", "url": "https://example.com/2", "source": "Finnhub", "datetime": 1760000500},
-            {"headline": "AAPL guidance unchanged", "url": "https://example.com/3", "source": "Finnhub", "datetime": 1760001000},
+            {
+                "headline": "AAPL wins major contract",
+                "url": "https://example.com/1",
+                "source": "Finnhub",
+                "datetime": 1760000000,
+            },
+            {
+                "headline": "AAPL faces lawsuit risk",
+                "url": "https://example.com/2",
+                "source": "Finnhub",
+                "datetime": 1760000500,
+            },
+            {
+                "headline": "AAPL guidance unchanged",
+                "url": "https://example.com/3",
+                "source": "Finnhub",
+                "datetime": 1760001000,
+            },
         ]
 
         with mock.patch("bot.news_scanner.requests.get", return_value=response):
@@ -132,7 +152,11 @@ class NewsScannerTests(unittest.TestCase):
             "candidates": [
                 {
                     "content": {
-                        "parts": [{"text": '{"sentiment":"bullish","confidence":78,"key_event":null}'}]
+                        "parts": [
+                            {
+                                "text": '{"sentiment":"bullish","confidence":78,"key_event":null}'
+                            }
+                        ]
                     }
                 }
             ]
@@ -166,14 +190,20 @@ class NewsScannerTests(unittest.TestCase):
             "candidates": [
                 {
                     "content": {
-                        "parts": [{"text": '{"sentiment":"neutral","confidence":61,"key_event":null}'}]
+                        "parts": [
+                            {
+                                "text": '{"sentiment":"neutral","confidence":61,"key_event":null}'
+                            }
+                        ]
                     }
                 }
             ]
         }
 
         with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.news_scanner.requests.post", return_value=response) as post:
+            with mock.patch(
+                "bot.news_scanner.requests.post", return_value=response
+            ) as post:
                 sentiment = scanner.get_symbol_sentiment(
                     "AAPL",
                     headlines=[mock.Mock(title="AAPL announces new AI roadmap")],
@@ -188,7 +218,9 @@ class NewsScannerTests(unittest.TestCase):
         self.assertEqual(kwargs["params"]["key"], "test-key")
         payload = kwargs["json"]
         self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 256)
-        self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(
+            payload["generationConfig"]["responseMimeType"], "application/json"
+        )
 
 
 if __name__ == "__main__":

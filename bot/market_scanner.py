@@ -33,51 +33,224 @@ SCANNER_HISTORY_PATH = Path("bot/data/scanner_history.json")
 OPTIONS_UNIVERSE = {
     # Major ETFs (most liquid options in the world)
     "etfs": [
-        "SPY", "QQQ", "IWM", "DIA", "EEM", "GLD", "SLV", "TLT",
-        "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLU", "XLB",
-        "XLC", "XLRE", "XBI", "SMH", "ARKK", "HYG", "EFA", "VXX",
-        "KWEB", "FXI", "USO", "IBIT", "MSOS",
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        "EEM",
+        "GLD",
+        "SLV",
+        "TLT",
+        "XLF",
+        "XLE",
+        "XLK",
+        "XLV",
+        "XLI",
+        "XLP",
+        "XLU",
+        "XLB",
+        "XLC",
+        "XLRE",
+        "XBI",
+        "SMH",
+        "ARKK",
+        "HYG",
+        "EFA",
+        "VXX",
+        "KWEB",
+        "FXI",
+        "USO",
+        "IBIT",
+        "MSOS",
     ],
     # Mega-cap tech
     "tech": [
-        "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA",
-        "TSLA", "AMD", "INTC", "AVGO", "CRM", "ORCL", "ADBE",
-        "NFLX", "UBER", "SHOP", "SQ", "SNOW", "PLTR", "COIN",
-        "MSTR", "NET", "MU", "QCOM", "ARM", "SMCI", "DELL", "PANW",
+        "AAPL",
+        "MSFT",
+        "GOOGL",
+        "GOOG",
+        "AMZN",
+        "META",
+        "NVDA",
+        "TSLA",
+        "AMD",
+        "INTC",
+        "AVGO",
+        "CRM",
+        "ORCL",
+        "ADBE",
+        "NFLX",
+        "UBER",
+        "SHOP",
+        "SQ",
+        "SNOW",
+        "PLTR",
+        "COIN",
+        "MSTR",
+        "NET",
+        "MU",
+        "QCOM",
+        "ARM",
+        "SMCI",
+        "DELL",
+        "PANW",
     ],
     # Finance
     "finance": [
-        "JPM", "BAC", "GS", "MS", "WFC", "C", "V", "MA",
-        "AXP", "SCHW", "BLK", "COF", "PYPL", "SOFI",
+        "JPM",
+        "BAC",
+        "GS",
+        "MS",
+        "WFC",
+        "C",
+        "V",
+        "MA",
+        "AXP",
+        "SCHW",
+        "BLK",
+        "COF",
+        "PYPL",
+        "SOFI",
     ],
     # Healthcare / Biotech
     "healthcare": [
-        "UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "BMY",
-        "AMGN", "GILD", "MRNA", "BNTX",
+        "UNH",
+        "JNJ",
+        "PFE",
+        "ABBV",
+        "MRK",
+        "LLY",
+        "BMY",
+        "AMGN",
+        "GILD",
+        "MRNA",
+        "BNTX",
     ],
     # Consumer / Retail
     "consumer": [
-        "WMT", "COST", "HD", "NKE", "SBUX", "MCD", "DIS",
-        "TGT", "LOW", "LULU", "CMG",
+        "WMT",
+        "COST",
+        "HD",
+        "NKE",
+        "SBUX",
+        "MCD",
+        "DIS",
+        "TGT",
+        "LOW",
+        "LULU",
+        "CMG",
     ],
     # Energy / Industrial
     "energy_industrial": [
-        "XOM", "CVX", "OXY", "SLB", "HAL", "BA", "CAT",
-        "DE", "GE", "RTX", "LMT", "F", "GM", "RIVN", "LCID",
+        "XOM",
+        "CVX",
+        "OXY",
+        "SLB",
+        "HAL",
+        "BA",
+        "CAT",
+        "DE",
+        "GE",
+        "RTX",
+        "LMT",
+        "F",
+        "GM",
+        "RIVN",
+        "LCID",
     ],
     # High-IV / Meme / Volatile (great for premium selling)
     "high_volatility": [
-        "GME", "AMC", "RIOT", "MARA", "HOOD", "RBLX",
-        "DKNG", "WYNN", "PENN", "SNAP", "PINS", "ROKU",
-        "UPST", "AFRM", "PATH", "AI", "IONQ", "RGTI",
+        "GME",
+        "AMC",
+        "RIOT",
+        "MARA",
+        "HOOD",
+        "RBLX",
+        "DKNG",
+        "WYNN",
+        "PENN",
+        "SNAP",
+        "PINS",
+        "ROKU",
+        "UPST",
+        "AFRM",
+        "PATH",
+        "AI",
+        "IONQ",
+        "RGTI",
     ],
 }
 
 SECTOR_ETF_BY_SYMBOL = {
-    "XLF": {"JPM", "BAC", "GS", "MS", "WFC", "C", "V", "MA", "AXP", "SCHW", "BLK", "COF", "PYPL", "SOFI"},
-    "XLK": {"AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA", "AMD", "INTC", "AVGO", "CRM", "ORCL", "ADBE", "NFLX", "QCOM", "ARM", "SMCI", "DELL", "PANW", "PLTR", "SNOW", "NET", "MU"},
-    "XLV": {"UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "BMY", "AMGN", "GILD", "MRNA", "BNTX", "XBI"},
-    "XLY": {"HD", "NKE", "SBUX", "MCD", "DIS", "TGT", "LOW", "LULU", "CMG", "WMT", "COST"},
+    "XLF": {
+        "JPM",
+        "BAC",
+        "GS",
+        "MS",
+        "WFC",
+        "C",
+        "V",
+        "MA",
+        "AXP",
+        "SCHW",
+        "BLK",
+        "COF",
+        "PYPL",
+        "SOFI",
+    },
+    "XLK": {
+        "AAPL",
+        "MSFT",
+        "GOOGL",
+        "GOOG",
+        "AMZN",
+        "META",
+        "NVDA",
+        "TSLA",
+        "AMD",
+        "INTC",
+        "AVGO",
+        "CRM",
+        "ORCL",
+        "ADBE",
+        "NFLX",
+        "QCOM",
+        "ARM",
+        "SMCI",
+        "DELL",
+        "PANW",
+        "PLTR",
+        "SNOW",
+        "NET",
+        "MU",
+    },
+    "XLV": {
+        "UNH",
+        "JNJ",
+        "PFE",
+        "ABBV",
+        "MRK",
+        "LLY",
+        "BMY",
+        "AMGN",
+        "GILD",
+        "MRNA",
+        "BNTX",
+        "XBI",
+    },
+    "XLY": {
+        "HD",
+        "NKE",
+        "SBUX",
+        "MCD",
+        "DIS",
+        "TGT",
+        "LOW",
+        "LULU",
+        "CMG",
+        "WMT",
+        "COST",
+    },
     "XLE": {"XOM", "CVX", "OXY", "SLB", "HAL", "USO"},
     "XLI": {"BA", "CAT", "DE", "GE", "RTX", "LMT", "F", "GM", "RIVN", "LCID"},
     "XLC": {"ROKU", "SNAP", "PINS"},
@@ -95,13 +268,14 @@ def get_full_universe() -> list[str]:
 @dataclass
 class TickerScore:
     """Scoring result for a single ticker's options tradability."""
+
     symbol: str
     # Raw metrics
     options_volume: int = 0
     options_open_interest: int = 0
     implied_volatility: float = 0.0  # Average IV
-    iv_percentile: float = 0.0       # IV rank (0-100)
-    bid_ask_quality: float = 0.0     # 0-1, higher = tighter spreads
+    iv_percentile: float = 0.0  # IV rank (0-100)
+    bid_ask_quality: float = 0.0  # 0-1, higher = tighter spreads
     underlying_volume: int = 0
     underlying_price: float = 0.0
     avg_option_spread_pct: float = 0.0  # Average bid-ask spread as % of mid
@@ -179,15 +353,22 @@ class MarketScanner:
         self._last_scan_time = datetime.now()
 
         logger.info("=" * 60)
-        logger.info("SCAN RESULTS: Top %d tickers for options trading", len(top_tickers))
+        logger.info(
+            "SCAN RESULTS: Top %d tickers for options trading", len(top_tickers)
+        )
         logger.info("-" * 60)
         for rank, ts in enumerate(top_tickers, 1):
             logger.info(
                 "  #%2d  %-6s  Score: %5.1f | IV: %5.1f%% | OptVol: %8d | "
                 "OI: %8d | Price: $%7.2f | B/A: %.2f%%",
-                rank, ts.symbol, ts.score, ts.implied_volatility,
-                ts.options_volume, ts.options_open_interest,
-                ts.underlying_price, ts.avg_option_spread_pct * 100,
+                rank,
+                ts.symbol,
+                ts.score,
+                ts.implied_volatility,
+                ts.options_volume,
+                ts.options_open_interest,
+                ts.underlying_price,
+                ts.avg_option_spread_pct * 100,
             )
         logger.info("=" * 60)
 
@@ -200,14 +381,18 @@ class MarketScanner:
         if (
             self._last_scan_results
             and self._last_scan_time
-            and (datetime.now() - self._last_scan_time).total_seconds() < self.config.cache_seconds
+            and (datetime.now() - self._last_scan_time).total_seconds()
+            < self.config.cache_seconds
         ):
             logger.info(
                 "Using cached scan results (%d tickers, scanned %s ago)",
                 len(self._last_scan_results),
                 str(datetime.now() - self._last_scan_time).split(".")[0],
             )
-            return [ts.symbol for ts in self._last_scan_results[:self.config.max_scan_results]]
+            return [
+                ts.symbol
+                for ts in self._last_scan_results[: self.config.max_scan_results]
+            ]
 
         return self.scan()
 
@@ -356,7 +541,10 @@ class MarketScanner:
             sum(spread_ratios) / len(spread_ratios) if spread_ratios else 1.0
         )
         ts.num_expirations = num_expirations
-        ts.option_liquidity_score = min(ts.options_volume / 80_000, 1.0) * 0.6 + min(ts.options_open_interest / 400_000, 1.0) * 0.4
+        ts.option_liquidity_score = (
+            min(ts.options_volume / 80_000, 1.0) * 0.6
+            + min(ts.options_open_interest / 400_000, 1.0) * 0.4
+        )
 
         sector_etf = self._sector_etf_for_symbol(symbol)
         spy_return = self._one_month_return("SPY")
@@ -389,7 +577,7 @@ class MarketScanner:
         # Elevated IV = richer premiums for selling strategies
         # Sweet spot: 25-60% IV (too low = no premium, too high = risky)
         if ts.implied_volatility <= 0:
-            iv_score = 0
+            iv_score = 0.0
         elif ts.implied_volatility < 15:
             iv_score = ts.implied_volatility / 15 * 0.3  # Penalize very low IV
         elif ts.implied_volatility <= 60:
@@ -402,7 +590,7 @@ class MarketScanner:
         # ── Bid-Ask Tightness (20% weight) ───────────────────────
         # Tighter spreads = less slippage = more profit kept
         if ts.avg_option_spread_pct <= 0:
-            ba_score = 0
+            ba_score = 0.0
         elif ts.avg_option_spread_pct < 0.03:
             ba_score = 1.0  # Extremely tight (ETFs like SPY)
         elif ts.avg_option_spread_pct < 0.10:
@@ -436,7 +624,11 @@ class MarketScanner:
         score += ts.movers_boost * 100.0 * float(self.config.movers_weight)
 
         # ── Option liquidity overlay (configurable weight) ───────
-        score += ts.option_liquidity_score * 100.0 * float(self.config.options_liquidity_weight)
+        score += (
+            ts.option_liquidity_score
+            * 100.0
+            * float(self.config.options_liquidity_weight)
+        )
 
         return round(min(score, 100.0), 1)
 
@@ -504,7 +696,7 @@ class MarketScanner:
             except Exception as exc:
                 if attempt >= attempts or not self._is_retryable_error(exc):
                     raise
-                delay = backoff * (2 ** attempt)
+                delay = backoff * (2**attempt)
                 logger.warning(
                     "%s failed (attempt %d/%d): %s. Retrying in %.2fs.",
                     operation,

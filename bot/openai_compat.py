@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 
@@ -38,7 +38,7 @@ def request_openai_json(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    responses_payload = {
+    responses_payload: dict[str, Any] = {
         "model": model,
         "instructions": system_prompt,
         "input": user_prompt,
@@ -54,7 +54,7 @@ def request_openai_json(
     if max_output_tokens is not None:
         responses_payload["max_output_tokens"] = max(64, int(max_output_tokens))
 
-    text_payload: dict = {}
+    text_payload: dict[str, Any] = {}
     if verbosity:
         text_payload["verbosity"] = verbosity
     if supports_structured:
@@ -81,10 +81,9 @@ def request_openai_json(
             "OpenAI Responses API unavailable (%s). Falling back to Chat Completions.",
             response.status_code,
         )
-        fallback_model = (
-            str(chat_fallback_model or "").strip()
-            or fallback_model_for_chat(model)
-        )
+        fallback_model = str(
+            chat_fallback_model or ""
+        ).strip() or fallback_model_for_chat(model)
         return _request_chat_completions_json(
             api_key=api_key,
             model=fallback_model,
@@ -141,7 +140,7 @@ def _request_chat_completions_json(
     max_output_tokens: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -210,7 +209,11 @@ def model_supports_structured_outputs(model: str) -> bool:
 def _should_send_temperature(model: str, reasoning_effort: Optional[str]) -> bool:
     """Determine whether the temperature parameter should be sent."""
     model_name = str(model or "").strip().lower()
-    if model_name.startswith("gpt-5") and reasoning_effort and reasoning_effort != "none":
+    if (
+        model_name.startswith("gpt-5")
+        and reasoning_effort
+        and reasoning_effort != "none"
+    ):
         return False
     return True
 

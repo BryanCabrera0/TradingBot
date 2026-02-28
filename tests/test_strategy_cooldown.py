@@ -49,8 +49,18 @@ class StrategyCooldownTests(unittest.TestCase):
         bot = TradingBot(make_config())
         bot._recent_closed_trades = mock.Mock(
             return_value=[
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": -50.0, "close_date": "2026-02-20"},
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": -25.0, "close_date": "2026-02-21"},
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": -50.0,
+                    "close_date": "2026-02-20",
+                },
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": -25.0,
+                    "close_date": "2026-02-21",
+                },
             ]
         )
 
@@ -64,9 +74,24 @@ class StrategyCooldownTests(unittest.TestCase):
         bot = TradingBot(make_config())
         bot._recent_closed_trades = mock.Mock(
             return_value=[
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": -50.0, "close_date": "2026-02-20"},
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": -25.0, "close_date": "2026-02-21"},
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": -35.0, "close_date": "2026-02-22"},
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": -50.0,
+                    "close_date": "2026-02-20",
+                },
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": -25.0,
+                    "close_date": "2026-02-21",
+                },
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": -35.0,
+                    "close_date": "2026-02-22",
+                },
             ]
         )
 
@@ -83,8 +108,18 @@ class StrategyCooldownTests(unittest.TestCase):
         }
         bot._recent_closed_trades = mock.Mock(
             return_value=[
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": -50.0, "close_date": "2026-02-20"},
-                {"strategy": "bull_put_spread", "symbol": "SPY", "pnl": 75.0, "close_date": "2026-02-21"},
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": -50.0,
+                    "close_date": "2026-02-20",
+                },
+                {
+                    "strategy": "bull_put_spread",
+                    "symbol": "SPY",
+                    "pnl": 75.0,
+                    "close_date": "2026-02-21",
+                },
             ]
         )
 
@@ -97,10 +132,14 @@ class StrategyCooldownTests(unittest.TestCase):
         bot._strategy_cooldown_state = {
             "credit_spreads": {"reduction": 0.25, "remaining_trades": 1, "level": 1}
         }
-        bot._passes_multi_timeframe_confirmation = mock.Mock(return_value=(True, 2, {"daily": True}))
+        bot._passes_multi_timeframe_confirmation = mock.Mock(
+            return_value=(True, 2, {"daily": True})
+        )
         bot.risk_manager.calculate_position_size = mock.Mock(return_value=4)
         bot.risk_manager.approve_trade = mock.Mock(return_value=(True, "ok"))
-        bot.paper_trader.execute_open = mock.Mock(return_value={"status": "FILLED", "position_id": "p1"})
+        bot.paper_trader.execute_open = mock.Mock(
+            return_value={"status": "FILLED", "position_id": "p1"}
+        )
         bot.risk_manager.register_open_position = mock.Mock()
         bot._refresh_monte_carlo_risk = mock.Mock()
 

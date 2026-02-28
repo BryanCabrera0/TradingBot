@@ -64,12 +64,42 @@ class RiskManager:
             "enabled": True,
             "reduce_size_to_fit": True,
             "limits": {
-                "BULL_TREND": {"delta_min": -50.0, "delta_max": 80.0, "vega_min": -200.0, "vega_max": 100.0},
-                "BEAR_TREND": {"delta_min": -80.0, "delta_max": 30.0, "vega_min": -100.0, "vega_max": 200.0},
-                "HIGH_VOL_CHOP": {"delta_min": -30.0, "delta_max": 30.0, "vega_min": -300.0, "vega_max": -50.0},
-                "LOW_VOL_GRIND": {"delta_min": -40.0, "delta_max": 60.0, "vega_min": -150.0, "vega_max": 50.0},
-                "CRASH/CRISIS": {"delta_min": -20.0, "delta_max": 10.0, "vega_min": 0.0, "vega_max": 500.0},
-                "NORMAL": {"delta_min": -50.0, "delta_max": 50.0, "vega_min": -200.0, "vega_max": 200.0},
+                "BULL_TREND": {
+                    "delta_min": -50.0,
+                    "delta_max": 80.0,
+                    "vega_min": -200.0,
+                    "vega_max": 100.0,
+                },
+                "BEAR_TREND": {
+                    "delta_min": -80.0,
+                    "delta_max": 30.0,
+                    "vega_min": -100.0,
+                    "vega_max": 200.0,
+                },
+                "HIGH_VOL_CHOP": {
+                    "delta_min": -30.0,
+                    "delta_max": 30.0,
+                    "vega_min": -300.0,
+                    "vega_max": -50.0,
+                },
+                "LOW_VOL_GRIND": {
+                    "delta_min": -40.0,
+                    "delta_max": 60.0,
+                    "vega_min": -150.0,
+                    "vega_max": 50.0,
+                },
+                "CRASH/CRISIS": {
+                    "delta_min": -20.0,
+                    "delta_max": 10.0,
+                    "vega_min": 0.0,
+                    "vega_max": 500.0,
+                },
+                "NORMAL": {
+                    "delta_min": -50.0,
+                    "delta_max": 50.0,
+                    "vega_min": -200.0,
+                    "vega_max": 200.0,
+                },
             },
         }
         self.portfolio = PortfolioState()
@@ -115,9 +145,13 @@ class RiskManager:
                 self.greeks_budget_config[key] = getattr(cfg, key)
 
     def update_trade_history(self, closed_trades: list[dict]) -> None:
-        self._closed_trades = [item for item in (closed_trades or []) if isinstance(item, dict)]
+        self._closed_trades = [
+            item for item in (closed_trades or []) if isinstance(item, dict)
+        ]
 
-    def set_price_history_provider(self, provider: Optional[Callable[[str, int], list[dict]]]) -> None:
+    def set_price_history_provider(
+        self, provider: Optional[Callable[[str, int], list[dict]]]
+    ) -> None:
         """Register a callable used for correlation checks."""
         self._price_history_provider = provider
         self._returns_cache.clear()
@@ -150,11 +184,26 @@ class RiskManager:
             pos_risk = max_loss * quantity * 100.0
             total_risk += pos_risk
 
-            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
-            net_delta += float(details.get("net_delta", pos.get("net_delta", 0.0)) or 0.0) * quantity
-            net_theta += float(details.get("net_theta", pos.get("net_theta", 0.0)) or 0.0) * quantity
-            net_gamma += float(details.get("net_gamma", pos.get("net_gamma", 0.0)) or 0.0) * quantity
-            net_vega += float(details.get("net_vega", pos.get("net_vega", 0.0)) or 0.0) * quantity * 100.0
+            details = (
+                pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            )
+            net_delta += (
+                float(details.get("net_delta", pos.get("net_delta", 0.0)) or 0.0)
+                * quantity
+            )
+            net_theta += (
+                float(details.get("net_theta", pos.get("net_theta", 0.0)) or 0.0)
+                * quantity
+            )
+            net_gamma += (
+                float(details.get("net_gamma", pos.get("net_gamma", 0.0)) or 0.0)
+                * quantity
+            )
+            net_vega += (
+                float(details.get("net_vega", pos.get("net_vega", 0.0)) or 0.0)
+                * quantity
+                * 100.0
+            )
 
             symbol = str(pos.get("symbol", "")).upper()
             sector = self.sector_map.get(symbol, "Unknown")
@@ -183,26 +232,31 @@ class RiskManager:
         greeks: Optional[dict] = None,
     ) -> None:
         """Track a newly opened position immediately for intra-cycle risk checks."""
+        max_loss = max(0.0, float(max_loss_per_contract))
+        qty = max(1, int(quantity))
+        net_delta = float((greeks or {}).get("net_delta", 0.0))
+        net_theta = float((greeks or {}).get("net_theta", 0.0))
+        net_gamma = float((greeks or {}).get("net_gamma", 0.0))
+        net_vega = float((greeks or {}).get("net_vega", 0.0))
+
         position = {
             "symbol": symbol,
-            "max_loss": max(0.0, float(max_loss_per_contract)),
-            "quantity": max(1, int(quantity)),
+            "max_loss": max_loss,
+            "quantity": qty,
             "strategy": strategy,
             "details": {
-                "net_delta": float((greeks or {}).get("net_delta", 0.0)),
-                "net_theta": float((greeks or {}).get("net_theta", 0.0)),
-                "net_gamma": float((greeks or {}).get("net_gamma", 0.0)),
-                "net_vega": float((greeks or {}).get("net_vega", 0.0)),
+                "net_delta": net_delta,
+                "net_theta": net_theta,
+                "net_gamma": net_gamma,
+                "net_vega": net_vega,
             },
         }
         self.portfolio.open_positions.append(position)
-        self.portfolio.total_risk_deployed += (
-            position["max_loss"] * position["quantity"] * 100
-        )
-        self.portfolio.net_delta += position["details"]["net_delta"] * position["quantity"]
-        self.portfolio.net_theta += position["details"]["net_theta"] * position["quantity"]
-        self.portfolio.net_gamma += position["details"]["net_gamma"] * position["quantity"]
-        self.portfolio.net_vega += position["details"]["net_vega"] * position["quantity"] * 100.0
+        self.portfolio.total_risk_deployed += max_loss * qty * 100
+        self.portfolio.net_delta += net_delta * qty
+        self.portfolio.net_theta += net_theta * qty
+        self.portfolio.net_gamma += net_gamma * qty
+        self.portfolio.net_vega += net_vega * qty * 100.0
 
     def effective_max_loss_per_contract(self, signal: TradeSignal) -> float:
         """Return risk-model max loss per contract for a signal."""
@@ -282,7 +336,10 @@ class RiskManager:
 
         # ── Check 6: Daily loss limit ─────────────────────────────
         max_daily_loss = balance * (self.config.max_daily_loss_pct / 100)
-        if self.portfolio.daily_pnl < 0 and abs(self.portfolio.daily_pnl) >= max_daily_loss:
+        if (
+            self.portfolio.daily_pnl < 0
+            and abs(self.portfolio.daily_pnl) >= max_daily_loss
+        ):
             return False, (
                 f"Daily loss limit reached: ${abs(self.portfolio.daily_pnl):,.2f} >= "
                 f"${max_daily_loss:,.2f} ({self.config.max_daily_loss_pct}% of account)"
@@ -314,10 +371,14 @@ class RiskManager:
                 )
 
         # ── Check 10: Portfolio net-delta guard ───────────────────
-        projected_delta = self.portfolio.net_delta + (float(analysis.net_delta) * signal.quantity)
+        projected_delta = self.portfolio.net_delta + (
+            float(analysis.net_delta) * signal.quantity
+        )
         delta_limit = max(0.0, float(self.config.max_portfolio_delta_abs))
         if abs(projected_delta) > delta_limit:
-            same_direction = np.sign(projected_delta) == np.sign(self.portfolio.net_delta or projected_delta)
+            same_direction = np.sign(projected_delta) == np.sign(
+                self.portfolio.net_delta or projected_delta
+            )
             if same_direction:
                 return False, (
                     f"Portfolio delta limit exceeded: {projected_delta:.2f} "
@@ -326,7 +387,9 @@ class RiskManager:
 
         # ── Check 11: Portfolio net-vega guard ────────────────────
         vega_limit = balance * (self.config.max_portfolio_vega_pct_of_account / 100.0)
-        projected_vega = self.portfolio.net_vega + (float(analysis.net_vega) * signal.quantity * 100.0)
+        projected_vega = self.portfolio.net_vega + (
+            float(analysis.net_vega) * signal.quantity * 100.0
+        )
         if abs(projected_vega) > vega_limit and abs(float(analysis.net_vega)) > 0:
             return False, (
                 f"Portfolio vega limit exceeded: {projected_vega:.2f} "
@@ -348,9 +411,14 @@ class RiskManager:
 
         # ── Check 12: Sector concentration + correlation guard ────
         sector = self.sector_map.get(signal.symbol.upper(), "Unknown")
-        sector_risk_after = self.portfolio.sector_risk.get(sector, 0.0) + position_max_loss
+        sector_risk_after = (
+            self.portfolio.sector_risk.get(sector, 0.0) + position_max_loss
+        )
         max_sector_fraction = self.config.max_sector_risk_pct / 100.0
-        if new_total_risk > 0 and (sector_risk_after / new_total_risk) > max_sector_fraction:
+        if (
+            new_total_risk > 0
+            and (sector_risk_after / new_total_risk) > max_sector_fraction
+        ):
             return False, (
                 f"Sector concentration limit exceeded in {sector}: "
                 f"{sector_risk_after / new_total_risk:.1%} > {max_sector_fraction:.1%}"
@@ -431,9 +499,8 @@ class RiskManager:
         def _fits(qty: int) -> bool:
             projected_delta = self.portfolio.net_delta + (delta_unit * qty)
             projected_vega = self.portfolio.net_vega + (vega_unit * qty)
-            return (
-                (delta_min <= projected_delta <= delta_max)
-                and (vega_min <= projected_vega <= vega_max)
+            return (delta_min <= projected_delta <= delta_max) and (
+                vega_min <= projected_vega <= vega_max
             )
 
         if _fits(requested_qty):
@@ -500,7 +567,9 @@ class RiskManager:
         balance = self.portfolio.account_balance
         risk_scalar = self._equity_curve_risk_scalar()
         risk_scalar *= self.strategy_allocation_scalar(signal.strategy)
-        adjusted_max_position_risk_pct = float(self.config.max_position_risk_pct) * risk_scalar
+        adjusted_max_position_risk_pct = (
+            float(self.config.max_position_risk_pct) * risk_scalar
+        )
         max_risk_per_trade = balance * (adjusted_max_position_risk_pct / 100.0)
         risk_per_contract = signal.analysis.max_loss * 100
         if risk_per_contract <= 0:
@@ -531,14 +600,18 @@ class RiskManager:
         strategy_trades = [
             item
             for item in self._closed_trades
-            if isinstance(item, dict) and str(item.get("strategy", "")).strip().lower() == strategy_key
+            if isinstance(item, dict)
+            and str(item.get("strategy", "")).strip().lower() == strategy_key
         ]
         if not strategy_trades:
             return cold_penalty
 
         recent = strategy_trades[-lookback:]
         pnls = np.array(
-            [safe_float(item.get("pnl", item.get("realized_pnl", 0.0)), 0.0) for item in recent],
+            [
+                safe_float(item.get("pnl", item.get("realized_pnl", 0.0)), 0.0)
+                for item in recent
+            ],
             dtype=float,
         )
         sharpe = 0.0
@@ -574,7 +647,10 @@ class RiskManager:
         lookback = max(5, int(self.sizing_config.get("equity_curve_lookback", 20)))
         if len(self._closed_trades) < 2:
             return 0.0
-        pnls = [float(item.get("pnl", 0.0) or 0.0) for item in self._closed_trades[-lookback:]]
+        pnls = [
+            float(item.get("pnl", 0.0) or 0.0)
+            for item in self._closed_trades[-lookback:]
+        ]
         if len(pnls) < 2:
             return 0.0
         account = max(1.0, float(self.portfolio.account_balance or 0.0))
@@ -592,7 +668,9 @@ class RiskManager:
             return 1.0
         slope = self._equity_curve_slope()
         max_up = max(1.0, float(self.sizing_config.get("max_scale_up", 1.25)))
-        max_down = max(0.1, min(1.0, float(self.sizing_config.get("max_scale_down", 0.50))))
+        max_down = max(
+            0.1, min(1.0, float(self.sizing_config.get("max_scale_down", 0.50)))
+        )
         if slope > 0:
             return min(max_up, 1.0 + min(max_up - 1.0, slope * 2.0))
         if slope < 0:
@@ -642,7 +720,9 @@ class RiskManager:
             size = min(len(target_returns), len(other_returns))
             if size < 20:
                 continue
-            corr = float(np.corrcoef(target_returns[-size:], other_returns[-size:])[0, 1])
+            corr = float(
+                np.corrcoef(target_returns[-size:], other_returns[-size:])[0, 1]
+            )
             if np.isnan(corr):
                 continue
             if corr >= float(self.config.correlation_threshold):
@@ -669,7 +749,11 @@ class RiskManager:
             return None
 
         closes = np.array(
-            [float(item.get("close", 0.0) or 0.0) for item in bars if isinstance(item, dict)],
+            [
+                float(item.get("close", 0.0) or 0.0)
+                for item in bars
+                if isinstance(item, dict)
+            ],
             dtype=float,
         )
         closes = closes[closes > 0]
@@ -681,7 +765,9 @@ class RiskManager:
         return returns
 
     def _kelly_fraction(self, signal: TradeSignal) -> float:
-        kelly_weight = max(0.0, min(1.0, float(self.sizing_config.get("kelly_fraction", 0.5))))
+        kelly_weight = max(
+            0.0, min(1.0, float(self.sizing_config.get("kelly_fraction", 0.5)))
+        )
         min_trades = max(1, int(self.sizing_config.get("kelly_min_trades", 30)))
 
         win_rate, avg_win, avg_loss = self._historical_edge()
@@ -694,15 +780,21 @@ class RiskManager:
             avg_loss = max(0.01, float(analysis.max_loss))
 
         # Kelly = (p*W - (1-p)*L)/W.
-        kelly_raw = ((win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)) / max(avg_win, 1e-9)
+        kelly_raw = ((win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)) / max(
+            avg_win, 1e-9
+        )
         kelly_raw = max(0.0, min(1.0, kelly_raw))
         fractional = kelly_raw * kelly_weight
 
         drawdown = self._current_drawdown()
-        decay_threshold = max(0.0, float(self.sizing_config.get("drawdown_decay_threshold", 0.05)))
+        decay_threshold = max(
+            0.0, float(self.sizing_config.get("drawdown_decay_threshold", 0.05))
+        )
         if drawdown > decay_threshold > 0:
             # Anti-martingale: decay sizing when drawdown is elevated.
-            fractional *= max(0.25, 1.0 - ((drawdown - decay_threshold) / max(decay_threshold, 1e-9)))
+            fractional *= max(
+                0.25, 1.0 - ((drawdown - decay_threshold) / max(decay_threshold, 1e-9))
+            )
 
         return max(0.1, min(1.0, fractional))
 
@@ -725,7 +817,11 @@ class RiskManager:
 
     def _refresh_correlation_matrix(self) -> None:
         symbols = sorted(
-            {str(item.get("symbol", "")).upper() for item in self.portfolio.open_positions if item.get("symbol")}
+            {
+                str(item.get("symbol", "")).upper()
+                for item in self.portfolio.open_positions
+                if item.get("symbol")
+            }
         )
         matrix: dict[str, dict[str, float]] = {}
         if len(symbols) < 2:
@@ -738,16 +834,16 @@ class RiskManager:
                 if left == right:
                     matrix[left][right] = 1.0
                     continue
-                l = returns.get(left)
+                left_val = returns.get(left)
                 r = returns.get(right)
-                if l is None or r is None:
+                if left_val is None or r is None:
                     matrix[left][right] = 0.0
                     continue
-                size = min(len(l), len(r))
+                size = min(len(left_val), len(r))
                 if size < 20:
                     matrix[left][right] = 0.0
                     continue
-                corr = float(np.corrcoef(l[-size:], r[-size:])[0, 1])
+                corr = float(np.corrcoef(left_val[-size:], r[-size:])[0, 1])
                 matrix[left][right] = 0.0 if np.isnan(corr) else round(corr, 6)
         self._correlation_matrix = matrix
 
@@ -755,7 +851,11 @@ class RiskManager:
         if not self.config.var_enabled:
             self._var_metrics = {"var95": 0.0, "var99": 0.0}
             return
-        symbols = [str(item.get("symbol", "")).upper() for item in self.portfolio.open_positions if item.get("symbol")]
+        symbols = [
+            str(item.get("symbol", "")).upper()
+            for item in self.portfolio.open_positions
+            if item.get("symbol")
+        ]
         if not symbols:
             self._var_metrics = {"var95": 0.0, "var99": 0.0}
             return
@@ -768,7 +868,11 @@ class RiskManager:
             series = self._load_returns(symbol)
             if series is None or len(series) < 20:
                 continue
-            risk = max(0.0, float(position.get("max_loss", 0.0))) * max(1, int(position.get("quantity", 1))) * 100.0
+            risk = (
+                max(0.0, float(position.get("max_loss", 0.0)))
+                * max(1, int(position.get("quantity", 1)))
+                * 100.0
+            )
             returns.append(series)
             weights.append(risk / total_risk)
 

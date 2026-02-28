@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from math import sqrt
 from typing import Optional
 
@@ -28,7 +27,9 @@ class AnalyticsReport:
         }
 
 
-def compute(closed_trades: list[dict], *, initial_equity: float = 100_000.0) -> AnalyticsReport:
+def compute(
+    closed_trades: list[dict], *, initial_equity: float = 100_000.0
+) -> AnalyticsReport:
     """Compute portfolio analytics from closed trade history."""
     trades = [row for row in (closed_trades or []) if isinstance(row, dict)]
     if not trades:
@@ -54,7 +55,9 @@ def compute(closed_trades: list[dict], *, initial_equity: float = 100_000.0) -> 
         )
 
     ordered = sorted(trades, key=lambda row: str(row.get("close_date", "")))
-    pnls = [safe_float(row.get("pnl", row.get("realized_pnl", 0.0)), 0.0) for row in ordered]
+    pnls = [
+        safe_float(row.get("pnl", row.get("realized_pnl", 0.0)), 0.0) for row in ordered
+    ]
     wins = [p for p in pnls if p > 0]
     losses = [abs(p) for p in pnls if p < 0]
     total_pnl = sum(pnls)
@@ -63,22 +66,34 @@ def compute(closed_trades: list[dict], *, initial_equity: float = 100_000.0) -> 
     win_rate = (len(wins) / total_trades) if total_trades else 0.0
     avg_win = (sum(wins) / len(wins)) if wins else 0.0
     avg_loss_abs = (sum(losses) / len(losses)) if losses else 0.0
-    profit_factor = (sum(wins) / sum(losses)) if losses else (float("inf") if wins else 0.0)
+    profit_factor = (
+        (sum(wins) / sum(losses)) if losses else (float("inf") if wins else 0.0)
+    )
     avg_win_loss_ratio = (avg_win / avg_loss_abs) if avg_loss_abs > 0 else 0.0
     expectancy = (avg_win * win_rate) - (avg_loss_abs * (1.0 - win_rate))
 
     current_wins, current_losses, max_wins, max_losses = _streak_stats(pnls)
 
     daily_pnl = _daily_pnl_map(ordered)
-    daily_returns = _daily_returns(daily_pnl, initial_equity=max(1.0, float(initial_equity)))
+    daily_returns = _daily_returns(
+        daily_pnl, initial_equity=max(1.0, float(initial_equity))
+    )
     sharpe = _sharpe(daily_returns)
     sortino = _sortino(daily_returns)
 
-    equity_curve = _equity_curve(daily_pnl, initial_equity=max(1.0, float(initial_equity)))
+    equity_curve = _equity_curve(
+        daily_pnl, initial_equity=max(1.0, float(initial_equity))
+    )
     max_drawdown, max_dd_duration = _drawdown_stats(equity_curve)
-    total_return = ((equity_curve[-1] / max(1.0, float(initial_equity))) - 1.0) if equity_curve else 0.0
+    total_return = (
+        ((equity_curve[-1] / max(1.0, float(initial_equity))) - 1.0)
+        if equity_curve
+        else 0.0
+    )
     annual_factor = 252.0 / max(1, len(daily_returns)) if daily_returns else 0.0
-    annualized_return = ((1.0 + total_return) ** annual_factor - 1.0) if daily_returns else 0.0
+    annualized_return = (
+        ((1.0 + total_return) ** annual_factor - 1.0) if daily_returns else 0.0
+    )
     calmar = (annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
 
     total_risk_deployed = 0.0
@@ -87,7 +102,9 @@ def compute(closed_trades: list[dict], *, initial_equity: float = 100_000.0) -> 
         qty = max(1, safe_int(row.get("quantity"), 1))
         if max_loss > 0:
             total_risk_deployed += max_loss * qty * 100.0
-    risk_adjusted_return = (total_pnl / total_risk_deployed) if total_risk_deployed > 0 else 0.0
+    risk_adjusted_return = (
+        (total_pnl / total_risk_deployed) if total_risk_deployed > 0 else 0.0
+    )
 
     strategy_metrics = _bucket_metrics(ordered, key_name="strategy")
     regime_metrics = _bucket_metrics(ordered, key_name="regime")
@@ -100,7 +117,9 @@ def compute(closed_trades: list[dict], *, initial_equity: float = 100_000.0) -> 
         "max_drawdown": round(max_drawdown, 6),
         "max_drawdown_duration": int(max_dd_duration),
         "win_rate": round(win_rate, 6),
-        "profit_factor": round(profit_factor, 6) if profit_factor != float("inf") else float("inf"),
+        "profit_factor": round(profit_factor, 6)
+        if profit_factor != float("inf")
+        else float("inf"),
         "avg_win_loss_ratio": round(avg_win_loss_ratio, 6),
         "expectancy_per_trade": round(expectancy, 6),
         "current_consecutive_wins": int(current_wins),
@@ -126,7 +145,9 @@ def _daily_pnl_map(trades: list[dict]) -> dict[str, float]:
     for row in trades:
         close_date = str(row.get("close_date", ""))
         day = close_date[:10] if len(close_date) >= 10 else "unknown"
-        out[day] = out.get(day, 0.0) + safe_float(row.get("pnl", row.get("realized_pnl", 0.0)), 0.0)
+        out[day] = out.get(day, 0.0) + safe_float(
+            row.get("pnl", row.get("realized_pnl", 0.0)), 0.0
+        )
     return dict(sorted(out.items(), key=lambda item: item[0]))
 
 
@@ -139,7 +160,9 @@ def _equity_curve(daily_pnl: dict[str, float], *, initial_equity: float) -> list
     return out
 
 
-def _daily_returns(daily_pnl: dict[str, float], *, initial_equity: float) -> list[float]:
+def _daily_returns(
+    daily_pnl: dict[str, float], *, initial_equity: float
+) -> list[float]:
     returns: list[float] = []
     equity = initial_equity
     for _, pnl in sorted(daily_pnl.items()):
@@ -158,7 +181,7 @@ def _sharpe(returns: list[float]) -> float:
         return 0.0
     mean_r = sum(returns) / len(returns)
     variance = sum((r - mean_r) ** 2 for r in returns) / max(1, len(returns) - 1)
-    std = variance ** 0.5
+    std = variance**0.5
     if std <= 0:
         return 0.0
     return (mean_r / std) * sqrt(252.0)
@@ -218,7 +241,10 @@ def _bucket_metrics(trades: list[dict], *, key_name: str) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for key, rows in buckets.items():
-        values = [safe_float(row.get("pnl", row.get("realized_pnl", 0.0)), 0.0) for row in rows]
+        values = [
+            safe_float(row.get("pnl", row.get("realized_pnl", 0.0)), 0.0)
+            for row in rows
+        ]
         wins = [p for p in values if p > 0]
         losses = [abs(p) for p in values if p < 0]
         total = len(values)
@@ -227,7 +253,9 @@ def _bucket_metrics(trades: list[dict], *, key_name: str) -> dict[str, dict]:
         avg_loss = (-(sum(losses) / len(losses))) if losses else 0.0
         avg_loss_abs = (sum(losses) / len(losses)) if losses else 0.0
         expectancy = (avg_profit * win_rate) - (abs(avg_loss) * (1.0 - win_rate))
-        profit_factor = (sum(wins) / sum(losses)) if losses else (float("inf") if wins else 0.0)
+        profit_factor = (
+            (sum(wins) / sum(losses)) if losses else (float("inf") if wins else 0.0)
+        )
         avg_win_loss_ratio = (avg_profit / avg_loss_abs) if avg_loss_abs > 0 else 0.0
         current_wins, current_losses, max_wins, max_losses = _streak_stats(values)
 
@@ -239,7 +267,9 @@ def _bucket_metrics(trades: list[dict], *, key_name: str) -> dict[str, dict]:
         max_drawdown, max_dd_duration = _drawdown_stats(equity_curve)
         total_return = ((equity_curve[-1] / 100_000.0) - 1.0) if equity_curve else 0.0
         annual_factor = 252.0 / max(1, len(daily_returns)) if daily_returns else 0.0
-        annualized_return = ((1.0 + total_return) ** annual_factor - 1.0) if daily_returns else 0.0
+        annualized_return = (
+            ((1.0 + total_return) ** annual_factor - 1.0) if daily_returns else 0.0
+        )
         calmar = (annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
         out[key] = {
             "trades": total,
@@ -248,7 +278,9 @@ def _bucket_metrics(trades: list[dict], *, key_name: str) -> dict[str, dict]:
             "avg_loss": round(avg_loss, 4),
             "avg_pnl": round(sum(values) / max(1, total), 4),
             "total_pnl": round(sum(values), 4),
-            "profit_factor": round(profit_factor, 6) if profit_factor != float("inf") else float("inf"),
+            "profit_factor": round(profit_factor, 6)
+            if profit_factor != float("inf")
+            else float("inf"),
             "expectancy": round(expectancy, 6),
             "avg_win_loss_ratio": round(avg_win_loss_ratio, 6),
             "sharpe": round(sharpe, 6),

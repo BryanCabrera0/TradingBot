@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from bot.number_utils import safe_int
 from bot.strategies.base import TradeSignal
@@ -49,7 +48,9 @@ class RollManager:
                 min_credit_required=min_credit,
             )
 
-        if bool(self.config.get("allow_defensive_rolls", True)) and dte <= max(min_dte + 3, 10):
+        if bool(self.config.get("allow_defensive_rolls", True)) and dte <= max(
+            min_dte + 3, 10
+        ):
             if pnl_pct < -0.30 or regime.upper() in {"CRASH/CRISIS", "BEAR_TREND"}:
                 return RollDecision(
                     True,
@@ -61,9 +62,17 @@ class RollManager:
         return RollDecision(False, "no roll condition met")
 
     @staticmethod
-    def annotate_roll_metadata(source_position: dict, target_signal: TradeSignal) -> None:
-        details = source_position.get("details", {}) if isinstance(source_position.get("details"), dict) else {}
+    def annotate_roll_metadata(
+        source_position: dict, target_signal: TradeSignal
+    ) -> None:
+        details = (
+            source_position.get("details", {})
+            if isinstance(source_position.get("details"), dict)
+            else {}
+        )
         prev_rolls = int(details.get("roll_count", 0) or 0)
         target_signal.metadata.setdefault("position_details", {})
-        target_signal.metadata["position_details"]["rolled_from"] = source_position.get("position_id")
+        target_signal.metadata["position_details"]["rolled_from"] = source_position.get(
+            "position_id"
+        )
         target_signal.metadata["position_details"]["roll_count"] = prev_rolls + 1

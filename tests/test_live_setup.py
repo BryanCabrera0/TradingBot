@@ -8,7 +8,9 @@ from bot.live_setup import _ensure_optional_runtime_defaults, _render_service_te
 
 
 class LiveSetupTests(unittest.TestCase):
-    def test_ensure_optional_runtime_defaults_disables_optional_integrations(self) -> None:
+    def test_ensure_optional_runtime_defaults_disables_optional_integrations(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_path = Path(tmpdir) / ".env"
             env_path.write_text(
@@ -51,9 +53,9 @@ class LiveSetupTests(unittest.TestCase):
             generated = _render_service_templates(root)
             self.assertEqual(len(generated), 2)
 
-            systemd_out = (root / "deploy/generated/systemd/tradingbot.service").read_text(
-                encoding="utf-8"
-            )
+            systemd_out = (
+                root / "deploy/generated/systemd/tradingbot.service"
+            ).read_text(encoding="utf-8")
             launchd_out = (
                 root / "deploy/generated/launchd/com.bryan.tradingbot.plist"
             ).read_text(encoding="utf-8")

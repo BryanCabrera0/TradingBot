@@ -46,18 +46,32 @@ def enrich_dashboard_payload(payload: dict) -> dict:
         ]
         hits = sum(1 for item in judged if _is_llm_hit(item))
         accuracy = hits / len(judged) if judged else 0.0
-        approves = [item for item in judged if str(item.get("verdict", "")).lower() == "approve"]
-        rejects = [item for item in judged if str(item.get("verdict", "")).lower() == "reject"]
-        reduces = [item for item in judged if str(item.get("verdict", "")).lower() == "reduce_size"]
+        approves = [
+            item for item in judged if str(item.get("verdict", "")).lower() == "approve"
+        ]
+        rejects = [
+            item for item in judged if str(item.get("verdict", "")).lower() == "reject"
+        ]
+        reduces = [
+            item
+            for item in judged
+            if str(item.get("verdict", "")).lower() == "reduce_size"
+        ]
         approve_hits = sum(1 for item in approves if _is_llm_hit(item))
         reject_hits = sum(1 for item in rejects if _is_llm_hit(item))
         reduce_hits = sum(1 for item in reduces if _is_llm_hit(item))
         out["llm_accuracy"] = {
             "trades": len(judged),
             "hit_rate": round(accuracy, 4),
-            "approve_accuracy": round((approve_hits / len(approves)) if approves else 0.0, 4),
-            "reject_accuracy": round((reject_hits / len(rejects)) if rejects else 0.0, 4),
-            "reduce_size_accuracy": round((reduce_hits / len(reduces)) if reduces else 0.0, 4),
+            "approve_accuracy": round(
+                (approve_hits / len(approves)) if approves else 0.0, 4
+            ),
+            "reject_accuracy": round(
+                (reject_hits / len(rejects)) if rejects else 0.0, 4
+            ),
+            "reduce_size_accuracy": round(
+                (reduce_hits / len(reduces)) if reduces else 0.0, 4
+            ),
         }
         meta = llm_track.get("meta", {}) if isinstance(llm_track, dict) else {}
         calibration = meta.get("calibration", {}) if isinstance(meta, dict) else {}
@@ -67,12 +81,14 @@ def enrich_dashboard_payload(payload: dict) -> dict:
     execution = load_json(EXECUTION_QUALITY_PATH, {"fills": []})
     fills = execution.get("fills", []) if isinstance(execution, dict) else []
     slippages = [
-        float(item.get("slippage", 0.0))
-        for item in fills
-        if isinstance(item, dict)
+        float(item.get("slippage", 0.0)) for item in fills if isinstance(item, dict)
     ]
     adverse_slippages = [
-        float(item.get("adverse_slippage", max(0.0, float(item.get("slippage", 0.0) or 0.0))))
+        float(
+            item.get(
+                "adverse_slippage", max(0.0, float(item.get("slippage", 0.0) or 0.0))
+            )
+        )
         for item in fills
         if isinstance(item, dict)
     ]
@@ -97,17 +113,28 @@ def enrich_dashboard_payload(payload: dict) -> dict:
         )
         row["slippages"].append(float(item.get("slippage", 0.0) or 0.0))
         row["adverse_slippages"].append(
-            float(item.get("adverse_slippage", max(0.0, float(item.get("slippage", 0.0) or 0.0))))
+            float(
+                item.get(
+                    "adverse_slippage",
+                    max(0.0, float(item.get("slippage", 0.0) or 0.0)),
+                )
+            )
         )
     if slippages:
         out["execution_quality"] = {
             "avg_slippage": round(float(np.mean(slippages)), 4),
-            "avg_adverse_slippage": round(float(np.mean(adverse_slippages)), 4) if adverse_slippages else 0.0,
-            "avg_fill_improvement": round(float(np.mean(improvements)), 4) if improvements else 0.0,
+            "avg_adverse_slippage": round(float(np.mean(adverse_slippages)), 4)
+            if adverse_slippages
+            else 0.0,
+            "avg_fill_improvement": round(float(np.mean(improvements)), 4)
+            if improvements
+            else 0.0,
             "samples": len(slippages),
             "by_strategy": {
                 name: {
-                    "avg_slippage": round(float(np.mean(values["slippages"])), 4) if values["slippages"] else 0.0,
+                    "avg_slippage": round(float(np.mean(values["slippages"])), 4)
+                    if values["slippages"]
+                    else 0.0,
                     "avg_adverse_slippage": (
                         round(float(np.mean(values["adverse_slippages"])), 4)
                         if values["adverse_slippages"]
@@ -127,7 +154,7 @@ def _render_html(payload: dict) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     equity_curve = payload.get("equity_curve", [])
-    equity_labels = [point.get("date", "") for point in equity_curve]
+    [point.get("date", "") for point in equity_curve]
     equity_values = [float(point.get("equity", 0.0)) for point in equity_curve]
     monthly = payload.get("monthly_pnl", {})
     daily_calendar = payload.get("daily_pnl_calendar", {})
@@ -140,7 +167,9 @@ def _render_html(payload: dict) -> str:
     llm_accuracy = payload.get("llm_accuracy", {})
     llm_calibration = payload.get("llm_calibration", {})
     execution = payload.get("execution_quality", {})
-    execution_by_strategy = execution.get("by_strategy", {}) if isinstance(execution, dict) else {}
+    execution_by_strategy = (
+        execution.get("by_strategy", {}) if isinstance(execution, dict) else {}
+    )
     sector_exposure = payload.get("sector_exposure", {})
     breakers = payload.get("circuit_breakers", {})
     regime_state = payload.get("regime_state", {})
@@ -154,71 +183,94 @@ def _render_html(payload: dict) -> str:
     top_ranked = payload.get("top_ranked_signals", [])
     strategy_regime_stats = payload.get("strategy_stats", {})
 
-    monthly_rows = "".join(
-        f"<tr><td>{month}</td><td>{value:.2f}</td></tr>"
-        for month, value in sorted(monthly.items())
-    ) or "<tr><td colspan='2' class='muted'>No data</td></tr>"
-    strategy_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{strategy}</td>"
-            f"<td>{stats.get('win_rate', 0):.1f}%</td>"
-            f"<td>{stats.get('avg_profit', 0):.2f}</td>"
-            f"<td>{stats.get('avg_loss', 0):.2f}</td>"
-            f"<td>{stats.get('total_pnl', 0):.2f}</td>"
-            "</tr>"
+    monthly_rows = (
+        "".join(
+            f"<tr><td>{month}</td><td>{value:.2f}</td></tr>"
+            for month, value in sorted(monthly.items())
         )
-        for strategy, stats in strategy_stats.items()
-    ) or "<tr><td colspan='5' class='muted'>No strategy data</td></tr>"
-    regime_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{regime}</td>"
-            f"<td>{stats.get('trades', 0)}</td>"
-            f"<td>{stats.get('win_rate', 0):.1f}%</td>"
-            f"<td>{stats.get('total_pnl', 0):.2f}</td>"
-            "</tr>"
+        or "<tr><td colspan='2' class='muted'>No data</td></tr>"
+    )
+    strategy_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{strategy}</td>"
+                f"<td>{stats.get('win_rate', 0):.1f}%</td>"
+                f"<td>{stats.get('avg_profit', 0):.2f}</td>"
+                f"<td>{stats.get('avg_loss', 0):.2f}</td>"
+                f"<td>{stats.get('total_pnl', 0):.2f}</td>"
+                "</tr>"
+            )
+            for strategy, stats in strategy_stats.items()
         )
-        for regime, stats in regime_stats.items()
-    ) or "<tr><td colspan='4' class='muted'>No regime data</td></tr>"
-    winner_rows = "".join(
-        f"<li>{item.get('symbol', '')} {item.get('pnl', 0):.2f}</li>" for item in winners[:5]
-    ) or "<li class='muted'>No winners yet</li>"
-    loser_rows = "".join(
-        f"<li>{item.get('symbol', '')} {item.get('pnl', 0):.2f}</li>" for item in losers[:5]
-    ) or "<li class='muted'>No losers yet</li>"
-    open_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{row.get('symbol', '')}</td>"
-            f"<td>{row.get('strategy', '')}</td>"
-            f"<td>{row.get('quantity', '')}</td>"
-            f"<td>{row.get('dte_remaining', '')}</td>"
-            f"<td>{row.get('pnl', 0):.2f}</td>"
-            f"<td>{row.get('delta', 0):.2f}</td>"
-            f"<td>{row.get('theta', 0):.2f}</td>"
-            f"<td>{row.get('gamma', 0):.2f}</td>"
-            f"<td>{row.get('vega', 0):.2f}</td>"
-            f"<td>{'Yes' if bool(row.get('gamma_risk_flag', False)) else 'No'}</td>"
-            "</tr>"
+        or "<tr><td colspan='5' class='muted'>No strategy data</td></tr>"
+    )
+    regime_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{regime}</td>"
+                f"<td>{stats.get('trades', 0)}</td>"
+                f"<td>{stats.get('win_rate', 0):.1f}%</td>"
+                f"<td>{stats.get('total_pnl', 0):.2f}</td>"
+                "</tr>"
+            )
+            for regime, stats in regime_stats.items()
         )
-        for row in open_positions[:40]
-        if isinstance(row, dict)
-    ) or "<tr><td colspan='10' class='muted'>No open positions</td></tr>"
+        or "<tr><td colspan='4' class='muted'>No regime data</td></tr>"
+    )
+    winner_rows = (
+        "".join(
+            f"<li>{item.get('symbol', '')} {item.get('pnl', 0):.2f}</li>"
+            for item in winners[:5]
+        )
+        or "<li class='muted'>No winners yet</li>"
+    )
+    loser_rows = (
+        "".join(
+            f"<li>{item.get('symbol', '')} {item.get('pnl', 0):.2f}</li>"
+            for item in losers[:5]
+        )
+        or "<li class='muted'>No losers yet</li>"
+    )
+    open_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{row.get('symbol', '')}</td>"
+                f"<td>{row.get('strategy', '')}</td>"
+                f"<td>{row.get('quantity', '')}</td>"
+                f"<td>{row.get('dte_remaining', '')}</td>"
+                f"<td>{row.get('pnl', 0):.2f}</td>"
+                f"<td>{row.get('delta', 0):.2f}</td>"
+                f"<td>{row.get('theta', 0):.2f}</td>"
+                f"<td>{row.get('gamma', 0):.2f}</td>"
+                f"<td>{row.get('vega', 0):.2f}</td>"
+                f"<td>{'Yes' if bool(row.get('gamma_risk_flag', False)) else 'No'}</td>"
+                "</tr>"
+            )
+            for row in open_positions[:40]
+            if isinstance(row, dict)
+        )
+        or "<tr><td colspan='10' class='muted'>No open positions</td></tr>"
+    )
 
-    journal_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{item.get('symbol', '')}</td>"
-            f"<td>{item.get('strategy', '')}</td>"
-            f"<td>{item.get('verdict', '')}</td>"
-            f"<td>{item.get('outcome', 0)}</td>"
-            f"<td>{(item.get('analysis') or {}).get('adjustment', '') if isinstance(item.get('analysis'), dict) else ''}</td>"
-            "</tr>"
+    journal_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{item.get('symbol', '')}</td>"
+                f"<td>{item.get('strategy', '')}</td>"
+                f"<td>{item.get('verdict', '')}</td>"
+                f"<td>{item.get('outcome', 0)}</td>"
+                f"<td>{(item.get('analysis') or {}).get('adjustment', '') if isinstance(item.get('analysis'), dict) else ''}</td>"
+                "</tr>"
+            )
+            for item in journal_entries
+            if isinstance(item, dict)
         )
-        for item in journal_entries
-        if isinstance(item, dict)
-    ) or "<tr><td colspan='5' class='muted'>No journal entries</td></tr>"
+        or "<tr><td colspan='5' class='muted'>No journal entries</td></tr>"
+    )
 
     correlation_html = _render_correlation_heatmap(correlation_matrix)
     equity_svg = _render_equity_svg(equity_values)
@@ -226,58 +278,70 @@ def _render_html(payload: dict) -> str:
     sector_bars = _render_sector_bars(sector_exposure)
     greek_gauges = _render_greek_gauges(greeks)
     month_calendar_html = _render_monthly_calendar(daily_calendar)
-    execution_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{name}</td>"
-            f"<td>{float(values.get('avg_slippage', 0.0) or 0.0):.4f}</td>"
-            f"<td>{float(values.get('avg_adverse_slippage', 0.0) or 0.0):.4f}</td>"
-            f"<td>{int(values.get('samples', 0) or 0)}</td>"
-            "</tr>"
+    execution_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{name}</td>"
+                f"<td>{float(values.get('avg_slippage', 0.0) or 0.0):.4f}</td>"
+                f"<td>{float(values.get('avg_adverse_slippage', 0.0) or 0.0):.4f}</td>"
+                f"<td>{int(values.get('samples', 0) or 0)}</td>"
+                "</tr>"
+            )
+            for name, values in sorted(execution_by_strategy.items())
+            if isinstance(values, dict)
         )
-        for name, values in sorted(execution_by_strategy.items())
-        if isinstance(values, dict)
-    ) or "<tr><td colspan='4' class='muted'>No execution samples</td></tr>"
-    ranked_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{row.get('symbol', '')}</td>"
-            f"<td>{row.get('strategy', '')}</td>"
-            f"<td>{float(row.get('composite_score', 0.0) or 0.0):.2f}</td>"
-            f"<td>{float(row.get('score', 0.0) or 0.0):.1f}</td>"
-            f"<td>{float(row.get('pop', 0.0) or 0.0):.1%}</td>"
-            "</tr>"
+        or "<tr><td colspan='4' class='muted'>No execution samples</td></tr>"
+    )
+    ranked_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{row.get('symbol', '')}</td>"
+                f"<td>{row.get('strategy', '')}</td>"
+                f"<td>{float(row.get('composite_score', 0.0) or 0.0):.2f}</td>"
+                f"<td>{float(row.get('score', 0.0) or 0.0):.1f}</td>"
+                f"<td>{float(row.get('pop', 0.0) or 0.0):.1%}</td>"
+                "</tr>"
+            )
+            for row in top_ranked[:5]
+            if isinstance(row, dict)
         )
-        for row in top_ranked[:5]
-        if isinstance(row, dict)
-    ) or "<tr><td colspan='5' class='muted'>No ranked signals this cycle</td></tr>"
-    strategy_regime_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{strategy}</td>"
-            f"<td>{regime}</td>"
-            f"<td>{int(stats.get('wins', 0) or 0)}</td>"
-            f"<td>{int(stats.get('losses', 0) or 0)}</td>"
-            f"<td>{float(stats.get('win_rate', 0.0) or 0.0):.1f}%</td>"
-            "</tr>"
+        or "<tr><td colspan='5' class='muted'>No ranked signals this cycle</td></tr>"
+    )
+    strategy_regime_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{strategy}</td>"
+                f"<td>{regime}</td>"
+                f"<td>{int(stats.get('wins', 0) or 0)}</td>"
+                f"<td>{int(stats.get('losses', 0) or 0)}</td>"
+                f"<td>{float(stats.get('win_rate', 0.0) or 0.0):.1f}%</td>"
+                "</tr>"
+            )
+            for strategy, regimes in sorted(strategy_regime_stats.items())
+            if isinstance(regimes, dict)
+            for regime, stats in sorted(regimes.items())
+            if isinstance(stats, dict)
         )
-        for strategy, regimes in sorted(strategy_regime_stats.items())
-        if isinstance(regimes, dict)
-        for regime, stats in sorted(regimes.items())
-        if isinstance(stats, dict)
-    ) or "<tr><td colspan='5' class='muted'>No strategy/regime stats</td></tr>"
-    calibration_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{bucket}</td>"
-            f"<td>{float(row.get('expected_confidence', 0.0) or 0.0):.2f}</td>"
-            f"<td>{float(row.get('actual_win_rate', 0.0) or 0.0):.2f}</td>"
-            f"<td>{int(row.get('trades', 0) or 0)}</td>"
-            "</tr>"
+        or "<tr><td colspan='5' class='muted'>No strategy/regime stats</td></tr>"
+    )
+    calibration_rows = (
+        "".join(
+            (
+                "<tr>"
+                f"<td>{bucket}</td>"
+                f"<td>{float(row.get('expected_confidence', 0.0) or 0.0):.2f}</td>"
+                f"<td>{float(row.get('actual_win_rate', 0.0) or 0.0):.2f}</td>"
+                f"<td>{int(row.get('trades', 0) or 0)}</td>"
+                "</tr>"
+            )
+            for bucket, row in sorted(llm_calibration.items())
+            if isinstance(row, dict)
         )
-        for bucket, row in sorted(llm_calibration.items())
-        if isinstance(row, dict)
-    ) or "<tr><td colspan='4' class='muted'>No calibration data</td></tr>"
+        or "<tr><td colspan='4' class='muted'>No calibration data</td></tr>"
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -488,7 +552,10 @@ def _render_equity_svg(values: list[float]) -> str:
 def _render_strategy_bars(strategy_stats: dict) -> str:
     if not isinstance(strategy_stats, dict) or not strategy_stats:
         return "<div class='muted tiny'>No strategy performance data</div>"
-    totals = {name: float((stats or {}).get("total_pnl", 0.0) or 0.0) for name, stats in strategy_stats.items()}
+    totals = {
+        name: float((stats or {}).get("total_pnl", 0.0) or 0.0)
+        for name, stats in strategy_stats.items()
+    }
     max_abs = max(abs(value) for value in totals.values()) if totals else 1.0
     rows = []
     for name, value in sorted(totals.items(), key=lambda item: item[1], reverse=True):
@@ -505,7 +572,9 @@ def _render_sector_bars(sector_exposure: dict) -> str:
     if not isinstance(sector_exposure, dict) or not sector_exposure:
         return "<div class='muted tiny'>No sector exposure data</div>"
     rows = []
-    for sector, pct in sorted(sector_exposure.items(), key=lambda item: item[1], reverse=True):
+    for sector, pct in sorted(
+        sector_exposure.items(), key=lambda item: item[1], reverse=True
+    ):
         value = float(pct or 0.0)
         rows.append(
             f"<div class='tiny'>{sector}: {value:.2f}%</div>"
@@ -561,7 +630,11 @@ def _render_monthly_calendar(daily_pnl: dict) -> str:
         )
     if not rows:
         return "<div class='muted tiny'>No entries for current month</div>"
-    return "<table><thead><tr><th>Date</th><th>P&amp;L</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    return (
+        "<table><thead><tr><th>Date</th><th>P&amp;L</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
 
 
 def _corr_color(value: float) -> str:
@@ -575,7 +648,7 @@ def _corr_color(value: float) -> str:
 
 def safe_pct(value: object) -> str:
     try:
-        numeric = float(value)
+        numeric = float(str(value))
     except (TypeError, ValueError):
         numeric = 0.0
     if numeric <= 1.0:
@@ -601,6 +674,6 @@ def _coerce_outcome(value: object) -> Optional[float]:
     try:
         if value is None:
             return None
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return None

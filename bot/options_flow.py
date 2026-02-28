@@ -76,7 +76,9 @@ class OptionsFlowAnalyzer:
             directional_bias = "bullish"
 
         if unusual_flag and sweep_score >= 0.60:
-            institutional = directional_bias if directional_bias != "neutral" else "two_way"
+            institutional = (
+                directional_bias if directional_bias != "neutral" else "two_way"
+            )
         elif sweep_score >= 0.50:
             institutional = directional_bias
         else:
@@ -93,12 +95,18 @@ class OptionsFlowAnalyzer:
             metrics={
                 "call_volume_total": round(call_total, 2),
                 "put_volume_total": round(put_total, 2),
-                "call_open_interest_total": round(float(np.sum(call_oi)) if call_oi else 0.0, 2),
-                "put_open_interest_total": round(float(np.sum(put_oi)) if put_oi else 0.0, 2),
+                "call_open_interest_total": round(
+                    float(np.sum(call_oi)) if call_oi else 0.0, 2
+                ),
+                "put_open_interest_total": round(
+                    float(np.sum(put_oi)) if put_oi else 0.0, 2
+                ),
             },
         )
 
-    def _detect_unusual_volume(self, call_volumes: list[float], put_volumes: list[float]) -> bool:
+    def _detect_unusual_volume(
+        self, call_volumes: list[float], put_volumes: list[float]
+    ) -> bool:
         combined = [volume for volume in (call_volumes + put_volumes) if volume > 0]
         if len(combined) < 4:
             return False
@@ -136,8 +144,16 @@ class OptionsFlowAnalyzer:
             return 0.0
         prev_calls = _collect_metric(previous.get("calls", {}), "open_interest")
         prev_puts = _collect_metric(previous.get("puts", {}), "open_interest")
-        prev_total = float(np.sum(prev_calls) + np.sum(prev_puts)) if prev_calls or prev_puts else 0.0
-        curr_total = float(np.sum(current_calls) + np.sum(current_puts)) if current_calls or current_puts else 0.0
+        prev_total = (
+            float(np.sum(prev_calls) + np.sum(prev_puts))
+            if prev_calls or prev_puts
+            else 0.0
+        )
+        curr_total = (
+            float(np.sum(current_calls) + np.sum(current_puts))
+            if current_calls or current_puts
+            else 0.0
+        )
         if prev_total <= 0:
             return 0.0
         return (curr_total - prev_total) / prev_total
@@ -153,4 +169,3 @@ def _collect_metric(exp_map: dict, field: str) -> list[float]:
             if value >= 0:
                 out.append(value)
     return out
-

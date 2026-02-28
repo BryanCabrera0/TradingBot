@@ -61,7 +61,9 @@ class VolSurfaceAnalyzer:
         calls = chain_data.get("calls", {}) if isinstance(chain_data, dict) else {}
         puts = chain_data.get("puts", {}) if isinstance(chain_data, dict) else {}
         implied = _average_iv(calls, puts)
-        iv_rank = self.iv_history.update_and_rank(symbol, implied) if implied > 0 else 50.0
+        iv_rank = (
+            self.iv_history.update_and_rank(symbol, implied) if implied > 0 else 50.0
+        )
         iv_percentile = self._iv_percentile(symbol=symbol, value=implied)
 
         term = self._term_structure(calls, puts)
@@ -99,7 +101,11 @@ class VolSurfaceAnalyzer:
                 if not options:
                     continue
                 dte = int(safe_float(options[0].get("dte"), 0))
-                ivs = [safe_float(item.get("iv"), 0.0) for item in options if safe_float(item.get("iv"), 0.0) > 0]
+                ivs = [
+                    safe_float(item.get("iv"), 0.0)
+                    for item in options
+                    if safe_float(item.get("iv"), 0.0) > 0
+                ]
                 if not ivs or dte <= 0:
                     continue
                 points.append((dte, float(np.mean(ivs))))
@@ -143,8 +149,16 @@ class VolSurfaceAnalyzer:
             from bot.data_store import load_json
 
             payload = load_json(state, {"symbols": {}})
-            series = payload.get("symbols", {}).get(symbol.upper(), []) if isinstance(payload, dict) else []
-            ivs = [safe_float(item.get("iv"), 0.0) for item in series if isinstance(item, dict)]
+            series = (
+                payload.get("symbols", {}).get(symbol.upper(), [])
+                if isinstance(payload, dict)
+                else []
+            )
+            ivs = [
+                safe_float(item.get("iv"), 0.0)
+                for item in series
+                if isinstance(item, dict)
+            ]
             ivs = [x for x in ivs if x > 0]
             if len(ivs) < 5:
                 return 50.0
@@ -154,7 +168,9 @@ class VolSurfaceAnalyzer:
                 return 50.0
             z = (safe_float(value, mean) - mean) / std
             # Standard normal CDF approximation.
-            percentile = 50.0 * (1.0 + float(np.math.erf(z / np.sqrt(2.0))))
+            import math
+
+            percentile = 50.0 * (1.0 + float(math.erf(z / np.sqrt(2.0))))
             return max(0.0, min(100.0, percentile))
         except Exception:
             return 50.0
@@ -199,7 +215,11 @@ def _collect_delta_bucket_ivs(exp_map: dict, target_delta: float) -> list[float]
 
 
 def _realized_vol(price_history: list[dict]) -> float:
-    closes = [safe_float(row.get("close"), 0.0) for row in price_history if isinstance(row, dict)]
+    closes = [
+        safe_float(row.get("close"), 0.0)
+        for row in price_history
+        if isinstance(row, dict)
+    ]
     closes = [value for value in closes if value > 0]
     if len(closes) < 10:
         return 0.0

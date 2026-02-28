@@ -13,7 +13,9 @@ class ConfigTests(unittest.TestCase):
         tmp.write(textwrap.dedent(yaml_text))
         tmp.flush()
         tmp.close()
-        self.addCleanup(lambda: os.remove(tmp.name) if os.path.exists(tmp.name) else None)
+        self.addCleanup(
+            lambda: os.remove(tmp.name) if os.path.exists(tmp.name) else None
+        )
         return tmp.name
 
     def test_load_config_normalizes_enum_like_fields(self) -> None:
@@ -29,8 +31,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -53,8 +56,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -76,8 +80,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -89,15 +94,18 @@ class ConfigTests(unittest.TestCase):
     def test_env_overrides_clamp_llm_numeric_settings(self) -> None:
         config_path = self._write_config("llm:\n  enabled: true\n")
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ,
-            {
-                "LLM_TIMEOUT_SECONDS": "0",
-                "LLM_TEMPERATURE": "3.5",
-                "LLM_MIN_CONFIDENCE": "-0.2",
-                "LLM_MAX_OUTPUT_TOKENS": "0",
-            },
-            clear=True,
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "LLM_TIMEOUT_SECONDS": "0",
+                    "LLM_TEMPERATURE": "3.5",
+                    "LLM_MIN_CONFIDENCE": "-0.2",
+                    "LLM_MAX_OUTPUT_TOKENS": "0",
+                },
+                clear=True,
+            ),
         ):
             cfg = load_config(config_path)
 
@@ -108,12 +116,15 @@ class ConfigTests(unittest.TestCase):
 
     def test_env_overrides_llm_ensemble_models(self) -> None:
         config_path = self._write_config("llm:\n  enabled: true\n")
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ,
-            {
-                "LLM_ENSEMBLE_MODELS": "openai:gpt-5.2-pro, anthropic:claude-sonnet-4-20250514 ,ollama:llama3.1",
-            },
-            clear=True,
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "LLM_ENSEMBLE_MODELS": "openai:gpt-5.2-pro, anthropic:claude-sonnet-4-20250514 ,ollama:llama3.1",
+                },
+                clear=True,
+            ),
         ):
             cfg = load_config(config_path)
 
@@ -136,8 +147,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -158,8 +170,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -181,8 +194,9 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -201,19 +215,22 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ,
-            {
-                "EXECUTION_STALE_ORDER_MINUTES": "0",
-                "EXECUTION_CANCEL_STALE_ORDERS": "false",
-                "ALERTS_ENABLED": "true",
-                "ALERTS_MIN_LEVEL": "critical",
-                "ALERTS_TIMEOUT_SECONDS": "0",
-                "ALERTS_REQUIRE_IN_LIVE": "false",
-                "LOG_MAX_BYTES": "512",
-                "LOG_BACKUP_COUNT": "0",
-            },
-            clear=True,
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "EXECUTION_STALE_ORDER_MINUTES": "0",
+                    "EXECUTION_CANCEL_STALE_ORDERS": "false",
+                    "ALERTS_ENABLED": "true",
+                    "ALERTS_MIN_LEVEL": "critical",
+                    "ALERTS_TIMEOUT_SECONDS": "0",
+                    "ALERTS_REQUIRE_IN_LIVE": "false",
+                    "LOG_MAX_BYTES": "512",
+                    "LOG_BACKUP_COUNT": "0",
+                },
+                clear=True,
+            ),
         ):
             cfg = load_config(config_path)
 
@@ -237,8 +254,9 @@ class ConfigTests(unittest.TestCase):
               compact_mode: true
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -258,8 +276,9 @@ class ConfigTests(unittest.TestCase):
               max_ladder_attempts: 10
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -276,8 +295,9 @@ class ConfigTests(unittest.TestCase):
               market_move_cancel_pct: -1.0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -298,8 +318,9 @@ class ConfigTests(unittest.TestCase):
             max_signals_per_symbol_per_strategy: 0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -323,8 +344,9 @@ class ConfigTests(unittest.TestCase):
               feature_importance_log: false
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -344,8 +366,9 @@ class ConfigTests(unittest.TestCase):
               cutoff_hour: 30
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -364,8 +387,9 @@ class ConfigTests(unittest.TestCase):
               stress_threshold: -2.0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -383,14 +407,18 @@ class ConfigTests(unittest.TestCase):
               analysis_file: ""
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
         self.assertTrue(cfg.execution_timing.adaptive)
         self.assertEqual(cfg.execution_timing.min_fills_per_bucket, 1)
-        self.assertEqual(cfg.execution_timing.analysis_file, "bot/data/execution_timing_analysis.json")
+        self.assertEqual(
+            cfg.execution_timing.analysis_file,
+            "bot/data/execution_timing_analysis.json",
+        )
 
     def test_pillar_two_to_five_config_fields_normalize(self) -> None:
         config_path = self._write_config(
@@ -429,8 +457,9 @@ class ConfigTests(unittest.TestCase):
               sizing_scalar: 9
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -458,7 +487,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.strategy_sandbox.max_drawdown_pct, 1.0)
         self.assertEqual(cfg.strategy_sandbox.deployment_days, 1)
         self.assertEqual(cfg.strategy_sandbox.sizing_scalar, 1.0)
-        self.assertEqual(cfg.strategy_sandbox.active_strategy.get("name"), "sandbox_alpha")
+        self.assertEqual(
+            cfg.strategy_sandbox.active_strategy.get("name"), "sandbox_alpha"
+        )
 
     def test_scaling_fields_normalize(self) -> None:
         config_path = self._write_config(
@@ -471,8 +502,9 @@ class ConfigTests(unittest.TestCase):
               partial_exit_size: -1.0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -492,8 +524,9 @@ class ConfigTests(unittest.TestCase):
               max_scale_down: 2.0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -512,8 +545,9 @@ class ConfigTests(unittest.TestCase):
               step_days: 0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -531,8 +565,9 @@ class ConfigTests(unittest.TestCase):
               var_limit_pct: -2
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -548,8 +583,9 @@ class ConfigTests(unittest.TestCase):
               auto_import: false
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -564,8 +600,9 @@ class ConfigTests(unittest.TestCase):
               min_agreement: 9
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -583,8 +620,9 @@ class ConfigTests(unittest.TestCase):
               level_2_reduction: 2
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -605,8 +643,9 @@ class ConfigTests(unittest.TestCase):
               cold_start_min_trades: 0
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -631,8 +670,9 @@ class ConfigTests(unittest.TestCase):
                   vega_max: 100
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -653,8 +693,9 @@ class ConfigTests(unittest.TestCase):
               expiration_day_close_pct: 0.8
             """
         )
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ, {}, clear=True
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
         ):
             cfg = load_config(config_path)
 
@@ -671,14 +712,17 @@ class ConfigTests(unittest.TestCase):
             """
         )
 
-        with mock.patch("bot.config.load_dotenv", return_value=False), mock.patch.dict(
-            os.environ,
-            {
-                "SCHWAB_APP_KEY": "your_app_key_here",
-                "SCHWAB_APP_SECRET": "your_app_secret_here",
-                "SCHWAB_ACCOUNT_HASH": "your_account_hash_here",
-            },
-            clear=True,
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SCHWAB_APP_KEY": "your_app_key_here",
+                    "SCHWAB_APP_SECRET": "your_app_secret_here",
+                    "SCHWAB_ACCOUNT_HASH": "your_account_hash_here",
+                },
+                clear=True,
+            ),
         ):
             cfg = load_config(config_path)
 
@@ -693,9 +737,7 @@ class ConfigTests(unittest.TestCase):
         report = validate_config(cfg)
 
         self.assertFalse(report.is_valid)
-        self.assertTrue(
-            any("max_portfolio_risk_pct" in msg for msg in report.failed)
-        )
+        self.assertTrue(any("max_portfolio_risk_pct" in msg for msg in report.failed))
 
     def test_validation_rejects_kelly_fraction_out_of_bounds(self) -> None:
         cfg = BotConfig()
@@ -729,9 +771,13 @@ class ConfigTests(unittest.TestCase):
         report = validate_config(cfg)
 
         self.assertFalse(report.is_valid)
-        self.assertTrue(any("hedging.max_hedge_cost_pct" in msg for msg in report.failed))
+        self.assertTrue(
+            any("hedging.max_hedge_cost_pct" in msg for msg in report.failed)
+        )
 
-    def test_validation_allows_overlapping_dte_windows_when_multiple_symbol_positions_allowed(self) -> None:
+    def test_validation_allows_overlapping_dte_windows_when_multiple_symbol_positions_allowed(
+        self,
+    ) -> None:
         cfg = BotConfig()
         cfg.credit_spreads.enabled = True
         cfg.iron_condors.enabled = True
@@ -743,7 +789,9 @@ class ConfigTests(unittest.TestCase):
         report = validate_config(cfg)
 
         self.assertTrue(report.is_valid)
-        self.assertTrue(any("strategy DTE overlap check" in msg for msg in report.passed))
+        self.assertTrue(
+            any("strategy DTE overlap check" in msg for msg in report.passed)
+        )
 
     def test_validation_formats_human_readable_report(self) -> None:
         cfg = BotConfig()

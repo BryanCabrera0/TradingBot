@@ -3,7 +3,7 @@
 import json
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -54,14 +54,22 @@ class PaperTrader:
                     self.orders = data.get("orders", [])
                     logger.info(
                         "Loaded paper trading state: balance=$%.2f, %d open positions",
-                        self.balance, len(self.positions),
+                        self.balance,
+                        len(self.positions),
                     )
                 except RuntimeError:
                     raise
-                except (json.JSONDecodeError, KeyError, FileNotFoundError, OSError) as e:
+                except (
+                    json.JSONDecodeError,
+                    KeyError,
+                    FileNotFoundError,
+                    OSError,
+                ) as e:
                     logger.warning("Failed to load paper state: %s. Starting fresh.", e)
         except PermissionError:
-            logger.warning("Permission denied accessing paper_trades.json. Starting fresh.")
+            logger.warning(
+                "Permission denied accessing paper_trades.json. Starting fresh."
+            )
 
     def _save_state(self) -> None:
         """Save paper trading state to disk."""
@@ -91,7 +99,8 @@ class PaperTrader:
         """Sum of P&L from trades closed today."""
         today = date.today().isoformat()
         daily = sum(
-            t.get("pnl", 0) for t in self.closed_trades
+            t.get("pnl", 0)
+            for t in self.closed_trades
             if t.get("close_date", "").startswith(today)
         )
         return daily
@@ -149,7 +158,12 @@ class PaperTrader:
 
         logger.info(
             "PAPER OPEN: %s %s on %s | %d contracts | Credit: $%.2f ($%.2f total)",
-            strategy, position_id, symbol, quantity, credit, total_credit,
+            strategy,
+            position_id,
+            symbol,
+            quantity,
+            credit,
+            total_credit,
         )
 
         return {"order_id": order_id, "position_id": position_id, "status": "FILLED"}
@@ -201,7 +215,9 @@ class PaperTrader:
 
         if close_quantity >= open_quantity:
             # Remove from open positions
-            self.positions = [p for p in self.positions if p["position_id"] != position_id]
+            self.positions = [
+                p for p in self.positions if p["position_id"] != position_id
+            ]
             remaining_quantity = 0
         else:
             remaining_quantity = open_quantity - close_quantity
@@ -209,24 +225,29 @@ class PaperTrader:
             position["partial_closed"] = True
 
         order_id = str(uuid.uuid4())[:8]
-        self.orders.append({
-            "order_id": order_id,
-            "type": "close",
-            "position_id": position_id,
-            "symbol": position["symbol"],
-            "debit": close_value,
-            "quantity": close_quantity,
-            "pnl": total_pnl,
-            "reason": reason,
-            "timestamp": datetime.now().isoformat(),
-            "status": "FILLED",
-        })
+        self.orders.append(
+            {
+                "order_id": order_id,
+                "type": "close",
+                "position_id": position_id,
+                "symbol": position["symbol"],
+                "debit": close_value,
+                "quantity": close_quantity,
+                "pnl": total_pnl,
+                "reason": reason,
+                "timestamp": datetime.now().isoformat(),
+                "status": "FILLED",
+            }
+        )
 
         self._save_state()
 
         logger.info(
             "PAPER CLOSE: %s on %s | P/L: $%.2f | Reason: %s",
-            position_id, position["symbol"], total_pnl, reason,
+            position_id,
+            position["symbol"],
+            total_pnl,
+            reason,
         )
 
         return {

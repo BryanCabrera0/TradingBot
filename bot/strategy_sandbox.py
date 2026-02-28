@@ -17,7 +17,6 @@ from bot.config import StrategySandboxConfig
 from bot.data_store import dump_json, ensure_data_dir, load_json
 from bot.number_utils import safe_float
 
-
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_BASE_STRATEGY_PATH = Path("bot/strategies/base.py")
 
@@ -75,7 +74,9 @@ class StrategySandboxManager:
         self.expire_if_needed(today=today)
 
         if self.active_strategy() is not None:
-            return SandboxDecision(triggered=False, deployed=False, reason="sandbox_active")
+            return SandboxDecision(
+                triggered=False, deployed=False, reason="sandbox_active"
+            )
 
         triggered = self.update_trigger(
             regime=regime,
@@ -83,12 +84,15 @@ class StrategySandboxManager:
             enabled_strategies=enabled_strategies,
         )
         if not triggered:
-            return SandboxDecision(triggered=False, deployed=False, reason="trigger_not_met")
+            return SandboxDecision(
+                triggered=False, deployed=False, reason="trigger_not_met"
+            )
 
         failing = [
             name
             for name in sorted(enabled_strategies)
-            if safe_float(strategy_scores.get(name), 0.0) < float(self.config.min_failing_score)
+            if safe_float(strategy_scores.get(name), 0.0)
+            < float(self.config.min_failing_score)
         ]
 
         proposal = self.propose_strategy(
@@ -224,7 +228,9 @@ class StrategySandboxManager:
                     "contents": [
                         {
                             "role": "user",
-                            "parts": [{"text": json.dumps(payload, separators=(",", ":"))}],
+                            "parts": [
+                                {"text": json.dumps(payload, separators=(",", ":"))}
+                            ],
                         }
                     ],
                     "system_instruction": {
@@ -262,8 +268,13 @@ class StrategySandboxManager:
     @staticmethod
     def parse_strategy_proposal(raw: dict) -> dict:
         """Normalize a model proposal into the required deployment schema."""
-        name = str(raw.get("name", "sandbox_strategy")).strip().lower().replace(" ", "_")
-        name = "".join(ch for ch in name if ch.isalnum() or ch == "_") or "sandbox_strategy"
+        name = (
+            str(raw.get("name", "sandbox_strategy")).strip().lower().replace(" ", "_")
+        )
+        name = (
+            "".join(ch for ch in name if ch.isalnum() or ch == "_")
+            or "sandbox_strategy"
+        )
         strategy_type = str(raw.get("type", "other")).strip().lower() or "other"
         direction = str(raw.get("direction", "neutral")).strip().lower() or "neutral"
 
@@ -292,7 +303,9 @@ class StrategySandboxManager:
             "max_risk_per_trade": round(max_risk, 2),
         }
 
-    def run_sandbox_backtest(self, proposal: dict, *, as_of: Optional[date] = None) -> dict:
+    def run_sandbox_backtest(
+        self, proposal: dict, *, as_of: Optional[date] = None
+    ) -> dict:
         """Backtest the proposed strategy in isolation over recent history."""
         end = as_of or date.today()
         start = end - timedelta(days=max(5, int(self.config.backtest_days)))
@@ -328,7 +341,9 @@ class StrategySandboxManager:
             },
         }
 
-    def deploy_strategy(self, proposal: dict, *, backtest: dict, deployed_on: Optional[date] = None) -> bool:
+    def deploy_strategy(
+        self, proposal: dict, *, backtest: dict, deployed_on: Optional[date] = None
+    ) -> bool:
         """Deploy a sandbox strategy for a limited window."""
         if self.active_strategy() is not None:
             return False
@@ -399,7 +414,9 @@ class StrategySandboxManager:
         return active if isinstance(active, dict) else None
 
     def _load_state(self) -> dict:
-        payload = load_json(self.state_path, {"fail_streak": 0, "active": None, "history": []})
+        payload = load_json(
+            self.state_path, {"fail_streak": 0, "active": None, "history": []}
+        )
         if not isinstance(payload, dict):
             payload = {"fail_streak": 0, "active": None, "history": []}
         if not isinstance(payload.get("history"), list):

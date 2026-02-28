@@ -25,8 +25,12 @@ class CalendarTests(unittest.TestCase):
                 }
             }
 
-            with mock.patch("bot.earnings_calendar.requests.get", return_value=response):
-                blocked, earnings_date = calendar.earnings_within_window("AAPL", "2026-03-20")
+            with mock.patch(
+                "bot.earnings_calendar.requests.get", return_value=response
+            ):
+                blocked, earnings_date = calendar.earnings_within_window(
+                    "AAPL", "2026-03-20"
+                )
 
             self.assertTrue(blocked)
             self.assertEqual(earnings_date, "2026-03-10")
@@ -44,7 +48,9 @@ class CalendarTests(unittest.TestCase):
                 }
             }
 
-            with mock.patch("bot.dividend_calendar.requests.get", return_value=response):
+            with mock.patch(
+                "bot.dividend_calendar.requests.get", return_value=response
+            ):
                 risk = calendar.assess_trade_risk(
                     symbol="MSFT",
                     strategy="covered_call",

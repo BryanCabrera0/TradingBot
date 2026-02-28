@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
-import inspect
-import time
 
 from bot.config import ExecutionAlgoConfig
 from bot.data_store import dump_json, load_json
 from bot.number_utils import safe_float, safe_int
-
 
 DEFAULT_SLIPPAGE_PATH = Path("bot/data/slippage_history.json")
 
@@ -177,7 +176,9 @@ class ExecutionAlgoEngine:
         if not isinstance(result, dict):
             result = {"status": "REJECTED"}
         expected = safe_float(result.get("expected_fill_price"), midpoint_price)
-        realized = safe_float(result.get("fill_price", result.get("requested_price")), expected)
+        realized = safe_float(
+            result.get("fill_price", result.get("requested_price")), expected
+        )
         self._record_slippage(
             symbol=symbol,
             strategy=strategy,
@@ -244,7 +245,9 @@ class ExecutionAlgoEngine:
 
         for idx, child_qty in enumerate(schedule):
             concession = concession_ticks * 0.01
-            expected_price = self._price_with_concession(midpoint_price, side, concession)
+            expected_price = self._price_with_concession(
+                midpoint_price, side, concession
+            )
             child = self._execute_child(
                 order_factory=order_factory,
                 midpoint_price=expected_price,
@@ -265,7 +268,10 @@ class ExecutionAlgoEngine:
 
             status = str(child.get("status", "")).upper()
             if status == "FILLED":
-                fill_price = safe_float(child.get("fill_price", child.get("requested_price")), expected_price)
+                fill_price = safe_float(
+                    child.get("fill_price", child.get("requested_price")),
+                    expected_price,
+                )
                 weighted_fill += fill_price * child_qty
                 filled_qty += child_qty
                 filled_children += 1
@@ -280,7 +286,11 @@ class ExecutionAlgoEngine:
             status = "FILLED" if filled_qty == sum(schedule) else "PARTIALLY_FILLED"
         else:
             avg_fill = midpoint_price
-            status = str(child_results[-1].get("status", "REJECTED")).upper() if child_results else "REJECTED"
+            status = (
+                str(child_results[-1].get("status", "REJECTED")).upper()
+                if child_results
+                else "REJECTED"
+            )
 
         return {
             "status": status,
@@ -308,7 +318,9 @@ class ExecutionAlgoEngine:
         shifts: Optional[list[float]],
         total_timeout_seconds: Optional[int],
     ) -> dict:
-        children = self.generate_iceberg_children(quantity, int(self.config.iceberg_visible_qty))
+        children = self.generate_iceberg_children(
+            quantity, int(self.config.iceberg_visible_qty)
+        )
         results: list[dict] = []
         weighted_fill = 0.0
         filled_qty = 0
@@ -334,7 +346,9 @@ class ExecutionAlgoEngine:
             status = str(child.get("status", "")).upper()
             if status != "FILLED":
                 break
-            fill = safe_float(child.get("fill_price", child.get("requested_price")), midpoint_price)
+            fill = safe_float(
+                child.get("fill_price", child.get("requested_price")), midpoint_price
+            )
             weighted_fill += fill * child_qty
             filled_qty += child_qty
 
@@ -343,7 +357,11 @@ class ExecutionAlgoEngine:
             status = "FILLED" if filled_qty == sum(children) else "PARTIALLY_FILLED"
         else:
             fill_price = midpoint_price
-            status = str(results[-1].get("status", "REJECTED")).upper() if results else "REJECTED"
+            status = (
+                str(results[-1].get("status", "REJECTED")).upper()
+                if results
+                else "REJECTED"
+            )
 
         return {
             "status": status,
@@ -448,7 +466,9 @@ class ExecutionAlgoEngine:
         return result
 
     @staticmethod
-    def _price_with_concession(midpoint_price: float, side: str, concession: float) -> float:
+    def _price_with_concession(
+        midpoint_price: float, side: str, concession: float
+    ) -> float:
         mid = max(0.01, float(midpoint_price))
         slip = max(0.0, float(concession))
         if str(side).lower() == "credit":

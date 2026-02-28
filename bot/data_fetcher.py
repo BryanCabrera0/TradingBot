@@ -139,14 +139,19 @@ class HistoricalDataFetcher:
             tighten_file_permissions(path, label=f"historical snapshot {path}")
             return
         except Exception as exc:
-            logger.warning("Parquet write failed for %s (%s). Falling back to CSV.GZ.", path, exc)
+            logger.warning(
+                "Parquet write failed for %s (%s). Falling back to CSV.GZ.", path, exc
+            )
             fallback = path.with_suffix(".csv.gz")
             frame.to_csv(fallback, index=False, compression="gzip")
             tighten_file_permissions(fallback, label=f"historical snapshot {fallback}")
 
 
 def _business_days(start_date: date, end_date: date) -> list[date]:
-    return [ts.date() for ts in pd.bdate_range(start=start_date, end=end_date).to_pydatetime()]
+    return [
+        ts.date()
+        for ts in pd.bdate_range(start=start_date, end=end_date).to_pydatetime()
+    ]
 
 
 def _parse_iso_date(value: str) -> date:
@@ -156,7 +161,10 @@ def _parse_iso_date(value: str) -> date:
 def _flatten_chain_rows(symbol: str, trading_day: date, raw_chain: dict) -> list[dict]:
     rows: list[dict] = []
     snapshot_date = trading_day.isoformat()
-    for side_key, contract_type in (("callExpDateMap", "CALL"), ("putExpDateMap", "PUT")):
+    for side_key, contract_type in (
+        ("callExpDateMap", "CALL"),
+        ("putExpDateMap", "PUT"),
+    ):
         exp_map = raw_chain.get(side_key, {})
         if not isinstance(exp_map, dict):
             continue
@@ -197,7 +205,9 @@ def _flatten_chain_rows(symbol: str, trading_day: date, raw_chain: dict) -> list
                             "volume": int(contract.get("totalVolume", 0) or 0),
                             "open_interest": int(contract.get("openInterest", 0) or 0),
                             "dte": int(contract.get("daysToExpiration", 0) or 0),
-                            "underlying_price": float(raw_chain.get("underlyingPrice", 0.0) or 0.0),
+                            "underlying_price": float(
+                                raw_chain.get("underlyingPrice", 0.0) or 0.0
+                            ),
                         }
                     )
     return rows

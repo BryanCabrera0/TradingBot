@@ -1,4 +1,11 @@
-"""News intelligence scanner for symbol-specific and macro market headlines."""
+"""News intelligence scanner for symbol-specific and macro market headlines.
+
+SIMPLE EXPLANATION:
+The News Scanner agent reads financial headlines and articles (from places like Google News 
+and Finnhub) to figure out if the news for a specific stock or the broader market is 
+good, bad, or neutral. It uses an LLM to score the sentiment, helping the bot avoid 
+trading into bad news.
+"""
 
 from __future__ import annotations
 
@@ -24,19 +31,48 @@ MAX_RSS_PAYLOAD_CHARS = 1_000_000
 SENTIMENT_EVENT_BLOCKLIST = {"fda", "merger", "acquisition", "lawsuit", "bankruptcy"}
 
 POSITIVE_KEYWORDS = {
-    "beats", "beat", "upgrade", "upgraded", "surge", "rally", "bullish",
-    "growth", "record", "strong", "guidance raised", "profit jumps",
+    "beats",
+    "beat",
+    "upgrade",
+    "upgraded",
+    "surge",
+    "rally",
+    "bullish",
+    "growth",
+    "record",
+    "strong",
+    "guidance raised",
+    "profit jumps",
 }
 
 NEGATIVE_KEYWORDS = {
-    "miss", "downgrade", "downgraded", "plunge", "lawsuit", "investigation",
-    "recall", "layoff", "bankruptcy", "weak", "warning", "guidance cut",
-    "fraud", "default",
+    "miss",
+    "downgrade",
+    "downgraded",
+    "plunge",
+    "lawsuit",
+    "investigation",
+    "recall",
+    "layoff",
+    "bankruptcy",
+    "weak",
+    "warning",
+    "guidance cut",
+    "fraud",
+    "default",
 }
 
 TRACKED_TOPICS = {
-    "inflation", "federal reserve", "interest rates", "earnings", "ai",
-    "tariffs", "recession", "unemployment", "geopolitics", "volatility",
+    "inflation",
+    "federal reserve",
+    "interest rates",
+    "earnings",
+    "ai",
+    "tariffs",
+    "recession",
+    "unemployment",
+    "geopolitics",
+    "volatility",
 }
 SECRET_PLACEHOLDER_MARKERS = ("your_", "_here", "changeme")
 
@@ -66,9 +102,13 @@ class NewsScanner:
         self._cache: dict[str, tuple[float, list[NewsItem]]] = {}
         self._sentiment_cache: dict[str, tuple[float, dict]] = {}
 
-    def build_context(self, symbol: str, *, macro_events: Optional[dict] = None) -> dict:
+    def build_context(
+        self, symbol: str, *, macro_events: Optional[dict] = None
+    ) -> dict:
         """Return a structured news context payload for the requested symbol."""
-        symbol_news = self.get_symbol_news(symbol) if self.config.include_symbol_news else []
+        symbol_news = (
+            self.get_symbol_news(symbol) if self.config.include_symbol_news else []
+        )
         market_news = self.get_market_news() if self.config.include_market_news else []
         sentiment = self.get_symbol_sentiment(symbol, symbol_news)
         policy = self.trade_direction_policy(symbol, sentiment=sentiment)
@@ -103,8 +143,17 @@ class NewsScanner:
     ) -> dict:
         """Return LLM-scored symbol sentiment with per-symbol caching."""
         symbol_key = symbol.upper().strip()
-        model_key = str(model or self.config.llm_model or "").strip() or self.config.llm_model
-        ttl = max(0, int(self.config.llm_sentiment_cache_seconds if cache_seconds is None else cache_seconds))
+        model_key = (
+            str(model or self.config.llm_model or "").strip() or self.config.llm_model
+        )
+        ttl = max(
+            0,
+            int(
+                self.config.llm_sentiment_cache_seconds
+                if cache_seconds is None
+                else cache_seconds
+            ),
+        )
         cache_key = f"{symbol_key}:{model_key}"
         cached = self._sentiment_cache.get(cache_key)
         if cached and (time.time() - cached[0]) < ttl:
@@ -121,21 +170,27 @@ class NewsScanner:
                 "key_event": None,
             }
         elif self.config.llm_sentiment_enabled:
-            sentiment = self._score_sentiment_with_llm(symbol_key, top_titles, model=model_key)
+            sentiment = self._score_sentiment_with_llm(
+                symbol_key, top_titles, model=model_key
+            )
         else:
             sentiment = self._fallback_sentiment(top_titles)
 
         self._sentiment_cache[cache_key] = (time.time(), sentiment)
         return sentiment
 
-    def trade_direction_policy(self, symbol: str, *, sentiment: Optional[dict] = None) -> dict:
+    def trade_direction_policy(
+        self, symbol: str, *, sentiment: Optional[dict] = None
+    ) -> dict:
         """Map sentiment signal into strategy-side blocks."""
         sentiment = sentiment or self.get_symbol_sentiment(symbol)
         direction = str(sentiment.get("sentiment", "neutral")).lower()
         confidence = float(sentiment.get("confidence", 0.0) or 0.0)
         if confidence > 1.0:
             confidence /= 100.0
-        key_event = str(sentiment.get("catalyst", sentiment.get("key_event", "")) or "").lower()
+        key_event = str(
+            sentiment.get("catalyst", sentiment.get("key_event", "")) or ""
+        ).lower()
 
         block_all = any(keyword in key_event for keyword in SENTIMENT_EVENT_BLOCKLIST)
         allow_bull_put = True
@@ -178,7 +233,9 @@ class NewsScanner:
 
     def _fetch_symbol_news(self, symbol: str) -> list[NewsItem]:
         queries = [f"{symbol} stock", f"{symbol} earnings", f"{symbol} options"]
-        per_query_limit = max(2, self.config.max_symbol_headlines // max(len(queries), 1))
+        per_query_limit = max(
+            2, self.config.max_symbol_headlines // max(len(queries), 1)
+        )
         items: list[NewsItem] = []
         for query in queries:
             items.extend(self._fetch_google_news(query, per_query_limit))
@@ -186,14 +243,19 @@ class NewsScanner:
                 break
 
         if self.config.finnhub_api_key:
-            items.extend(self._fetch_finnhub_news(symbol, self.config.max_symbol_headlines))
+            items.extend(
+                self._fetch_finnhub_news(symbol, self.config.max_symbol_headlines)
+            )
 
         return _dedupe_news(items)[: self.config.max_symbol_headlines]
 
     def _fetch_market_news(self) -> list[NewsItem]:
         if not self.config.market_queries:
             return []
-        per_query_limit = max(2, self.config.max_market_headlines // max(len(self.config.market_queries), 1))
+        per_query_limit = max(
+            2,
+            self.config.max_market_headlines // max(len(self.config.market_queries), 1),
+        )
         items: list[NewsItem] = []
         for query in self.config.market_queries:
             items.extend(self._fetch_google_news(query, per_query_limit))
@@ -215,7 +277,11 @@ class NewsScanner:
             response.raise_for_status()
             payload = response.text
             if len(payload) > MAX_RSS_PAYLOAD_CHARS:
-                logger.warning("Skipping oversized RSS response for query %r (%d chars).", query, len(payload))
+                logger.warning(
+                    "Skipping oversized RSS response for query %r (%d chars).",
+                    query,
+                    len(payload),
+                )
                 return []
             return _parse_rss_items(payload, limit)
         except Exception as exc:
@@ -256,7 +322,9 @@ class NewsScanner:
             published = ""
             if row.get("datetime"):
                 try:
-                    published = datetime.utcfromtimestamp(int(row.get("datetime"))).isoformat()
+                    published = datetime.utcfromtimestamp(
+                        int(str(row.get("datetime")))
+                    ).isoformat()
                 except Exception:
                     published = ""
             items.append(
@@ -271,11 +339,16 @@ class NewsScanner:
             )
         return items
 
-    def _score_sentiment_with_llm(self, symbol: str, headlines: list[str], *, model: Optional[str] = None) -> dict:
+    def _score_sentiment_with_llm(
+        self, symbol: str, headlines: list[str], *, model: Optional[str] = None
+    ) -> dict:
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not _is_configured_secret(api_key):
             return self._fallback_sentiment(headlines)
-        model_name = str(model or self.config.llm_model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+        model_name = (
+            str(model or self.config.llm_model or "gemini-2.5-pro").strip()
+            or "gemini-2.5-pro"
+        )
 
         prompt = {
             "symbol": symbol,
@@ -296,7 +369,9 @@ class NewsScanner:
                     "contents": [
                         {
                             "role": "user",
-                            "parts": [{"text": json.dumps(prompt, separators=(",", ":"))}],
+                            "parts": [
+                                {"text": json.dumps(prompt, separators=(",", ":"))}
+                            ],
                         }
                     ],
                     "system_instruction": {
@@ -315,7 +390,9 @@ class NewsScanner:
                 timeout=self.config.request_timeout_seconds,
             )
             if response.status_code >= 400:
-                raise RuntimeError(f"gemini_error_{response.status_code}: {response.text[:240]}")
+                raise RuntimeError(
+                    f"gemini_error_{response.status_code}: {response.text[:240]}"
+                )
             raw = _extract_gemini_text(response.json())
             parsed = _safe_json_object(raw)
             score = float(parsed.get("score", 0.0) or 0.0)

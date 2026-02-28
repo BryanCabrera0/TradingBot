@@ -13,16 +13,16 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 import pandas as pd
 
-from bot.config import BotConfig, load_config
 from bot.analytics import compute as compute_analytics
+from bot.config import BotConfig, load_config
 from bot.data_store import dump_json, ensure_data_dir
 from bot.number_utils import safe_float
-from bot.regime_detector import LOW_VOL_GRIND, MarketRegimeDetector
+from bot.regime_detector import MarketRegimeDetector
 from bot.risk_manager import RiskManager
 from bot.strategies.base import TradeSignal
 from bot.strategies.calendar_spreads import CalendarSpreadStrategy
@@ -76,7 +76,9 @@ class Backtester:
 
         self.risk_manager = RiskManager(self.config.risk)
         self.strategies = self._build_strategies()
-        self.vol_surface_analyzer = VolSurfaceAnalyzer() if self.config.vol_surface.enabled else None
+        self.vol_surface_analyzer = (
+            VolSurfaceAnalyzer() if self.config.vol_surface.enabled else None
+        )
         self.regime_detector = MarketRegimeDetector(config=vars(self.config.regime))
         self._spy_history: list[float] = []
         self._strategy_loss_streaks: dict[str, int] = defaultdict(int)
@@ -195,16 +197,32 @@ class Backtester:
                     }
                 )
 
-            test_sharpes = [safe_float(row.get("test_metrics", {}).get("sharpe_ratio"), 0.0) for row in strategy_windows]
-            test_win_rates = [safe_float(row.get("test_metrics", {}).get("win_rate"), 0.0) for row in strategy_windows]
-            test_returns = [safe_float(row.get("test_metrics", {}).get("total_return"), 0.0) for row in strategy_windows]
-            test_drawdowns = [safe_float(row.get("test_metrics", {}).get("max_drawdown"), 0.0) for row in strategy_windows]
+            test_sharpes = [
+                safe_float(row.get("test_metrics", {}).get("sharpe_ratio"), 0.0)
+                for row in strategy_windows
+            ]
+            test_win_rates = [
+                safe_float(row.get("test_metrics", {}).get("win_rate"), 0.0)
+                for row in strategy_windows
+            ]
+            test_returns = [
+                safe_float(row.get("test_metrics", {}).get("total_return"), 0.0)
+                for row in strategy_windows
+            ]
+            test_drawdowns = [
+                safe_float(row.get("test_metrics", {}).get("max_drawdown"), 0.0)
+                for row in strategy_windows
+            ]
 
             averaged_param_scores = {
                 key: float(np.mean(values)) if values else float("-inf")
                 for key, values in param_scores.items()
             }
-            best_param_key = max(averaged_param_scores, key=averaged_param_scores.get) if averaged_param_scores else "{}"
+            best_param_key = (
+                max(averaged_param_scores, key=lambda k: averaged_param_scores[k])
+                if averaged_param_scores
+                else "{}"
+            )
             try:
                 optimal_params = json.loads(best_param_key)
             except Exception:
@@ -214,13 +232,25 @@ class Backtester:
                 "windows": strategy_windows,
                 "optimal_params": optimal_params,
                 "oos": {
-                    "avg_sharpe": round(float(np.mean(test_sharpes)) if test_sharpes else 0.0, 4),
-                    "avg_win_rate": round(float(np.mean(test_win_rates)) if test_win_rates else 0.0, 4),
-                    "avg_total_return": round(float(np.mean(test_returns)) if test_returns else 0.0, 6),
-                    "max_drawdown": round(float(np.max(test_drawdowns)) if test_drawdowns else 0.0, 6),
+                    "avg_sharpe": round(
+                        float(np.mean(test_sharpes)) if test_sharpes else 0.0, 4
+                    ),
+                    "avg_win_rate": round(
+                        float(np.mean(test_win_rates)) if test_win_rates else 0.0, 4
+                    ),
+                    "avg_total_return": round(
+                        float(np.mean(test_returns)) if test_returns else 0.0, 6
+                    ),
+                    "max_drawdown": round(
+                        float(np.max(test_drawdowns)) if test_drawdowns else 0.0, 6
+                    ),
                     "confidence_interval_5_95": [
-                        round(float(np.percentile(test_returns, 5)), 6) if test_returns else 0.0,
-                        round(float(np.percentile(test_returns, 95)), 6) if test_returns else 0.0,
+                        round(float(np.percentile(test_returns, 5)), 6)
+                        if test_returns
+                        else 0.0,
+                        round(float(np.percentile(test_returns, 95)), 6)
+                        if test_returns
+                        else 0.0,
                     ],
                 },
             }
@@ -249,9 +279,15 @@ class Backtester:
             "strategies": strategy_results,
             "oos_summary": {
                 "windows": len(windows),
-                "avg_sharpe": round(float(np.mean(all_sharpes)) if all_sharpes else 0.0, 4),
-                "avg_win_rate": round(float(np.mean(all_win_rates)) if all_win_rates else 0.0, 4),
-                "max_drawdown": round(float(np.max(all_drawdowns)) if all_drawdowns else 0.0, 6),
+                "avg_sharpe": round(
+                    float(np.mean(all_sharpes)) if all_sharpes else 0.0, 4
+                ),
+                "avg_win_rate": round(
+                    float(np.mean(all_win_rates)) if all_win_rates else 0.0, 4
+                ),
+                "max_drawdown": round(
+                    float(np.max(all_drawdowns)) if all_drawdowns else 0.0, 6
+                ),
             },
         }
         output = ensure_data_dir("bot/data") / "walkforward_results.json"
@@ -276,7 +312,7 @@ class Backtester:
             commission_per_contract=self.commission_per_contract,
             base_slippage_pct=self.base_slippage_pct,
         )
-        bt.risk_manager.earnings_calendar = _AlwaysNoEarnings()
+        bt.risk_manager.earnings_calendar = cast(Any, _AlwaysNoEarnings())
         result = bt.run(start=start, end=end)
         report = result.report if isinstance(result.report, dict) else {}
         return {
@@ -288,7 +324,9 @@ class Backtester:
         }
 
     @staticmethod
-    def _configure_single_strategy(cfg: BotConfig, strategy_name: str, params: dict) -> None:
+    def _configure_single_strategy(
+        cfg: BotConfig, strategy_name: str, params: dict
+    ) -> None:
         enabled = {
             "credit_spreads",
             "iron_condors",
@@ -311,7 +349,9 @@ class Backtester:
 
     def _available_trading_days(self) -> list[date]:
         days: set[date] = set()
-        for path in sorted(self.data_dir.glob("*_*.parquet.gz")) + sorted(self.data_dir.glob("*_*.parquet.csv.gz")):
+        for path in sorted(self.data_dir.glob("*_*.parquet.gz")) + sorted(
+            self.data_dir.glob("*_*.parquet.csv.gz")
+        ):
             parts = path.name.split("_")
             if len(parts) < 2:
                 continue
@@ -336,7 +376,9 @@ class Backtester:
         cursor = 0
         while cursor + train_days + test_days <= total:
             train_slice = trading_days[cursor : cursor + train_days]
-            test_slice = trading_days[cursor + train_days : cursor + train_days + test_days]
+            test_slice = trading_days[
+                cursor + train_days : cursor + train_days + test_days
+            ]
             windows.append(
                 WalkForwardWindow(
                     train_start=train_slice[0].isoformat(),
@@ -365,8 +407,8 @@ class Backtester:
                         )
         return grid
 
-    def _build_strategies(self) -> list:
-        strategies = []
+    def _build_strategies(self) -> list[Any]:
+        strategies: list[Any] = []
         if self.config.credit_spreads.enabled:
             strategies.append(CreditSpreadStrategy(vars(self.config.credit_spreads)))
         if self.config.iron_condors.enabled:
@@ -376,7 +418,9 @@ class Backtester:
         if self.config.naked_puts.enabled:
             strategies.append(NakedPutStrategy(vars(self.config.naked_puts)))
         if self.config.calendar_spreads.enabled:
-            strategies.append(CalendarSpreadStrategy(vars(self.config.calendar_spreads)))
+            strategies.append(
+                CalendarSpreadStrategy(vars(self.config.calendar_spreads))
+            )
         return strategies
 
     def _run_day(self, trading_day: date) -> None:
@@ -394,10 +438,14 @@ class Backtester:
             open_positions=self.positions,
             daily_pnl=daily_realized,
         )
-        self._process_entries(snapshots, regime_state=regime_state, trading_day=trading_day)
+        self._process_entries(
+            snapshots, regime_state=regime_state, trading_day=trading_day
+        )
         self._record_equity_point(trading_day)
 
-    def _process_entries(self, snapshots: dict[str, dict], *, regime_state, trading_day: date) -> None:
+    def _process_entries(
+        self, snapshots: dict[str, dict], *, regime_state, trading_day: date
+    ) -> None:
         for symbol, chain_data in snapshots.items():
             underlying = float(chain_data.get("underlying_price", 0.0))
             if underlying <= 0:
@@ -408,7 +456,9 @@ class Backtester:
                 pause_until = self._strategy_pause_until.get(strategy.name)
                 if pause_until and trading_day <= pause_until:
                     continue
-                weight = float(regime_state.recommended_strategy_weights.get(strategy.name, 1.0))
+                weight = float(
+                    regime_state.recommended_strategy_weights.get(strategy.name, 1.0)
+                )
                 if weight <= 0:
                     continue
                 market_context = {
@@ -422,7 +472,9 @@ class Backtester:
                         chain_data=chain_data,
                         price_history=[],
                     ).to_dict()
-                signals = strategy.scan_for_entries(symbol, chain_data, underlying, market_context=market_context)
+                signals = strategy.scan_for_entries(
+                    symbol, chain_data, underlying, market_context=market_context
+                )
                 for signal in signals:
                     if signal.analysis is None:
                         continue
@@ -430,7 +482,9 @@ class Backtester:
                         0.0,
                         min(100.0, float(signal.analysis.score or 0.0) * weight),
                     )
-                    signal.size_multiplier *= float(regime_state.recommended_position_size_scalar or 1.0)
+                    signal.size_multiplier *= float(
+                        regime_state.recommended_position_size_scalar or 1.0
+                    )
                     signal.metadata.setdefault("regime", regime_state.regime)
                 all_signals.extend(signals)
             all_signals.sort(
@@ -450,7 +504,9 @@ class Backtester:
                 self._open_position(signal)
                 self.risk_manager.register_open_position(
                     symbol=signal.symbol,
-                    max_loss_per_contract=self.risk_manager.effective_max_loss_per_contract(signal),
+                    max_loss_per_contract=self.risk_manager.effective_max_loss_per_contract(
+                        signal
+                    ),
                     quantity=signal.quantity,
                     strategy=signal.strategy,
                 )
@@ -513,11 +569,17 @@ class Backtester:
         }
         self.positions.append(position)
 
-    def _close_position(self, position_id: Optional[str], reason: str, trading_day: date) -> None:
+    def _close_position(
+        self, position_id: Optional[str], reason: str, trading_day: date
+    ) -> None:
         if not position_id:
             return
         index = next(
-            (i for i, position in enumerate(self.positions) if position.get("position_id") == position_id),
+            (
+                i
+                for i, position in enumerate(self.positions)
+                if position.get("position_id") == position_id
+            ),
             None,
         )
         if index is None:
@@ -526,7 +588,9 @@ class Backtester:
         position = self.positions.pop(index)
         close_value = float(position.get("current_value", 0.0))
         quantity = max(1, int(position.get("quantity", 1)))
-        exit_slippage_per_contract = close_value * self._slippage_factor(float(position.get("details", {}).get("score", 50.0)))
+        exit_slippage_per_contract = close_value * self._slippage_factor(
+            float(position.get("details", {}).get("score", 50.0))
+        )
         effective_close = max(0.0, close_value + exit_slippage_per_contract)
         commission = quantity * self.commission_per_contract
         self.cash_balance -= effective_close * quantity * 100.0
@@ -534,11 +598,17 @@ class Backtester:
         self.total_fees += commission
         self.total_slippage += exit_slippage_per_contract * quantity * 100.0
 
-        pnl = (float(position.get("entry_credit", 0.0)) - effective_close) * quantity * 100.0
+        pnl = (
+            (float(position.get("entry_credit", 0.0)) - effective_close)
+            * quantity
+            * 100.0
+        )
         pnl -= commission
         opened_at = _parse_datetime(position.get("open_date"))
         days_in_trade = (
-            max(0, (trading_day - opened_at.date()).days) if opened_at else max(0, int(position.get("dte_remaining", 0)))
+            max(0, (trading_day - opened_at.date()).days)
+            if opened_at
+            else max(0, int(position.get("dte_remaining", 0)))
         )
         closed = {
             **position,
@@ -558,9 +628,18 @@ class Backtester:
         strategy_key = str(position.get("strategy", ""))
         if pnl < 0:
             self._strategy_loss_streaks[strategy_key] += 1
-            limit = max(2, int(getattr(self.config.circuit_breakers, "strategy_loss_streak_limit", 5)))
+            limit = max(
+                2,
+                int(
+                    getattr(
+                        self.config.circuit_breakers, "strategy_loss_streak_limit", 5
+                    )
+                ),
+            )
             if self._strategy_loss_streaks[strategy_key] >= limit:
-                self._strategy_pause_until[strategy_key] = trading_day + timedelta(days=1)
+                self._strategy_pause_until[strategy_key] = trading_day + timedelta(
+                    days=1
+                )
         else:
             self._strategy_loss_streaks[strategy_key] = 0
 
@@ -573,7 +652,11 @@ class Backtester:
         trend = 0.0
         if len(self._spy_history) >= 20:
             short = float(np.mean(self._spy_history[-20:]))
-            long = float(np.mean(self._spy_history[-50:])) if len(self._spy_history) >= 50 else short
+            long = (
+                float(np.mean(self._spy_history[-50:]))
+                if len(self._spy_history) >= 50
+                else short
+            )
             if long > 0:
                 trend = max(-1.0, min(1.0, (short - long) / long * 5.0))
         vix_proxy = 20.0
@@ -602,14 +685,18 @@ class Backtester:
 
             expiration = str(position.get("expiration", ""))
             try:
-                exp_date = datetime.strptime(expiration.split("T")[0], "%Y-%m-%d").date()
+                exp_date = datetime.strptime(
+                    expiration.split("T")[0], "%Y-%m-%d"
+                ).date()
                 position["dte_remaining"] = (exp_date - trading_day).days
             except Exception:
                 continue
 
     def _current_equity(self) -> float:
         mark_to_close = sum(
-            float(position.get("current_value", 0.0)) * max(1, int(position.get("quantity", 1))) * 100.0
+            float(position.get("current_value", 0.0))
+            * max(1, int(position.get("quantity", 1)))
+            * 100.0
             for position in self.positions
         )
         return self.cash_balance - mark_to_close
@@ -667,13 +754,23 @@ class Backtester:
         sortino = _sortino_ratio(daily_returns)
         max_drawdown = _max_drawdown(equities)
         total_days = max(1, (end_date - start_date).days)
-        annualized_return = ((1.0 + total_return) ** (365.0 / total_days) - 1.0) if total_return > -1.0 else -1.0
+        annualized_return = (
+            ((1.0 + total_return) ** (365.0 / total_days) - 1.0)
+            if total_return > -1.0
+            else -1.0
+        )
         calmar = (annualized_return / max_drawdown) if max_drawdown > 0 else 0.0
 
-        wins = [trade["pnl"] for trade in self.closed_trades if trade.get("pnl", 0.0) > 0]
-        losses = [trade["pnl"] for trade in self.closed_trades if trade.get("pnl", 0.0) < 0]
+        wins = [
+            trade["pnl"] for trade in self.closed_trades if trade.get("pnl", 0.0) > 0
+        ]
+        losses = [
+            trade["pnl"] for trade in self.closed_trades if trade.get("pnl", 0.0) < 0
+        ]
         avg_days = (
-            float(np.mean([trade.get("days_in_trade", 0) for trade in self.closed_trades]))
+            float(
+                np.mean([trade.get("days_in_trade", 0) for trade in self.closed_trades])
+            )
             if self.closed_trades
             else 0.0
         )
@@ -686,7 +783,9 @@ class Backtester:
         report = {
             "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
             "initial_balance": round(self.initial_balance, 2),
-            "ending_equity": round(equities[-1], 2) if equities else round(self.initial_balance, 2),
+            "ending_equity": round(equities[-1], 2)
+            if equities
+            else round(self.initial_balance, 2),
             "total_return": round(total_return, 6),
             "annualized_return": round(annualized_return, 6),
             "sharpe_ratio": round(sharpe, 4),
@@ -696,7 +795,9 @@ class Backtester:
             "win_rate": round((len(wins) / max(1, len(self.closed_trades))), 4),
             "average_winner": round(float(np.mean(wins)) if wins else 0.0, 2),
             "average_loser": round(float(np.mean(losses)) if losses else 0.0, 2),
-            "profit_factor": round((sum(wins) / abs(sum(losses))) if losses else float("inf"), 4),
+            "profit_factor": round(
+                (sum(wins) / abs(sum(losses))) if losses else float("inf"), 4
+            ),
             "average_days_in_trade": round(avg_days, 2),
             "monthly_returns": monthly,
             "strategy_performance": strategy_performance,
@@ -716,16 +817,34 @@ class Backtester:
             "equity_curve": self.equity_curve,
         }
         if analytics_core:
-            report["sharpe_ratio"] = round(float(analytics_core.get("sharpe", sharpe)), 4)
-            report["sortino_ratio"] = round(float(analytics_core.get("sortino", sortino)), 4)
-            report["calmar_ratio"] = round(float(analytics_core.get("calmar", calmar)), 4)
-            report["max_drawdown"] = round(float(analytics_core.get("max_drawdown", max_drawdown)), 6)
-            report["max_drawdown_duration"] = int(analytics_core.get("max_drawdown_duration", 0) or 0)
-            report["win_rate"] = round(float(analytics_core.get("win_rate", report["win_rate"])), 4)
+            report["sharpe_ratio"] = round(
+                float(analytics_core.get("sharpe", sharpe)), 4
+            )
+            report["sortino_ratio"] = round(
+                float(analytics_core.get("sortino", sortino)), 4
+            )
+            report["calmar_ratio"] = round(
+                float(analytics_core.get("calmar", calmar)), 4
+            )
+            report["max_drawdown"] = round(
+                float(analytics_core.get("max_drawdown", max_drawdown)), 6
+            )
+            report["max_drawdown_duration"] = int(
+                analytics_core.get("max_drawdown_duration", 0) or 0
+            )
+            report["win_rate"] = round(
+                float(analytics_core.get("win_rate", report["win_rate"])), 4
+            )
             raw_pf = analytics_core.get("profit_factor", report["profit_factor"])
-            report["profit_factor"] = raw_pf if raw_pf == float("inf") else round(float(raw_pf), 4)
-            report["expectancy_per_trade"] = round(float(analytics_core.get("expectancy_per_trade", 0.0)), 4)
-            report["risk_adjusted_return"] = round(float(analytics_core.get("risk_adjusted_return", 0.0)), 6)
+            report["profit_factor"] = (
+                raw_pf if raw_pf == float("inf") else round(float(raw_pf), 4)
+            )
+            report["expectancy_per_trade"] = round(
+                float(analytics_core.get("expectancy_per_trade", 0.0)), 4
+            )
+            report["risk_adjusted_return"] = round(
+                float(analytics_core.get("risk_adjusted_return", 0.0)), 6
+            )
         return report
 
     def _write_report(self, report: dict) -> str:
@@ -753,18 +872,26 @@ class Backtester:
             test_return = ((test[-1] / test[0]) - 1.0) if test and test[0] > 0 else 0.0
             windows.append(
                 {
-                    "train_mean_return": round(float(np.mean(train_returns)) if train_returns else 0.0, 6),
+                    "train_mean_return": round(
+                        float(np.mean(train_returns)) if train_returns else 0.0, 6
+                    ),
                     "test_return": round(test_return, 6),
                     "train_size": len(train),
                     "test_size": len(test),
                 }
             )
             cursor += window_test
-        avg_test_return = float(np.mean([w["test_return"] for w in windows])) if windows else 0.0
+        avg_test_return = (
+            float(np.mean([w["test_return"] for w in windows])) if windows else 0.0
+        )
         return {"windows": windows, "avg_test_return": round(avg_test_return, 6)}
 
     def _monte_carlo_simulation(self, closed_trades: list[dict]) -> dict:
-        pnls = [float(trade.get("pnl", 0.0) or 0.0) for trade in closed_trades if isinstance(trade, dict)]
+        pnls = [
+            float(trade.get("pnl", 0.0) or 0.0)
+            for trade in closed_trades
+            if isinstance(trade, dict)
+        ]
         if len(pnls) < 2:
             return {
                 "iterations": 0,
@@ -862,7 +989,11 @@ def _chain_from_snapshot(frame: pd.DataFrame) -> dict:
     if frame.empty:
         return {}
 
-    underlying_price = float(frame["underlying_price"].fillna(0.0).iloc[0]) if "underlying_price" in frame.columns else 0.0
+    underlying_price = (
+        float(frame["underlying_price"].fillna(0.0).iloc[0])
+        if "underlying_price" in frame.columns
+        else 0.0
+    )
     for _, row in frame.iterrows():
         expiration = str(row.get("expiration", ""))
         if not expiration:
@@ -898,7 +1029,9 @@ def _chain_from_snapshot(frame: pd.DataFrame) -> dict:
 def _estimate_position_value(position: dict, chain_data: dict) -> Optional[float]:
     details = position.get("details", {})
     strategy = str(position.get("strategy", ""))
-    expiration = str(details.get("expiration", position.get("expiration", ""))).split("T")[0]
+    expiration = str(details.get("expiration", position.get("expiration", ""))).split(
+        "T"
+    )[0]
     if not expiration:
         return None
 
@@ -930,7 +1063,12 @@ def _estimate_position_value(position: dict, chain_data: dict) -> Optional[float
         put_long = _mid(puts, float(details.get("put_long_strike", 0.0)))
         call_short = _mid(calls, float(details.get("call_short_strike", 0.0)))
         call_long = _mid(calls, float(details.get("call_long_strike", 0.0)))
-        if None in (put_short, put_long, call_short, call_long):
+        if (
+            put_short is None
+            or put_long is None
+            or call_short is None
+            or call_long is None
+        ):
             return None
         return max((put_short - put_long) + (call_short - call_long), 0.0)
 
@@ -981,7 +1119,10 @@ def _regime_performance(closed_trades: list[dict]) -> dict:
 
 
 def _business_days(start_date: date, end_date: date) -> list[date]:
-    return [ts.date() for ts in pd.bdate_range(start=start_date, end=end_date).to_pydatetime()]
+    return [
+        ts.date()
+        for ts in pd.bdate_range(start=start_date, end=end_date).to_pydatetime()
+    ]
 
 
 def _parse_datetime(value: object) -> Optional[datetime]:
@@ -1022,7 +1163,9 @@ def _sortino_ratio(daily_returns: list[float]) -> float:
     downside = [value for value in daily_returns if value < 0]
     if not downside:
         return 0.0
-    downside_stdev = float(np.std(downside, ddof=1)) if len(downside) > 1 else abs(downside[0])
+    downside_stdev = (
+        float(np.std(downside, ddof=1)) if len(downside) > 1 else abs(downside[0])
+    )
     if downside_stdev <= 0:
         return 0.0
     return (mean / downside_stdev) * math.sqrt(252)
@@ -1040,7 +1183,9 @@ def _max_drawdown(equity: list[float]) -> float:
     return abs(drawdown)
 
 
-def _monthly_returns(equity_curve: list[dict], initial_balance: float) -> dict[str, float]:
+def _monthly_returns(
+    equity_curve: list[dict], initial_balance: float
+) -> dict[str, float]:
     if not equity_curve:
         return {}
     by_month: dict[str, dict[str, float]] = {}
@@ -1065,13 +1210,17 @@ class _AlwaysNoEarnings:
     """Offline-safe earnings calendar fallback used in backtest optimization loops."""
 
     @staticmethod
-    def earnings_within_window(_symbol: str, _expiration: str) -> tuple[bool, Optional[str]]:
+    def earnings_within_window(
+        _symbol: str, _expiration: str
+    ) -> tuple[bool, Optional[str]]:
         return False, None
 
 
 def _run_cli() -> int:
     parser = argparse.ArgumentParser(description="Historical options backtester")
-    parser.add_argument("--mode", choices=["backtest", "walkforward"], default="backtest")
+    parser.add_argument(
+        "--mode", choices=["backtest", "walkforward"], default="backtest"
+    )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--data-dir", default="bot/data")
     parser.add_argument("--start", default="")
@@ -1082,14 +1231,22 @@ def _run_cli() -> int:
     backtester = Backtester(cfg, data_dir=args.data_dir)
 
     if args.mode == "walkforward":
-        result = backtester.run_walkforward(start=args.start or None, end=args.end or None)
+        result = backtester.run_walkforward(
+            start=args.start or None, end=args.end or None
+        )
         print(json.dumps(result, indent=2, default=str))
         return 0
 
     if not args.start or not args.end:
         parser.error("--start and --end are required for --mode backtest")
-    result = backtester.run(start=args.start, end=args.end)
-    print(json.dumps({"report_path": result.report_path, "report": result.report}, indent=2, default=str))
+    bt_result = backtester.run(start=args.start, end=args.end)
+    print(
+        json.dumps(
+            {"report_path": bt_result.report_path, "report": bt_result.report},
+            indent=2,
+            default=str,
+        )
+    )
     return 0
 
 

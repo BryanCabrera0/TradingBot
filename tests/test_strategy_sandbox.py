@@ -36,14 +36,34 @@ class StrategySandboxTests(unittest.TestCase):
             manager = StrategySandboxManager(
                 cfg,
                 config_path=Path(tmp_dir) / "config.yaml",
-                backtester_factory=lambda: FakeBacktester({"sharpe_ratio": 1.0, "max_drawdown": 0.05}),
+                backtester_factory=lambda: FakeBacktester(
+                    {"sharpe_ratio": 1.0, "max_drawdown": 0.05}
+                ),
             )
             scores = {"credit_spreads": 25.0, "iron_condors": 35.0}
             enabled = {"credit_spreads", "iron_condors"}
 
-            self.assertFalse(manager.update_trigger(regime="HIGH_VOL_CHOP", strategy_scores=scores, enabled_strategies=enabled))
-            self.assertFalse(manager.update_trigger(regime="HIGH_VOL_CHOP", strategy_scores=scores, enabled_strategies=enabled))
-            self.assertTrue(manager.update_trigger(regime="HIGH_VOL_CHOP", strategy_scores=scores, enabled_strategies=enabled))
+            self.assertFalse(
+                manager.update_trigger(
+                    regime="HIGH_VOL_CHOP",
+                    strategy_scores=scores,
+                    enabled_strategies=enabled,
+                )
+            )
+            self.assertFalse(
+                manager.update_trigger(
+                    regime="HIGH_VOL_CHOP",
+                    strategy_scores=scores,
+                    enabled_strategies=enabled,
+                )
+            )
+            self.assertTrue(
+                manager.update_trigger(
+                    regime="HIGH_VOL_CHOP",
+                    strategy_scores=scores,
+                    enabled_strategies=enabled,
+                )
+            )
 
     def test_llm_proposal_parsing(self) -> None:
         parsed = StrategySandboxManager.parse_strategy_proposal(
@@ -74,12 +94,16 @@ class StrategySandboxTests(unittest.TestCase):
             pass_manager = StrategySandboxManager(
                 cfg,
                 config_path=Path(tmp_dir) / "config_pass.yaml",
-                backtester_factory=lambda: FakeBacktester({"sharpe_ratio": 0.8, "max_drawdown": 0.12}),
+                backtester_factory=lambda: FakeBacktester(
+                    {"sharpe_ratio": 0.8, "max_drawdown": 0.12}
+                ),
             )
             fail_manager = StrategySandboxManager(
                 cfg,
                 config_path=Path(tmp_dir) / "config_fail.yaml",
-                backtester_factory=lambda: FakeBacktester({"sharpe_ratio": 0.1, "max_drawdown": 0.22}),
+                backtester_factory=lambda: FakeBacktester(
+                    {"sharpe_ratio": 0.1, "max_drawdown": 0.22}
+                ),
             )
 
             proposal = {
@@ -90,8 +114,12 @@ class StrategySandboxTests(unittest.TestCase):
                 "delta_range": [0.3, 0.45],
                 "max_risk_per_trade": 500,
             }
-            passed = pass_manager.run_sandbox_backtest(proposal, as_of=date(2026, 2, 26))
-            failed = fail_manager.run_sandbox_backtest(proposal, as_of=date(2026, 2, 26))
+            passed = pass_manager.run_sandbox_backtest(
+                proposal, as_of=date(2026, 2, 26)
+            )
+            failed = fail_manager.run_sandbox_backtest(
+                proposal, as_of=date(2026, 2, 26)
+            )
 
             self.assertTrue(passed["passed"])
             self.assertFalse(failed["passed"])
@@ -109,7 +137,9 @@ class StrategySandboxTests(unittest.TestCase):
             manager = StrategySandboxManager(
                 cfg,
                 config_path=config_path,
-                backtester_factory=lambda: FakeBacktester({"sharpe_ratio": 1.0, "max_drawdown": 0.1}),
+                backtester_factory=lambda: FakeBacktester(
+                    {"sharpe_ratio": 1.0, "max_drawdown": 0.1}
+                ),
             )
 
             proposal = {
@@ -120,7 +150,9 @@ class StrategySandboxTests(unittest.TestCase):
                 "delta_range": [0.25, 0.35],
                 "max_risk_per_trade": 300,
             }
-            deployed = manager.deploy_strategy(proposal, backtest={"passed": True}, deployed_on=date(2026, 2, 20))
+            deployed = manager.deploy_strategy(
+                proposal, backtest={"passed": True}, deployed_on=date(2026, 2, 20)
+            )
             self.assertTrue(deployed)
 
             data = yaml.safe_load(config_path.read_text(encoding="utf-8"))

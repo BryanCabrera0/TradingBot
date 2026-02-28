@@ -58,8 +58,12 @@ class AnalyticsTests(unittest.TestCase):
 
         self.assertIn("bull_put_spread", report.strategy_metrics)
         self.assertIn("iron_condor", report.strategy_metrics)
-        self.assertAlmostEqual(report.strategy_metrics["bull_put_spread"]["total_pnl"], 50.0, places=4)
-        self.assertAlmostEqual(report.strategy_metrics["iron_condor"]["total_pnl"], 50.0, places=4)
+        self.assertAlmostEqual(
+            report.strategy_metrics["bull_put_spread"]["total_pnl"], 50.0, places=4
+        )
+        self.assertAlmostEqual(
+            report.strategy_metrics["iron_condor"]["total_pnl"], 50.0, places=4
+        )
 
         self.assertIn("BULL_TREND", report.regime_metrics)
         self.assertIn("HIGH_VOL_CHOP", report.regime_metrics)
@@ -83,10 +87,38 @@ class AnalyticsTests(unittest.TestCase):
 
     def test_drawdown_and_duration_are_computed(self) -> None:
         trades = [
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-01", "pnl": 500.0, "max_loss": 1.0, "quantity": 1},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-02", "pnl": -1000.0, "max_loss": 1.0, "quantity": 1},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-03", "pnl": 200.0, "max_loss": 1.0, "quantity": 1},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-04", "pnl": 400.0, "max_loss": 1.0, "quantity": 1},
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-01",
+                "pnl": 500.0,
+                "max_loss": 1.0,
+                "quantity": 1,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-02",
+                "pnl": -1000.0,
+                "max_loss": 1.0,
+                "quantity": 1,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-03",
+                "pnl": 200.0,
+                "max_loss": 1.0,
+                "quantity": 1,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-04",
+                "pnl": 400.0,
+                "max_loss": 1.0,
+                "quantity": 1,
+            },
         ]
         report = compute(trades, initial_equity=100_000)
         core = report.core_metrics
@@ -96,11 +128,36 @@ class AnalyticsTests(unittest.TestCase):
 
     def test_core_streak_metrics_track_current_and_max(self) -> None:
         trades = [
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-01", "pnl": 100.0},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-02", "pnl": 120.0},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-03", "pnl": -50.0},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-04", "pnl": -30.0},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-05", "pnl": -20.0},
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-01",
+                "pnl": 100.0,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-02",
+                "pnl": 120.0,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-03",
+                "pnl": -50.0,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-04",
+                "pnl": -30.0,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-05",
+                "pnl": -20.0,
+            },
         ]
         report = compute(trades, initial_equity=100_000)
         core = report.core_metrics
@@ -125,8 +182,20 @@ class AnalyticsTests(unittest.TestCase):
 
     def test_profit_factor_infinite_when_no_losses(self) -> None:
         trades = [
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-01", "pnl": 50.0, "max_loss": 1.0},
-            {"strategy": "s1", "regime": "R1", "close_date": "2026-01-02", "pnl": 25.0, "max_loss": 1.0},
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-01",
+                "pnl": 50.0,
+                "max_loss": 1.0,
+            },
+            {
+                "strategy": "s1",
+                "regime": "R1",
+                "close_date": "2026-01-02",
+                "pnl": 25.0,
+                "max_loss": 1.0,
+            },
         ]
         report = compute(trades, initial_equity=100_000)
         self.assertEqual(report.core_metrics["profit_factor"], float("inf"))

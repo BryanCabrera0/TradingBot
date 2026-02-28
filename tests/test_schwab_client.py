@@ -199,8 +199,12 @@ class SchwabClientParserTests(unittest.TestCase):
         self.assertEqual(len(close_order["orderLegCollection"]), 4)
 
     def test_ladder_price_moves_credit_and_debit_sides_correctly(self) -> None:
-        self.assertEqual(_ladder_price(midpoint=1.0, spread=0.4, shift=0.25, side="credit"), 0.9)
-        self.assertEqual(_ladder_price(midpoint=1.0, spread=0.4, shift=0.25, side="debit"), 1.1)
+        self.assertEqual(
+            _ladder_price(midpoint=1.0, spread=0.4, shift=0.25, side="credit"), 0.9
+        )
+        self.assertEqual(
+            _ladder_price(midpoint=1.0, spread=0.4, shift=0.25, side="debit"), 1.1
+        )
 
     def test_ladder_respects_total_timeout_budget(self) -> None:
         client = SchwabClient(SchwabConfig())
@@ -256,9 +260,7 @@ class SchwabClientParserTests(unittest.TestCase):
             if order_id == "B3":
                 return {
                     "status": "FILLED",
-                    "orderActivityCollection": [
-                        {"executionLegs": [{"price": 0.9}]}
-                    ],
+                    "orderActivityCollection": [{"executionLegs": [{"price": 0.9}]}],
                 }
             return {"status": "WORKING"}
 

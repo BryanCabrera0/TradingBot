@@ -1,4 +1,11 @@
-"""LLM advisor for optional model-based trade review."""
+"""LLM advisor for optional model-based trade review.
+
+SIMPLE EXPLANATION:
+The LLM Advisor acts as a risk and sanity-checker for proposed trades. Before a trade 
+is actually placed, this agent reviews it adversarially to play "devil's advocate" 
+and catch potential mistakes (like trading into earnings or taking on too much risk). 
+It also helps review the overall portfolio's health.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,6 @@ import json
 import logging
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -47,12 +53,42 @@ RISK_POLICIES = {
 }
 
 FEW_SHOT_EXAMPLES = [
-    {"verdict": "approve", "confidence": 84, "reasoning": "High-quality liquid setup with strong POP and no event risk.", "suggested_adjustment": None},
-    {"verdict": "approve", "confidence": 78, "reasoning": "Balanced risk/reward and acceptable sector exposure.", "suggested_adjustment": None},
-    {"verdict": "approve", "confidence": 72, "reasoning": "Technicals and volatility regime align with strategy assumptions.", "suggested_adjustment": None},
-    {"verdict": "reject", "confidence": 88, "reasoning": "Earnings or binary-event risk invalidates premium-selling edge.", "suggested_adjustment": None},
-    {"verdict": "reject", "confidence": 80, "reasoning": "Portfolio concentration and correlated exposure are too high.", "suggested_adjustment": None},
-    {"verdict": "reduce_size", "confidence": 76, "reasoning": "Setup is viable but uncertainty warrants smaller size.", "suggested_adjustment": "reduce 40%"},
+    {
+        "verdict": "approve",
+        "confidence": 84,
+        "reasoning": "High-quality liquid setup with strong POP and no event risk.",
+        "suggested_adjustment": None,
+    },
+    {
+        "verdict": "approve",
+        "confidence": 78,
+        "reasoning": "Balanced risk/reward and acceptable sector exposure.",
+        "suggested_adjustment": None,
+    },
+    {
+        "verdict": "approve",
+        "confidence": 72,
+        "reasoning": "Technicals and volatility regime align with strategy assumptions.",
+        "suggested_adjustment": None,
+    },
+    {
+        "verdict": "reject",
+        "confidence": 88,
+        "reasoning": "Earnings or binary-event risk invalidates premium-selling edge.",
+        "suggested_adjustment": None,
+    },
+    {
+        "verdict": "reject",
+        "confidence": 80,
+        "reasoning": "Portfolio concentration and correlated exposure are too high.",
+        "suggested_adjustment": None,
+    },
+    {
+        "verdict": "reduce_size",
+        "confidence": 76,
+        "reasoning": "Setup is viable but uncertainty warrants smaller size.",
+        "suggested_adjustment": "reduce 40%",
+    },
 ]
 
 
@@ -67,7 +103,7 @@ class LLMDecision:
     risk_adjustment: float = 1.0
     raw_response: str = ""
     review_id: str = ""
-    explanation: dict = None
+    explanation: Optional[dict] = None
 
     def __init__(
         self,
@@ -142,7 +178,9 @@ class LLMAdvisor:
             return True, "Anthropic API key is configured"
 
         if provider == "google":
-            if not _is_configured_secret(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+            if not _is_configured_secret(
+                os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            ):
                 return False, "GOOGLE_API_KEY is missing"
             return True, "Google API key is configured"
 
@@ -185,7 +223,9 @@ class LLMAdvisor:
         )
         raw_confidence_pct = decision.confidence_pct
         adjusted_confidence_pct = self._calibrated_confidence_pct(raw_confidence_pct)
-        decision.confidence = round(max(0.0, min(1.0, adjusted_confidence_pct / 100.0)), 4)
+        decision.confidence = round(
+            max(0.0, min(1.0, adjusted_confidence_pct / 100.0)), 4
+        )
         decision.raw_response = raw_response
         signal.metadata["llm_raw_confidence"] = raw_confidence_pct
         signal.metadata["llm_adjusted_confidence"] = adjusted_confidence_pct
@@ -193,13 +233,13 @@ class LLMAdvisor:
         if self.config.ensemble_enabled:
             signal.metadata["llm_deep_debate"] = True
             rounds = [
-                int(v.get("round", 1))
-                for v in model_votes
-                if isinstance(v, dict)
+                int(v.get("round", 1)) for v in model_votes if isinstance(v, dict)
             ]
             signal.metadata["llm_debate_rounds"] = max(rounds) if rounds else 1
         signal.metadata["llm_multi_turn_used"] = bool(multi_turn.get("used"))
-        signal.metadata["llm_multi_turn_changed_verdict"] = bool(multi_turn.get("changed_verdict"))
+        signal.metadata["llm_multi_turn_changed_verdict"] = bool(
+            multi_turn.get("changed_verdict")
+        )
         decision.raw_response = raw_response
         decision.review_id = self._record_review(
             signal,
@@ -252,7 +292,9 @@ class LLMAdvisor:
         dump_json(self.track_record_path, payload)
         if updated_trade:
             self._append_trade_journal(updated_trade)
-            self._append_explanation_outcome(position_id=position_id, trade=updated_trade)
+            self._append_explanation_outcome(
+                position_id=position_id, trade=updated_trade
+            )
         self.log_weekly_hit_rate()
 
     def log_weekly_hit_rate(self) -> None:
@@ -260,7 +302,11 @@ class LLMAdvisor:
         payload = load_json(self.track_record_path, {"trades": [], "meta": {}})
         if not isinstance(payload, dict):
             return
-        trades = [t for t in payload.get("trades", []) if isinstance(t, dict) and t.get("outcome") is not None]
+        trades = [
+            t
+            for t in payload.get("trades", [])
+            if isinstance(t, dict) and t.get("outcome") is not None
+        ]
         if len(trades) < 50:
             return
 
@@ -309,7 +355,9 @@ class LLMAdvisor:
                 "strategy": signal.strategy,
                 "verdict": decision.verdict,
                 "confidence": decision.confidence_pct,
-                "raw_confidence": safe_float(signal.metadata.get("llm_raw_confidence"), decision.confidence_pct),
+                "raw_confidence": safe_float(
+                    signal.metadata.get("llm_raw_confidence"), decision.confidence_pct
+                ),
                 "reasoning": decision.reasoning,
                 "suggested_adjustment": decision.suggested_adjustment,
                 "risk_adjustment": decision.risk_adjustment,
@@ -321,7 +369,9 @@ class LLMAdvisor:
                     "expiration": getattr(signal.analysis, "expiration", None),
                     "dte": getattr(signal.analysis, "dte", None),
                     "score": getattr(signal.analysis, "score", None),
-                    "probability_of_profit": getattr(signal.analysis, "probability_of_profit", None),
+                    "probability_of_profit": getattr(
+                        signal.analysis, "probability_of_profit", None
+                    ),
                     "credit": getattr(signal.analysis, "credit", None),
                     "max_loss": getattr(signal.analysis, "max_loss", None),
                 },
@@ -363,7 +413,11 @@ class LLMAdvisor:
         context: dict,
     ) -> tuple[LLMDecision, str, dict]:
         if not bool(getattr(self.config, "multi_turn_enabled", False)):
-            return initial_decision, initial_raw, {"used": False, "changed_verdict": False}
+            return (
+                initial_decision,
+                initial_raw,
+                {"used": False, "changed_verdict": False},
+            )
 
         threshold = _clamp_float(
             getattr(self.config, "multi_turn_confidence_threshold", 70.0),
@@ -373,7 +427,11 @@ class LLMAdvisor:
         confidence_pct = initial_decision.confidence_pct
         uncertain_zone = 50.0 <= confidence_pct <= threshold
         if initial_decision.verdict != "reduce_size" and not uncertain_zone:
-            return initial_decision, initial_raw, {"used": False, "changed_verdict": False}
+            return (
+                initial_decision,
+                initial_raw,
+                {"used": False, "changed_verdict": False},
+            )
 
         follow_prompt = self._build_follow_up_prompt(signal, initial_decision, context)
         follow_raw = self._query_model(follow_prompt)
@@ -383,7 +441,11 @@ class LLMAdvisor:
             follow_raw = self._query_model(retry_prompt)
             follow_decision, valid = self._parse_decision(follow_raw)
         if not valid:
-            return initial_decision, initial_raw, {"used": True, "changed_verdict": False}
+            return (
+                initial_decision,
+                initial_raw,
+                {"used": True, "changed_verdict": False},
+            )
 
         changed = follow_decision.verdict != initial_decision.verdict
         merged_raw = json.dumps(
@@ -395,7 +457,9 @@ class LLMAdvisor:
         )
         return follow_decision, merged_raw, {"used": True, "changed_verdict": changed}
 
-    def _build_follow_up_prompt(self, signal: TradeSignal, decision: LLMDecision, context: dict) -> str:
+    def _build_follow_up_prompt(
+        self, signal: TradeSignal, decision: LLMDecision, context: dict
+    ) -> str:
         history = self._relevant_history_context(signal)
         payload = {
             "task": "Re-evaluate this trade with focused uncertainty resolution. Return JSON only.",
@@ -412,7 +476,11 @@ class LLMAdvisor:
                 "cross-asset correlation regime",
             ],
             "additional_context": {
-                "portfolio_greeks": (context.get("portfolio_exposure", {}) if isinstance(context.get("portfolio_exposure"), dict) else {}),
+                "portfolio_greeks": (
+                    context.get("portfolio_exposure", {})
+                    if isinstance(context.get("portfolio_exposure"), dict)
+                    else {}
+                ),
                 "correlation_state": context.get("correlation_state", {}),
                 "similar_trades": history.get("similar_trades", []),
                 "recent_mistakes": history.get("recent_mistakes", []),
@@ -439,7 +507,8 @@ class LLMAdvisor:
             for row in trades
             if isinstance(row, dict)
             and _coerce_float(row.get("outcome")) is not None
-            and _coerce_float(row.get("raw_confidence", row.get("confidence"))) is not None
+            and _coerce_float(row.get("raw_confidence", row.get("confidence")))
+            is not None
         ]
         meta = payload.get("meta")
         if not isinstance(meta, dict):
@@ -452,7 +521,9 @@ class LLMAdvisor:
 
         buckets: dict[str, dict[str, float]] = {}
         for row in closed:
-            conf = _clamp_float(row.get("raw_confidence", row.get("confidence")), 0.0, 100.0)
+            conf = _clamp_float(
+                row.get("raw_confidence", row.get("confidence")), 0.0, 100.0
+            )
             if conf < 1.0:
                 conf *= 100.0
             bucket = _confidence_bucket(conf)
@@ -551,12 +622,16 @@ class LLMAdvisor:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
     ) -> str:
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENAI_API_KEY") or ""
         if not _is_configured_secret(api_key):
             raise RuntimeError("OPENAI_API_KEY is missing")
         model_name = str(model or self.config.model or "").strip()
         model_key = model_name.lower()
-        if not model_key or model_key.startswith("gemini-") or model_key.startswith("claude-"):
+        if (
+            not model_key
+            or model_key.startswith("gemini-")
+            or model_key.startswith("claude-")
+        ):
             model_name = "gpt-5.2-pro"
         chat_fallback = str(self.config.chat_fallback_model or "").strip()
         chat_fallback_key = chat_fallback.lower()
@@ -588,7 +663,10 @@ class LLMAdvisor:
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 100},
                     "reasoning": {"type": "string", "maxLength": 280},
-                    "suggested_adjustment": {"type": ["string", "null"], "maxLength": 120},
+                    "suggested_adjustment": {
+                        "type": ["string", "null"],
+                        "maxLength": 120,
+                    },
                     "bull_case": {"type": ["string", "null"], "maxLength": 280},
                     "bear_case": {"type": ["string", "null"], "maxLength": 280},
                     "key_risk": {"type": ["string", "null"], "maxLength": 180},
@@ -599,7 +677,12 @@ class LLMAdvisor:
                         "maxItems": 5,
                     },
                 },
-                "required": ["verdict", "confidence", "reasoning", "suggested_adjustment"],
+                "required": [
+                    "verdict",
+                    "confidence",
+                    "reasoning",
+                    "suggested_adjustment",
+                ],
                 "additionalProperties": True,
             },
         )
@@ -616,9 +699,13 @@ class LLMAdvisor:
             raise RuntimeError("ANTHROPIC_API_KEY is missing")
 
         try:
-            from anthropic import Anthropic
+            from anthropic import (
+                Anthropic,  # type: ignore[import-untyped,import-not-found]
+            )
         except Exception as exc:
-            raise RuntimeError("anthropic package is required for provider=anthropic") from exc
+            raise RuntimeError(
+                "anthropic package is required for provider=anthropic"
+            ) from exc
 
         client = Anthropic(api_key=api_key)
         response = client.messages.create(
@@ -646,7 +733,10 @@ class LLMAdvisor:
         if not _is_configured_secret(api_key):
             raise RuntimeError("GOOGLE_API_KEY is missing")
 
-        model_name = str(model or self.config.model or "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+        model_name = (
+            str(model or self.config.model or "gemini-2.5-pro").strip()
+            or "gemini-2.5-pro"
+        )
         payload = {
             "contents": [
                 {
@@ -673,7 +763,9 @@ class LLMAdvisor:
         if response.status_code >= 400:
             detail = ""
             try:
-                detail = str((response.json().get("error") or {}).get("message", "")).strip()
+                detail = str(
+                    (response.json().get("error") or {}).get("message", "")
+                ).strip()
             except Exception:
                 detail = ""
             if not detail:
@@ -717,7 +809,9 @@ class LLMAdvisor:
         if isinstance(prompt_payload, dict):
             raw_rules = prompt_payload.get("learned_rules", [])
             if isinstance(raw_rules, list):
-                prompt_rules = [str(item).strip() for item in raw_rules if str(item).strip()]
+                prompt_rules = [
+                    str(item).strip() for item in raw_rules if str(item).strip()
+                ]
         if not prompt_rules:
             prompt_rules = load_active_rules(self.learned_rules_path)
         provider, primary_model, fallback_model = self._debate_model_config()
@@ -804,7 +898,11 @@ class LLMAdvisor:
 
         if provider == "openai":
             primary_key = primary_model.lower()
-            if (not primary_key) or primary_key.startswith("gemini-") or primary_key.startswith("claude-"):
+            if (
+                (not primary_key)
+                or primary_key.startswith("gemini-")
+                or primary_key.startswith("claude-")
+            ):
                 primary = "gpt-5.2-pro"
             else:
                 primary = primary_model
@@ -875,10 +973,18 @@ class LLMAdvisor:
             )
 
         if approve_ratio >= reject_ratio:
-            final_verdict = "reduce_size" if weighted_reduce >= (weighted_approve * 0.35) else "approve"
+            final_verdict = (
+                "reduce_size"
+                if weighted_reduce >= (weighted_approve * 0.35)
+                else "approve"
+            )
             risk_adjustment = 1.0
             if final_verdict == "reduce_size":
-                reduce_weights = [max(0.1, float(v.get("weight", 1.0) or 1.0)) for v in votes if v.get("verdict") == "reduce_size"]
+                reduce_weights = [
+                    max(0.1, float(v.get("weight", 1.0) or 1.0))
+                    for v in votes
+                    if v.get("verdict") == "reduce_size"
+                ]
                 if reduce_weights:
                     weighted = 0.0
                     total = 0.0
@@ -886,7 +992,9 @@ class LLMAdvisor:
                         if vote.get("verdict") != "reduce_size":
                             continue
                         w = max(0.1, float(vote.get("weight", 1.0) or 1.0))
-                        weighted += w * _clamp_float(vote.get("risk_adjustment"), 0.1, 1.0)
+                        weighted += w * _clamp_float(
+                            vote.get("risk_adjustment"), 0.1, 1.0
+                        )
                         total += w
                     risk_adjustment = (weighted / total) if total > 0 else 0.7
                 else:
@@ -894,7 +1002,9 @@ class LLMAdvisor:
             return LLMDecision(
                 verdict=final_verdict,
                 confidence=confidence,
-                reasoning=(reasoning_parts[0] if reasoning_parts else "Ensemble approval"),
+                reasoning=(
+                    reasoning_parts[0] if reasoning_parts else "Ensemble approval"
+                ),
                 risk_adjustment=risk_adjustment,
             )
 
@@ -952,7 +1062,8 @@ class LLMAdvisor:
             if _is_hit({"verdict": vote.get("verdict"), "outcome": outcome}):
                 entry["hits"] = int(entry.get("hits", 0) or 0) + 1
             entry["accuracy"] = round(
-                int(entry.get("hits", 0) or 0) / max(1, int(entry.get("trades", 0) or 0)),
+                int(entry.get("hits", 0) or 0)
+                / max(1, int(entry.get("trades", 0) or 0)),
                 4,
             )
 
@@ -971,7 +1082,8 @@ class LLMAdvisor:
                 [
                     item
                     for item in reversed(entries)
-                    if isinstance(item, dict) and str(item.get("symbol", "")).upper() == symbol
+                    if isinstance(item, dict)
+                    and str(item.get("symbol", "")).upper() == symbol
                 ][:5]
             )
         if strategy:
@@ -979,7 +1091,8 @@ class LLMAdvisor:
                 [
                     item
                     for item in reversed(entries)
-                    if isinstance(item, dict) and str(item.get("strategy", "")) == strategy
+                    if isinstance(item, dict)
+                    and str(item.get("strategy", "")) == strategy
                 ][:5]
             )
         if not selected:
@@ -989,7 +1102,10 @@ class LLMAdvisor:
         deduped: list[dict] = []
         seen: set[str] = set()
         for item in selected:
-            key = str(item.get("review_id", "")) or f"{item.get('timestamp')}|{item.get('symbol')}|{item.get('strategy')}"
+            key = (
+                str(item.get("review_id", ""))
+                or f"{item.get('timestamp')}|{item.get('symbol')}|{item.get('strategy')}"
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -1014,12 +1130,20 @@ class LLMAdvisor:
         symbol = str(signal.symbol or "").upper() if signal else ""
         strategy = str(signal.strategy or "") if signal else ""
         rows = [item for item in positions.values() if isinstance(item, dict)]
-        rows.sort(key=lambda row: str(row.get("updated_at", row.get("timestamp", ""))), reverse=True)
+        rows.sort(
+            key=lambda row: str(row.get("updated_at", row.get("timestamp", ""))),
+            reverse=True,
+        )
         selected: list[dict] = []
         for row in rows:
             row_symbol = str(row.get("symbol", "")).upper()
             row_strategy = str(row.get("strategy", ""))
-            if symbol and row_symbol != symbol and strategy and row_strategy != strategy:
+            if (
+                symbol
+                and row_symbol != symbol
+                and strategy
+                and row_strategy != strategy
+            ):
                 continue
             selected.append(
                 {
@@ -1062,9 +1186,11 @@ class LLMAdvisor:
     def _generate_trade_postmortem(self, trade: dict) -> dict:
         fallback = {
             "what_worked": "Direction and risk controls aligned with observed outcome."
-            if _coerce_float(trade.get("outcome"), 0.0) > 0
+            if (_coerce_float(trade.get("outcome")) or 0.0) > 0
             else "No clear edge materialized before exit.",
-            "what_failed": None if _coerce_float(trade.get("outcome"), 0.0) > 0 else "Entry quality or timing was weak.",
+            "what_failed": None
+            if (_coerce_float(trade.get("outcome")) or 0.0) > 0
+            else "Entry quality or timing was weak.",
             "adjustment": "Maintain strict sizing discipline and avoid over-concentrated setups.",
         }
         try:
@@ -1090,13 +1216,17 @@ class LLMAdvisor:
             parsed = self._safe_json_load(raw)
             if parsed:
                 return {
-                    "what_worked": str(parsed.get("what_worked", fallback["what_worked"]))[:240],
+                    "what_worked": str(
+                        parsed.get("what_worked", fallback["what_worked"])
+                    )[:240],
                     "what_failed": (
                         str(parsed.get("what_failed"))[:240]
                         if parsed.get("what_failed") is not None
                         else None
                     ),
-                    "adjustment": str(parsed.get("adjustment", fallback["adjustment"]))[:240],
+                    "adjustment": str(parsed.get("adjustment", fallback["adjustment"]))[
+                        :240
+                    ],
                 }
         except Exception:
             pass
@@ -1121,8 +1251,14 @@ class LLMAdvisor:
 
         symbol = str(signal.symbol or "").upper()
         strategy = str(signal.strategy or "")
-        same_symbol = [row for row in reversed(ordered) if str(row.get("symbol", "")).upper() == symbol][:5]
-        same_strategy = [row for row in reversed(ordered) if str(row.get("strategy", "")) == strategy][:5]
+        same_symbol = [
+            row
+            for row in reversed(ordered)
+            if str(row.get("symbol", "")).upper() == symbol
+        ][:5]
+        same_strategy = [
+            row for row in reversed(ordered) if str(row.get("strategy", "")) == strategy
+        ][:5]
 
         mistakes: list[dict] = []
         for row in reversed(ordered):
@@ -1130,7 +1266,9 @@ class LLMAdvisor:
             if outcome is None:
                 continue
             verdict = str(row.get("verdict", "")).lower()
-            is_mistake = (verdict == "approve" and outcome < 0) or (verdict == "reject" and outcome > 0)
+            is_mistake = (verdict == "approve" and outcome < 0) or (
+                verdict == "reject" and outcome > 0
+            )
             if is_mistake:
                 mistakes.append(row)
             if len(mistakes) >= 3:
@@ -1140,7 +1278,9 @@ class LLMAdvisor:
         summary = self._success_rate_summary(ordered, symbol=symbol, strategy=strategy)
         return {
             "same_symbol_recent": [self._compact_trade_row(row) for row in same_symbol],
-            "same_strategy_recent": [self._compact_trade_row(row) for row in same_strategy],
+            "same_strategy_recent": [
+                self._compact_trade_row(row) for row in same_strategy
+            ],
             "recent_mistakes": [self._compact_trade_row(row) for row in mistakes],
             "similar_trades": [self._compact_trade_row(row) for row in similar[:3]],
             "success_rate_summary": summary,
@@ -1163,7 +1303,11 @@ class LLMAdvisor:
             outcome = _coerce_float(row.get("outcome"))
             if outcome is None:
                 continue
-            snapshot = row.get("trade_snapshot", {}) if isinstance(row.get("trade_snapshot"), dict) else {}
+            snapshot = (
+                row.get("trade_snapshot", {})
+                if isinstance(row.get("trade_snapshot"), dict)
+                else {}
+            )
             hist_dte = _coerce_float(snapshot.get("dte"), cur_dte)
             hist_pop = _coerce_float(snapshot.get("probability_of_profit"), cur_pop)
             hist_score = _coerce_float(snapshot.get("score"), cur_score)
@@ -1179,22 +1323,31 @@ class LLMAdvisor:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [row for _, row in scored[:3]]
 
-    def _success_rate_summary(self, trades: list[dict], *, symbol: str, strategy: str) -> str:
+    def _success_rate_summary(
+        self, trades: list[dict], *, symbol: str, strategy: str
+    ) -> str:
         closed = [
             row
             for row in trades
             if isinstance(row, dict) and _coerce_float(row.get("outcome")) is not None
         ]
-        approves = [row for row in closed if str(row.get("verdict", "")).lower() == "approve"]
-        rejects = [row for row in closed if str(row.get("verdict", "")).lower() == "reject"]
+        approves = [
+            row for row in closed if str(row.get("verdict", "")).lower() == "approve"
+        ]
+        rejects = [
+            row for row in closed if str(row.get("verdict", "")).lower() == "reject"
+        ]
         approve_hits = sum(1 for row in approves if _is_hit(row))
         reject_hits = sum(1 for row in rejects if _is_hit(row))
         same = [
             row
             for row in closed
-            if str(row.get("symbol", "")).upper() == symbol and str(row.get("strategy", "")) == strategy
+            if str(row.get("symbol", "")).upper() == symbol
+            and str(row.get("strategy", "")) == strategy
         ]
-        same_wins = sum(1 for row in same if _coerce_float(row.get("outcome"), 0.0) > 0)
+        same_wins = sum(
+            1 for row in same if (_coerce_float(row.get("outcome")) or 0.0) > 0
+        )
         return (
             f"Your approval accuracy: "
             f"{(approve_hits / len(approves) * 100.0) if approves else 0.0:.0f}% "
@@ -1207,7 +1360,11 @@ class LLMAdvisor:
 
     @staticmethod
     def _compact_trade_row(row: dict) -> dict:
-        snapshot = row.get("trade_snapshot", {}) if isinstance(row.get("trade_snapshot"), dict) else {}
+        snapshot = (
+            row.get("trade_snapshot", {})
+            if isinstance(row.get("trade_snapshot"), dict)
+            else {}
+        )
         return {
             "timestamp": row.get("timestamp"),
             "symbol": row.get("symbol"),
@@ -1253,7 +1410,9 @@ class LLMAdvisor:
         if isinstance(context, dict):
             raw_rules = context.get("learned_rules", [])
             if isinstance(raw_rules, list):
-                learned_rules = [str(item).strip() for item in raw_rules if str(item).strip()]
+                learned_rules = [
+                    str(item).strip() for item in raw_rules if str(item).strip()
+                ]
         if not learned_rules:
             learned_rules = load_active_rules(self.learned_rules_path, limit=25)
 
@@ -1279,7 +1438,9 @@ class LLMAdvisor:
                     "iv_percentile": (context or {}).get("iv_percentile"),
                 },
                 "earnings_proximity": (context or {}).get("earnings_proximity"),
-                "news_sentiment_summary": (context or {}).get("news_sentiment_summary", {}),
+                "news_sentiment_summary": (context or {}).get(
+                    "news_sentiment_summary", {}
+                ),
                 "sector_performance": (context or {}).get("sector_performance", {}),
                 "options_flow": (context or {}).get("options_flow", {}),
                 "alt_data": (context or {}).get("alt_data", {}),
@@ -1302,7 +1463,10 @@ class LLMAdvisor:
         style = str(self.config.risk_style).strip().lower()
         if style in RISK_POLICIES:
             return style
-        logger.warning("Unknown llm.risk_style=%r. Falling back to 'moderate'.", self.config.risk_style)
+        logger.warning(
+            "Unknown llm.risk_style=%r. Falling back to 'moderate'.",
+            self.config.risk_style,
+        )
         return "moderate"
 
     def _parse_decision(self, raw_response: str) -> tuple[LLMDecision, bool]:
@@ -1342,19 +1506,21 @@ class LLMAdvisor:
 
         risk_adjustment = _clamp_float(data.get("risk_adjustment", 1.0), 0.1, 1.0)
         if verdict_raw == "reduce_size":
-            risk_adjustment = min(risk_adjustment, _risk_adjustment_from_suggestion(suggested_adjustment))
+            risk_adjustment = min(
+                risk_adjustment, _risk_adjustment_from_suggestion(suggested_adjustment)
+            )
 
         reasoning = str(
-            data.get("reasoning")
-            or data.get("reason")
-            or "LLM response missing reason"
+            data.get("reasoning") or data.get("reason") or "LLM response missing reason"
         ).strip()[:280]
         if not reasoning:
             reasoning = "LLM response missing reason"
 
         confidence_drivers = data.get("confidence_drivers")
         if isinstance(confidence_drivers, list):
-            confidence_drivers = [str(item).strip() for item in confidence_drivers if str(item).strip()][:3]
+            confidence_drivers = [
+                str(item).strip() for item in confidence_drivers if str(item).strip()
+            ][:3]
         else:
             confidence_drivers = []
         explanation = {
@@ -1377,8 +1543,12 @@ class LLMAdvisor:
             True,
         )
 
-    def _normalize_explanation(self, signal: TradeSignal, decision: LLMDecision) -> dict:
-        explanation = decision.explanation if isinstance(decision.explanation, dict) else {}
+    def _normalize_explanation(
+        self, signal: TradeSignal, decision: LLMDecision
+    ) -> dict:
+        explanation = (
+            decision.explanation if isinstance(decision.explanation, dict) else {}
+        )
         bull_case = str(explanation.get("bull_case", "")).strip()
         bear_case = str(explanation.get("bear_case", "")).strip()
         key_risk = str(explanation.get("key_risk", "")).strip()
@@ -1390,7 +1560,9 @@ class LLMAdvisor:
         if not bull_case:
             bull_case = f"{signal.strategy} setup aligns with current probability and score metrics."
         if not bear_case:
-            bear_case = "Adverse price move or volatility expansion can quickly reduce edge."
+            bear_case = (
+                "Adverse price move or volatility expansion can quickly reduce edge."
+            )
         if not key_risk:
             key_risk = "Correlation shock against the trade direction."
         if not expected_duration:
@@ -1420,7 +1592,11 @@ class LLMAdvisor:
         if not isinstance(positions, dict):
             positions = {}
             payload["positions"] = positions
-        explanation = trade.get("explanation", {}) if isinstance(trade.get("explanation"), dict) else {}
+        explanation = (
+            trade.get("explanation", {})
+            if isinstance(trade.get("explanation"), dict)
+            else {}
+        )
         positions[position_id] = {
             "position_id": position_id,
             "review_id": trade.get("review_id"),
@@ -1460,7 +1636,9 @@ class LLMAdvisor:
         duration_days = None
         try:
             if opened and closed:
-                duration_days = (date.fromisoformat(closed) - date.fromisoformat(opened)).days
+                duration_days = (
+                    date.fromisoformat(closed) - date.fromisoformat(opened)
+                ).days
         except Exception:
             duration_days = None
         row["actual_duration_days"] = duration_days
@@ -1469,14 +1647,22 @@ class LLMAdvisor:
         row["key_risk_materialized"] = bool(
             key_risk_text
             and reason_text
-            and any(token and token in reason_text for token in key_risk_text.split()[:3])
+            and any(
+                token and token in reason_text for token in key_risk_text.split()[:3]
+            )
         )
         dump_json(self.explanations_path, payload)
 
-    def adversarial_review_position(self, position: dict, *, context: Optional[dict] = None) -> dict:
+    def adversarial_review_position(
+        self, position: dict, *, context: Optional[dict] = None
+    ) -> dict:
         """Run close-vs-hold adversarial reasoning for stressed positions."""
         if not bool(getattr(self.config, "adversarial_review_enabled", False)):
-            return {"should_exit": False, "close_conviction": 0.0, "hold_conviction": 0.0}
+            return {
+                "should_exit": False,
+                "close_conviction": 0.0,
+                "hold_conviction": 0.0,
+            }
         context = context or {}
         base_payload = {
             "position": {
@@ -1561,7 +1747,7 @@ def _risk_adjustment_from_suggestion(text: Optional[str]) -> float:
 
 def _is_hit(trade: dict) -> bool:
     verdict = str(trade.get("verdict", "")).lower()
-    outcome = _coerce_float(trade.get("outcome"), 0.0)
+    outcome = _coerce_float(trade.get("outcome")) or 0.0
     if verdict == "approve":
         return outcome > 0
     if verdict == "reject":
@@ -1573,14 +1759,14 @@ def _is_hit(trade: dict) -> bool:
 
 def _coerce_float(value: object, default: Optional[float] = None) -> Optional[float]:
     try:
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return default
 
 
 def _clamp_float(value: object, minimum: float, maximum: float) -> float:
     try:
-        parsed = float(value)
+        parsed = float(str(value))
     except (TypeError, ValueError):
         parsed = minimum
     return max(minimum, min(maximum, parsed))

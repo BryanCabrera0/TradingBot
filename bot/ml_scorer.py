@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 from math import exp, log
 from pathlib import Path
 from typing import Optional
@@ -62,12 +62,17 @@ class MLSignalScorer:
         self.config = MLScorerConfig(
             enabled=bool(raw.get("enabled", True)),
             min_training_trades=max(1, safe_int(raw.get("min_training_trades"), 30)),
-            retrain_day=str(raw.get("retrain_day", "sunday")).strip().lower() or "sunday",
+            retrain_day=str(raw.get("retrain_day", "sunday")).strip().lower()
+            or "sunday",
             retrain_time=str(raw.get("retrain_time", "18:00")).strip() or "18:00",
             feature_importance_log=bool(raw.get("feature_importance_log", True)),
-            closed_trades_file=str(raw.get("closed_trades_file", DEFAULT_CLOSED_TRADES_PATH)),
+            closed_trades_file=str(
+                raw.get("closed_trades_file", DEFAULT_CLOSED_TRADES_PATH)
+            ),
             model_file=str(raw.get("model_file", DEFAULT_MODEL_PATH)),
-            feature_importance_file=str(raw.get("feature_importance_file", DEFAULT_IMPORTANCE_PATH)),
+            feature_importance_file=str(
+                raw.get("feature_importance_file", DEFAULT_IMPORTANCE_PATH)
+            ),
         )
         ensure_data_dir(Path(self.config.model_file).parent)
         ensure_data_dir(Path(self.config.feature_importance_file).parent)
@@ -80,7 +85,9 @@ class MLSignalScorer:
         if not self.config.enabled:
             return False
         sample_size = safe_int(self._model.get("sample_size"), 0)
-        return sample_size >= int(self.config.min_training_trades) and bool(self._model.get("stumps"))
+        return sample_size >= int(self.config.min_training_trades) and bool(
+            self._model.get("stumps")
+        )
 
     def load_closed_trades(self) -> list[dict]:
         """Load persisted closed trades from disk."""
@@ -88,7 +95,10 @@ class MLSignalScorer:
         if isinstance(payload, list):
             rows = payload
         elif isinstance(payload, dict):
-            rows = payload.get("trades", payload.get("closed_trades", payload.get("positions", [])))
+            raw_rows = payload.get(
+                "trades", payload.get("closed_trades", payload.get("positions", []))
+            )
+            rows = raw_rows if isinstance(raw_rows, list) else []
         else:
             rows = []
         trades = []
@@ -110,7 +120,9 @@ class MLSignalScorer:
         """Fit a boosted-stump model from closed trades."""
         if not self.config.enabled:
             return False
-        if not isinstance(trades, list) or len(trades) < int(self.config.min_training_trades):
+        if not isinstance(trades, list) or len(trades) < int(
+            self.config.min_training_trades
+        ):
             logger.info(
                 "ML scorer training skipped: %d trades < minimum %d",
                 len(trades) if isinstance(trades, list) else 0,
@@ -124,9 +136,11 @@ class MLSignalScorer:
         for trade in trades:
             row = self.extract_trade_features(trade)
             pnl = safe_float(trade.get("pnl", trade.get("realized_pnl", 0.0)), 0.0)
-            max_loss = abs(safe_float(trade.get("max_loss"), 0.0)) * max(
-                1.0, safe_float(trade.get("quantity"), 1.0)
-            ) * 100.0
+            max_loss = (
+                abs(safe_float(trade.get("max_loss"), 0.0))
+                * max(1.0, safe_float(trade.get("quantity"), 1.0))
+                * 100.0
+            )
             pnl_pct = safe_float(trade.get("pnl_pct"), 0.0)
             if pnl_pct == 0.0 and max_loss > 0:
                 pnl_pct = pnl / max_loss
@@ -171,7 +185,9 @@ class MLSignalScorer:
         self._model = payload
         if self.config.feature_importance_log:
             self._log_feature_importance(feature_names, importances)
-        logger.info("ML scorer trained with %d samples and %d features.", X.shape[0], X.shape[1])
+        logger.info(
+            "ML scorer trained with %d samples and %d features.", X.shape[0], X.shape[1]
+        )
         return True
 
     def predict_score(self, features: dict) -> float:
@@ -212,18 +228,34 @@ class MLSignalScorer:
 
     def extract_trade_features(self, trade: dict) -> dict:
         """Extract normalized model features from a closed-trade record."""
-        details = trade.get("details", {}) if isinstance(trade.get("details"), dict) else {}
-        vol_surface = details.get("vol_surface", {}) if isinstance(details.get("vol_surface"), dict) else {}
-        flow = details.get("options_flow", {}) if isinstance(details.get("options_flow"), dict) else {}
-        timestamp = str(trade.get("open_date", trade.get("entry_time", trade.get("created_at", ""))))
+        details = (
+            trade.get("details", {}) if isinstance(trade.get("details"), dict) else {}
+        )
+        vol_surface = (
+            details.get("vol_surface", {})
+            if isinstance(details.get("vol_surface"), dict)
+            else {}
+        )
+        flow = (
+            details.get("options_flow", {})
+            if isinstance(details.get("options_flow"), dict)
+            else {}
+        )
+        timestamp = str(
+            trade.get("open_date", trade.get("entry_time", trade.get("created_at", "")))
+        )
         day_of_week, time_bucket = _time_buckets(timestamp)
 
         score = safe_float(
-            details.get("score", trade.get("score", details.get("analysis_score", 0.0))),
+            details.get(
+                "score", trade.get("score", details.get("analysis_score", 0.0))
+            ),
             0.0,
         )
         width = safe_float(
-            details.get("spread_width", details.get("width", trade.get("spread_width", 0.0))),
+            details.get(
+                "spread_width", details.get("width", trade.get("spread_width", 0.0))
+            ),
             0.0,
         )
         credit = safe_float(trade.get("entry_credit", details.get("credit", 0.0)), 0.0)
@@ -233,36 +265,63 @@ class MLSignalScorer:
 
         news_score = safe_float(details.get("news_sentiment_score"), 0.0)
         if news_score == 0.0:
-            sentiment = str(details.get("news_sentiment", details.get("sentiment", "neutral"))).lower()
-            news_score = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}.get(sentiment, 0.0)
+            sentiment = str(
+                details.get("news_sentiment", details.get("sentiment", "neutral"))
+            ).lower()
+            news_score = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}.get(
+                sentiment, 0.0
+            )
 
         return {
-            "strategy_type": str(trade.get("strategy", details.get("strategy", "unknown"))).lower(),
-            "regime": str(trade.get("regime", details.get("regime", "unknown"))).lower(),
-            "iv_rank": safe_float(details.get("iv_rank", trade.get("iv_rank", 0.0)), 0.0),
+            "strategy_type": str(
+                trade.get("strategy", details.get("strategy", "unknown"))
+            ).lower(),
+            "regime": str(
+                trade.get("regime", details.get("regime", "unknown"))
+            ).lower(),
+            "iv_rank": safe_float(
+                details.get("iv_rank", trade.get("iv_rank", 0.0)), 0.0
+            ),
             "term_structure_regime": str(
-                vol_surface.get("term_structure_regime", details.get("term_structure_regime", "flat"))
+                vol_surface.get(
+                    "term_structure_regime",
+                    details.get("term_structure_regime", "flat"),
+                )
             ).lower(),
             "flow_bias": str(
                 flow.get("directional_bias", details.get("directional_bias", "neutral"))
             ).lower(),
             "spread_score": score,
-            "dte": safe_float(details.get("dte", trade.get("dte_remaining", trade.get("dte", 0.0))), 0.0),
+            "dte": safe_float(
+                details.get("dte", trade.get("dte_remaining", trade.get("dte", 0.0))),
+                0.0,
+            ),
             "delta": safe_float(
-                details.get("short_delta", details.get("net_delta", trade.get("delta", 0.0))),
+                details.get(
+                    "short_delta", details.get("net_delta", trade.get("delta", 0.0))
+                ),
                 0.0,
             ),
             "credit_to_width_ratio": credit_to_width,
             "day_of_week": day_of_week,
             "time_of_day_bucket": time_bucket,
-            "sector": str(details.get("sector", trade.get("sector", "unknown"))).lower(),
+            "sector": str(
+                details.get("sector", trade.get("sector", "unknown"))
+            ).lower(),
             "news_sentiment_score": news_score,
             "econ_calendar_proximity_days": safe_float(
-                details.get("econ_calendar_proximity_days", details.get("econ_days_to_event", 99.0)),
+                details.get(
+                    "econ_calendar_proximity_days",
+                    details.get("econ_days_to_event", 99.0),
+                ),
                 99.0,
             ),
-            "vix_level": safe_float(details.get("vix_level", trade.get("vix_level", 20.0)), 20.0),
-            "put_call_ratio": safe_float(details.get("put_call_ratio", trade.get("put_call_ratio", 1.0)), 1.0),
+            "vix_level": safe_float(
+                details.get("vix_level", trade.get("vix_level", 20.0)), 20.0
+            ),
+            "put_call_ratio": safe_float(
+                details.get("put_call_ratio", trade.get("put_call_ratio", 1.0)), 1.0
+            ),
         }
 
     def normalize_feature_input(self, features: dict) -> dict:
@@ -272,20 +331,31 @@ class MLSignalScorer:
             normalized["strategy_type"] = normalized.get("strategy")
         if "flow_directional_bias" in normalized and "flow_bias" not in normalized:
             normalized["flow_bias"] = normalized.get("flow_directional_bias")
-        if "credit_pct_of_width" in normalized and "credit_to_width_ratio" not in normalized:
+        if (
+            "credit_pct_of_width" in normalized
+            and "credit_to_width_ratio" not in normalized
+        ):
             normalized["credit_to_width_ratio"] = normalized.get("credit_pct_of_width")
         if "time_bucket" in normalized and "time_of_day_bucket" not in normalized:
             normalized["time_of_day_bucket"] = normalized.get("time_bucket")
         if "news_sentiment" in normalized and "news_sentiment_score" not in normalized:
             sentiment = str(normalized.get("news_sentiment", "neutral")).lower()
-            normalized["news_sentiment_score"] = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}.get(sentiment, 0.0)
+            normalized["news_sentiment_score"] = {
+                "bullish": 1.0,
+                "neutral": 0.0,
+                "bearish": -1.0,
+            }.get(sentiment, 0.0)
         if "entry_timestamp" in normalized:
-            day_of_week, time_bucket = _time_buckets(str(normalized.get("entry_timestamp")))
+            day_of_week, time_bucket = _time_buckets(
+                str(normalized.get("entry_timestamp"))
+            )
             normalized.setdefault("day_of_week", day_of_week)
             normalized.setdefault("time_of_day_bucket", time_bucket)
 
         for key in CATEGORICAL_FEATURES:
-            normalized[key] = str(normalized.get(key, "unknown")).strip().lower() or "unknown"
+            normalized[key] = (
+                str(normalized.get(key, "unknown")).strip().lower() or "unknown"
+            )
         for key in NUMERIC_FEATURES:
             normalized[key] = safe_float(normalized.get(key), 0.0)
         return normalized
@@ -295,7 +365,8 @@ class MLSignalScorer:
         for feature in CATEGORICAL_FEATURES:
             values = sorted(
                 {
-                    str((row or {}).get(feature, "unknown")).strip().lower() or "unknown"
+                    str((row or {}).get(feature, "unknown")).strip().lower()
+                    or "unknown"
                     for row in rows
                 }
             )
@@ -318,7 +389,9 @@ class MLSignalScorer:
             matrix.append(vec if vec is not None else [0.0] * len(feature_names))
         return np.asarray(matrix, dtype=float), feature_names, category_maps
 
-    def _vectorize_row(self, *, row: dict, feature_names: list[str], category_maps: dict) -> Optional[list[float]]:
+    def _vectorize_row(
+        self, *, row: dict, feature_names: list[str], category_maps: dict
+    ) -> Optional[list[float]]:
         if not isinstance(row, dict):
             return None
         vec: list[float] = []
@@ -332,7 +405,9 @@ class MLSignalScorer:
             return None
         return vec
 
-    def _log_feature_importance(self, feature_names: list[str], importances: np.ndarray) -> None:
+    def _log_feature_importance(
+        self, feature_names: list[str], importances: np.ndarray
+    ) -> None:
         total = float(np.sum(np.abs(importances)))
         rows = []
         for idx, name in enumerate(feature_names):
@@ -375,7 +450,7 @@ def _fit_gradient_boosted_stumps(
     for _ in range(max(1, n_estimators)):
         prob = 1.0 / (1.0 + np.exp(-np.clip(scores, -20, 20)))
         residual = y - prob
-        baseline_loss = float(np.mean(residual ** 2))
+        baseline_loss = float(np.mean(residual**2))
         best = _best_stump(X, residual, baseline_loss=baseline_loss)
         if best is None:
             continue
@@ -412,7 +487,7 @@ def _fit_gradient_boosted_stumps_regression(
 
     for _ in range(max(1, n_estimators)):
         residual = y - scores
-        baseline_loss = float(np.mean(residual ** 2))
+        baseline_loss = float(np.mean(residual**2))
         best = _best_stump(X, residual, baseline_loss=baseline_loss)
         if best is None:
             continue
@@ -496,4 +571,3 @@ def _time_buckets(timestamp: str) -> tuple[str, str]:
     else:
         bucket = "close_hour"
     return day, bucket
-

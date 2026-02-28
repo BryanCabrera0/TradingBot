@@ -49,7 +49,12 @@ class PnLAttributionTests(unittest.TestCase):
                 "quantity": 1,
                 "entry_credit": 1.0,
                 "current_value": 1.0,
-                "details": {"net_delta": 0.0, "net_gamma": 0.0, "net_theta": 0.0, "net_vega": 0.0},
+                "details": {
+                    "net_delta": 0.0,
+                    "net_gamma": 0.0,
+                    "net_theta": 0.0,
+                    "net_vega": 0.0,
+                },
             }
         ]
         result = engine.compute_attribution(positions, {"QQQ": 0.0}, {"QQQ": 0.0})

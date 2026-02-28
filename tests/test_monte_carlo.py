@@ -5,7 +5,9 @@ from bot.monte_carlo import MonteCarloRiskEngine
 
 class MonteCarloTests(unittest.TestCase):
     def test_simulation_returns_expected_shape(self) -> None:
-        engine = MonteCarloRiskEngine(simulations=500, var_limit_pct=3.0, random_seed=42)
+        engine = MonteCarloRiskEngine(
+            simulations=500, var_limit_pct=3.0, random_seed=42
+        )
         positions = [
             {
                 "symbol": "SPY",
@@ -32,7 +34,9 @@ class MonteCarloTests(unittest.TestCase):
         self.assertIn("var99", payload["horizons"]["1d"])
 
     def test_var_limit_flags_high_risk(self) -> None:
-        engine = MonteCarloRiskEngine(simulations=1000, var_limit_pct=0.1, random_seed=7)
+        engine = MonteCarloRiskEngine(
+            simulations=1000, var_limit_pct=0.1, random_seed=7
+        )
         positions = [
             {
                 "symbol": "QQQ",

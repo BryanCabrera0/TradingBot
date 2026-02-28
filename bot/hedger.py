@@ -55,7 +55,10 @@ class PortfolioHedger:
                 )
             )
 
-        if bool(self.config.get("tail_risk_enabled", False)) and regime.upper() in {"LOW_VOL_GRIND", "BULL_TREND"}:
+        if bool(self.config.get("tail_risk_enabled", False)) and regime.upper() in {
+            "LOW_VOL_GRIND",
+            "BULL_TREND",
+        }:
             actions.append(
                 HedgeAction(
                     symbol="VIX",
@@ -82,7 +85,11 @@ class PortfolioHedger:
                     )
                 )
 
-        max_cost = float(self.config.get("max_hedge_cost_pct", 1.0)) / 100.0 * max(0.0, account_value)
+        max_cost = (
+            float(self.config.get("max_hedge_cost_pct", 1.0))
+            / 100.0
+            * max(0.0, account_value)
+        )
         capped: list[HedgeAction] = []
         running = 0.0
         for action in actions:
@@ -125,4 +132,3 @@ def _sector_to_etf(sector: str) -> str:
         "Communication Services": "XLC",
     }
     return mapping.get(str(sector), "")
-

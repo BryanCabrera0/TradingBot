@@ -91,13 +91,14 @@ class LLMAdvisorTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "output_text": (
-                '{"approve":true,"confidence":0.9,'
-                '"risk_adjustment":1.0,"reason":"ok"}'
+                '{"approve":true,"confidence":0.9,"risk_adjustment":1.0,"reason":"ok"}'
             )
         }
 
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.openai_compat.requests.post", return_value=response) as post:
+            with mock.patch(
+                "bot.openai_compat.requests.post", return_value=response
+            ) as post:
                 raw = advisor._query_openai("{}")
 
         self.assertIn('"approve":true', raw.replace(" ", ""))
@@ -167,10 +168,16 @@ class LLMAdvisorTests(unittest.TestCase):
                 raw = advisor._query_openai("{}")
 
         self.assertIn('"verdict":"approve"', raw.replace(" ", ""))
-        self.assertEqual(post.call_args_list[0].args[0], "https://api.openai.com/v1/responses")
-        self.assertEqual(post.call_args_list[1].args[0], "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(
+            post.call_args_list[0].args[0], "https://api.openai.com/v1/responses"
+        )
+        self.assertEqual(
+            post.call_args_list[1].args[0], "https://api.openai.com/v1/chat/completions"
+        )
 
-    def test_openai_gpt52pro_payload_uses_reasoning_without_temp_or_schema(self) -> None:
+    def test_openai_gpt52pro_payload_uses_reasoning_without_temp_or_schema(
+        self,
+    ) -> None:
         advisor = LLMAdvisor(
             LLMConfig(
                 enabled=True,
@@ -192,7 +199,9 @@ class LLMAdvisorTests(unittest.TestCase):
         }
 
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.openai_compat.requests.post", return_value=response) as post:
+            with mock.patch(
+                "bot.openai_compat.requests.post", return_value=response
+            ) as post:
                 _ = advisor._query_openai("{}")
 
         payload = post.call_args.kwargs["json"]
@@ -277,7 +286,9 @@ class LLMAdvisorTests(unittest.TestCase):
         }
 
         with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
-            with mock.patch("bot.llm_advisor.requests.post", return_value=response) as post:
+            with mock.patch(
+                "bot.llm_advisor.requests.post", return_value=response
+            ) as post:
                 raw = advisor._query_google("{}")
 
         self.assertIn('"verdict":"approve"', raw.replace(" ", ""))
@@ -287,7 +298,9 @@ class LLMAdvisorTests(unittest.TestCase):
             args[0],
         )
         self.assertEqual(kwargs["params"]["key"], "test-key")
-        self.assertEqual(kwargs["json"]["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(
+            kwargs["json"]["generationConfig"]["responseMimeType"], "application/json"
+        )
 
     def test_google_health_check_rejects_placeholder_key(self) -> None:
         advisor = LLMAdvisor(LLMConfig(enabled=True, provider="google"))
@@ -424,10 +437,14 @@ class LLMAdvisorTests(unittest.TestCase):
                 symbol = "SPY" if idx % 2 == 0 else "QQQ"
                 strategy = "bull_put_spread" if idx % 3 else "iron_condor"
                 verdict = "approve" if idx % 2 == 0 else "reject"
-                outcome = -50.0 if idx in {2, 4, 6} else (80.0 if verdict == "approve" else -40.0)
+                outcome = (
+                    -50.0
+                    if idx in {2, 4, 6}
+                    else (80.0 if verdict == "approve" else -40.0)
+                )
                 trades.append(
                     {
-                        "timestamp": f"2026-02-{idx+1:02d}",
+                        "timestamp": f"2026-02-{idx + 1:02d}",
                         "symbol": symbol,
                         "strategy": strategy,
                         "verdict": verdict,
@@ -468,13 +485,22 @@ class LLMAdvisorTests(unittest.TestCase):
                     "trades": [],
                     "meta": {
                         "model_stats": {
-                            "openai:gpt-5.2-pro": {"trades": 20, "hits": 15, "accuracy": 0.75}
+                            "openai:gpt-5.2-pro": {
+                                "trades": 20,
+                                "hits": 15,
+                                "accuracy": 0.75,
+                            }
                         }
                     },
                 },
             )
             advisor = LLMAdvisor(
-                LLMConfig(enabled=True, provider="openai", model="gpt-5.2-pro", track_record_file=str(track))
+                LLMConfig(
+                    enabled=True,
+                    provider="openai",
+                    model="gpt-5.2-pro",
+                    track_record_file=str(track),
+                )
             )
 
             weight = advisor._model_weight("openai:gpt-5.2-pro")
@@ -499,7 +525,11 @@ class LLMAdvisorTests(unittest.TestCase):
                     "trades": trades,
                     "meta": {
                         "calibration": {
-                            "80-90": {"actual_win_rate": 0.55, "expected_confidence": 0.85, "trades": 55}
+                            "80-90": {
+                                "actual_win_rate": 0.55,
+                                "expected_confidence": 0.85,
+                                "trades": 55,
+                            }
                         }
                     },
                 },
@@ -557,7 +587,9 @@ class LLMAdvisorTests(unittest.TestCase):
             )
             signal = make_signal()
 
-            decision = advisor.review_trade(signal, {"portfolio_exposure": {"total_delta": 12}})
+            decision = advisor.review_trade(
+                signal, {"portfolio_exposure": {"total_delta": 12}}
+            )
 
             self.assertEqual(advisor._query_model.call_count, 2)
             self.assertEqual(decision.verdict, "approve")

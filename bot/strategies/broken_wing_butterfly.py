@@ -77,11 +77,17 @@ class BrokenWingButterflyStrategy(BaseStrategy):
             if not near or not far:
                 continue
 
-            credit = float(short.get("mid", 0.0) or 0.0) * 2.0 - float(near.get("mid", 0.0) or 0.0) - float(far.get("mid", 0.0) or 0.0)
+            credit = (
+                float(short.get("mid", 0.0) or 0.0) * 2.0
+                - float(near.get("mid", 0.0) or 0.0)
+                - float(far.get("mid", 0.0) or 0.0)
+            )
             if credit < min_credit:
                 continue
 
-            risk_side = abs(float(far.get("strike", 0.0)) - float(short.get("strike", 0.0)))
+            risk_side = abs(
+                float(far.get("strike", 0.0)) - float(short.get("strike", 0.0))
+            )
             max_loss = max(risk_side - credit, credit)
             score = 60.0
             score += 10.0 if bullish else 8.0
@@ -118,7 +124,9 @@ class BrokenWingButterflyStrategy(BaseStrategy):
                     },
                 )
             )
-        signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
+        signals.sort(
+            key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True
+        )
         return signals
 
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
@@ -139,8 +147,13 @@ class BrokenWingButterflyStrategy(BaseStrategy):
                 continue
             pnl_pct = (entry_credit - current_value) / entry_credit
             target_pct = self._profit_target_for_dte(dte) if adaptive_targets else 0.40
-            details = pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
-            trailing_high = float(pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0)) or 0.0)
+            details = (
+                pos.get("details", {}) if isinstance(pos.get("details"), dict) else {}
+            )
+            trailing_high = float(
+                pos.get("trailing_stop_high", details.get("trailing_stop_high", 0.0))
+                or 0.0
+            )
             if trailing_enabled and pnl_pct >= trail_activation:
                 trailing_high = max(trailing_high, pnl_pct)
                 pos["trailing_stop_high"] = trailing_high
@@ -162,7 +175,11 @@ class BrokenWingButterflyStrategy(BaseStrategy):
                         reason=(
                             "Trailing stop"
                             if trailing_triggered
-                            else ("Profit target" if pnl_pct >= target_pct else "DTE threshold")
+                            else (
+                                "Profit target"
+                                if pnl_pct >= target_pct
+                                else "DTE threshold"
+                            )
                         ),
                         quantity=max(1, int(pos.get("quantity", 1))),
                     )

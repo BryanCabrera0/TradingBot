@@ -13,7 +13,9 @@ from bot.number_utils import safe_float
 class AltDataEngine:
     """Compute and cache alternative-data overlays used by entry decisions."""
 
-    def __init__(self, config: AltDataConfig, *, news_scanner: Optional[NewsScanner] = None):
+    def __init__(
+        self, config: AltDataConfig, *, news_scanner: Optional[NewsScanner] = None
+    ):
         self.config = config
         self.news_scanner = news_scanner
         self._social_cache: dict[str, tuple[float, dict]] = {}
@@ -35,7 +37,9 @@ class AltDataEngine:
         if bool(self.config.gex_enabled):
             payload["gex"] = self.estimate_gex(
                 chain_data,
-                underlying_price=safe_float((chain_data or {}).get("underlying_price"), 0.0),
+                underlying_price=safe_float(
+                    (chain_data or {}).get("underlying_price"), 0.0
+                ),
             )
         if bool(self.config.dark_pool_proxy_enabled):
             payload["dark_pool_proxy"] = self.estimate_dark_pool_proxy(
@@ -103,8 +107,7 @@ class AltDataEngine:
             "dealer_gamma_bias": bias,
             "magnitude": round(abs(net_total) / 1_000_000.0, 3),
             "net_gamma_by_strike": {
-                f"{strike:.2f}": round(per_strike[strike], 2)
-                for strike in strikes
+                f"{strike:.2f}": round(per_strike[strike], 2) for strike in strikes
             },
         }
 
@@ -140,8 +143,16 @@ class AltDataEngine:
         elif institutional in {"bearish", "selling"}:
             flow_bias -= 0.5
 
-        score = _clamp((0.45 * oi_skew) + (0.35 * volume_skew) + (0.20 * flow_bias), -1.0, 1.0)
-        pressure = "accumulation" if score > 0.15 else "distribution" if score < -0.15 else "neutral"
+        score = _clamp(
+            (0.45 * oi_skew) + (0.35 * volume_skew) + (0.20 * flow_bias), -1.0, 1.0
+        )
+        pressure = (
+            "accumulation"
+            if score > 0.15
+            else "distribution"
+            if score < -0.15
+            else "neutral"
+        )
 
         return {
             "dark_pool_proxy_score": round(score, 4),
@@ -215,7 +226,9 @@ def _totals(chain_data: dict) -> dict:
     return out
 
 
-def _gamma_flip_from_cumulative(cumulative: list[tuple[float, float]]) -> Optional[float]:
+def _gamma_flip_from_cumulative(
+    cumulative: list[tuple[float, float]],
+) -> Optional[float]:
     if len(cumulative) < 2:
         return None
     prev_strike, prev_value = cumulative[0]

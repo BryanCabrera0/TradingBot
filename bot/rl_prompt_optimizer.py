@@ -1,4 +1,11 @@
-"""Reinforcement-style prompt optimizer that learns trade rules from outcomes."""
+"""Reinforcement-style prompt optimizer that learns trade rules from outcomes.
+
+SIMPLE EXPLANATION:
+The RL Prompt Optimizer is the "continuous learning" agent. It reviews past trades 
+to see what worked and what lost money. Based on those results, it automatically writes 
+new rules (like "stop trading tech stocks before CPI data") to improve the other agents' 
+prompts in the future, helping the bot get smarter over time.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +29,9 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def load_active_rules(path: Path | str = DEFAULT_RULES_PATH, *, limit: Optional[int] = None) -> list[str]:
+def load_active_rules(
+    path: Path | str = DEFAULT_RULES_PATH, *, limit: Optional[int] = None
+) -> list[str]:
     """Load learned rule text lines for prompt injection."""
     payload = load_json(path, {"rules": []})
     rows = payload.get("rules", []) if isinstance(payload, dict) else []
@@ -35,7 +44,7 @@ def load_active_rules(path: Path | str = DEFAULT_RULES_PATH, *, limit: Optional[
     ]
     if limit is None:
         return rules
-    return rules[-max(0, int(limit)):]
+    return rules[-max(0, int(limit)) :]
 
 
 class RLPromptOptimizer:
@@ -121,19 +130,35 @@ class RLPromptOptimizer:
             "detected_patterns": patterns,
         }
 
-    def _build_closed_trade_row(self, *, position_id: str, pnl: float, trade_context: dict) -> dict:
+    def _build_closed_trade_row(
+        self, *, position_id: str, pnl: float, trade_context: dict
+    ) -> dict:
         explanations_payload = load_json(self.explanations_path, {"positions": {}})
-        positions = explanations_payload.get("positions", {}) if isinstance(explanations_payload, dict) else {}
-        explanation = positions.get(position_id, {}) if isinstance(positions, dict) else {}
+        positions = (
+            explanations_payload.get("positions", {})
+            if isinstance(explanations_payload, dict)
+            else {}
+        )
+        explanation = (
+            positions.get(position_id, {}) if isinstance(positions, dict) else {}
+        )
 
         track_payload = load_json(self.track_record_path, {"trades": []})
-        track_rows = track_payload.get("trades", []) if isinstance(track_payload, dict) else []
+        track_rows = (
+            track_payload.get("trades", []) if isinstance(track_payload, dict) else []
+        )
         track = self._find_track_row(track_rows, position_id)
 
         attribution = self._find_latest_attribution(position_id)
 
-        context = track.get("context", {}) if isinstance(track.get("context"), dict) else {}
-        earnings_proximity = context.get("earnings_proximity", {}) if isinstance(context.get("earnings_proximity"), dict) else {}
+        context = (
+            track.get("context", {}) if isinstance(track.get("context"), dict) else {}
+        )
+        earnings_proximity = (
+            context.get("earnings_proximity", {})
+            if isinstance(context.get("earnings_proximity"), dict)
+            else {}
+        )
 
         regime = (
             str(trade_context.get("regime", "")).upper()
@@ -148,7 +173,10 @@ class RLPromptOptimizer:
             or "unknown"
         )
         confidence = self._safe_float(
-            explanation.get("confidence", track.get("confidence", trade_context.get("confidence", 0.0))),
+            explanation.get(
+                "confidence",
+                track.get("confidence", trade_context.get("confidence", 0.0)),
+            ),
             0.0,
         )
 
@@ -156,11 +184,18 @@ class RLPromptOptimizer:
             "timestamp": utc_now_iso(),
             "position_id": position_id,
             "strategy": strategy,
-            "symbol": str(trade_context.get("symbol", explanation.get("symbol", track.get("symbol", "")))).upper(),
+            "symbol": str(
+                trade_context.get(
+                    "symbol", explanation.get("symbol", track.get("symbol", ""))
+                )
+            ).upper(),
             "regime": regime,
             "pnl": float(pnl),
             "loss": bool(float(pnl) < 0.0),
-            "verdict": str(explanation.get("verdict", track.get("verdict", ""))).strip().lower() or "unknown",
+            "verdict": str(explanation.get("verdict", track.get("verdict", "")))
+            .strip()
+            .lower()
+            or "unknown",
             "confidence": confidence,
             "reasoning": str(track.get("reasoning", "")).strip()[:280],
             "earnings_in_window": bool(
@@ -188,7 +223,11 @@ class RLPromptOptimizer:
             return {}
         for day in reversed(history):
             attribution = day.get("attribution", {}) if isinstance(day, dict) else {}
-            rows = attribution.get("positions", []) if isinstance(attribution, dict) else []
+            rows = (
+                attribution.get("positions", [])
+                if isinstance(attribution, dict)
+                else []
+            )
             if not isinstance(rows, list):
                 continue
             for row in rows:
@@ -208,7 +247,9 @@ class RLPromptOptimizer:
     def _detect_patterns(self, rows: list[dict]) -> list[dict]:
         patterns: list[dict] = []
         min_trades = max(3, int(self.config.min_trades_for_pattern or 8))
-        min_loss_rate = max(0.5, min(0.99, float(self.config.loss_rate_threshold or 0.6)))
+        min_loss_rate = max(
+            0.5, min(0.99, float(self.config.loss_rate_threshold or 0.6))
+        )
 
         grouped: dict[tuple[str, str], list[dict]] = {}
         for row in rows:
@@ -301,9 +342,7 @@ class RLPromptOptimizer:
             payload["rules"] = rules
         created: list[dict] = []
         existing_keys = {
-            str(item.get("pattern_key", ""))
-            for item in rules
-            if isinstance(item, dict)
+            str(item.get("pattern_key", "")) for item in rules if isinstance(item, dict)
         }
         for pattern in patterns:
             if not isinstance(pattern, dict):
@@ -340,7 +379,9 @@ class RLPromptOptimizer:
         return [item for item in pruned if isinstance(item, dict)]
 
     def _load_rules_payload(self) -> dict:
-        payload = load_json(self.rules_path, {"rules": [], "recent_closed_trades": [], "meta": {}})
+        payload = load_json(
+            self.rules_path, {"rules": [], "recent_closed_trades": [], "meta": {}}
+        )
         if not isinstance(payload, dict):
             payload = {"rules": [], "recent_closed_trades": [], "meta": {}}
         if not isinstance(payload.get("rules"), list):
@@ -355,7 +396,9 @@ class RLPromptOptimizer:
         record = {
             "timestamp": utc_now_iso(),
             "event_type": str(event_type),
-            "details": details if isinstance(details, dict) else {"value": str(details)},
+            "details": details
+            if isinstance(details, dict)
+            else {"value": str(details)},
         }
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.audit_path, "a", encoding="utf-8") as handle:
@@ -365,6 +408,6 @@ class RLPromptOptimizer:
     @staticmethod
     def _safe_float(value: object, default: float = 0.0) -> float:
         try:
-            return float(value)
+            return float(str(value))
         except (TypeError, ValueError):
             return float(default)

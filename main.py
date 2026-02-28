@@ -42,20 +42,14 @@ import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from bot.config import format_validation_report, load_config, validate_config
-from bot.data_fetcher import HistoricalDataFetcher
-from bot.backtester import Backtester
-from bot.dashboard import generate_dashboard
-from bot.econ_calendar import refresh_static_calendar_file
 from bot.file_security import validate_sensitive_file
-from bot.live_setup import run_live_setup
-from bot.live_trade_ledger import LiveTradeLedger
 from bot.number_utils import safe_float
-from bot.orchestrator import TradingBot
-from bot.paper_trader import PaperTrader
-from bot.schwab_client import SchwabClient
+
+if TYPE_CHECKING:
+    from bot.orchestrator import TradingBot
 
 
 def setup_logging(
@@ -106,7 +100,9 @@ def setup_logging(
         file_handler.setFormatter(file_fmt)
         root_logger.addHandler(file_handler)
     except PermissionError:
-        root_logger.warning(f"Permission denied writing to {log_file}, skipping file logging.")
+        root_logger.warning(
+            f"Permission denied writing to {log_file}, skipping file logging."
+        )
 
 
 def print_banner() -> None:
@@ -120,6 +116,8 @@ def print_banner() -> None:
 
 def show_report() -> None:
     """Display paper trading performance report."""
+    from bot.paper_trader import PaperTrader
+
     trader = PaperTrader()
     summary = trader.get_performance_summary()
 
@@ -192,7 +190,9 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
         return answer in {"", "y", "yes"}
 
     try:
-        validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+        validate_sensitive_file(
+            token_path, label="Schwab token file", allow_missing=False
+        )
     except PermissionError:
         pass  # File exists but is locked; assume it is valid for now.
     except FileNotFoundError:
@@ -200,14 +200,18 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
         if _auth_prompt():
             _run_inline_auth()
             try:
-                validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+                validate_sensitive_file(
+                    token_path, label="Schwab token file", allow_missing=False
+                )
             except PermissionError:
                 pass
             except Exception:
                 print("Token check failed after auth. Please re-run the command.")
                 return False
             return True
-        print("Run `tradingbot auth` (or `python3 main.py auth`) to create a new token.")
+        print(
+            "Run `tradingbot auth` (or `python3 main.py auth`) to create a new token."
+        )
         return False
     except Exception as exc:
         print(f"Token check failed for {token_path}: {exc}")
@@ -258,13 +262,16 @@ def _has_price(contract: dict) -> bool:
     )
 
 
-def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "SPY") -> int:
+def run_integrated_diagnostics(
+    config, mode_hint: str = "paper", symbol: str = "SPY"
+) -> int:
     """Run one-shot diagnostics for auth, chain parsing, and entry blockers."""
     print("\n=== TradingBot Integrated Diagnostics ===")
     print(f"Mode hint: {mode_hint.upper()}")
     print(f"Symbol: {symbol}")
+    from bot.schwab_client import SchwabClient
     client: Optional[SchwabClient] = None
-    bot: Optional[TradingBot] = None
+    bot: Optional["TradingBot"] = None
 
     def _cleanup_streaming() -> None:
         for candidate in (
@@ -282,7 +289,9 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         token_path = (Path.cwd() / token_path).resolve()
     print(f"Token path: {token_path}")
     try:
-        validate_sensitive_file(token_path, label="Schwab token file", allow_missing=False)
+        validate_sensitive_file(
+            token_path, label="Schwab token file", allow_missing=False
+        )
         mode = token_path.stat().st_mode & 0o777
         print(f"Token file: OK (perm {oct(mode)})")
     except Exception as exc:
@@ -345,13 +354,19 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
             "correlated_loss_pause_until",
             "correlation_pause_until",
         ]
-        pauses = {key: bot.circuit_state.get(key) for key in pause_fields if bot.circuit_state.get(key)}
+        pauses = {
+            key: bot.circuit_state.get(key)
+            for key in pause_fields
+            if bot.circuit_state.get(key)
+        }
         if pauses:
             print(f"Circuit breaker state: {pauses}")
 
         chain_data, underlying = bot._get_chain_data(symbol)
         if not chain_data or safe_float(underlying, 0.0) <= 0:
-            print("Orchestrator chain pull: FAILED (empty chain or non-positive underlying)")
+            print(
+                "Orchestrator chain pull: FAILED (empty chain or non-positive underlying)"
+            )
             return 1
 
         technical_context = None
@@ -397,14 +412,20 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
         risk_ok, risk_reason = bot.risk_manager.approve_trade(signal)
         budget_ok, budget_qty, budget_reason = bot.risk_manager.evaluate_greeks_budget(
             signal,
-            regime=str(signal.metadata.get("regime", bot.circuit_state.get("regime", "NORMAL"))),
+            regime=str(
+                signal.metadata.get("regime", bot.circuit_state.get("regime", "NORMAL"))
+            ),
             quantity=max(1, int(signal.quantity or 1)),
             allow_resize=True,
         )
         slippage_penalty = bot._symbol_slippage_penalty(signal.symbol)
         width = bot._signal_width(signal)
         min_credit_pct = bot._strategy_min_credit_pct(signal.strategy)
-        required_credit = (min_credit_pct * width) + slippage_penalty if width > 0 and min_credit_pct > 0 else 0.0
+        required_credit = (
+            (min_credit_pct * width) + slippage_penalty
+            if width > 0 and min_credit_pct > 0
+            else 0.0
+        )
         credit_ok = float(analysis.credit or 0.0) >= required_credit
 
         print(
@@ -434,27 +455,163 @@ def run_integrated_diagnostics(config, mode_hint: str = "paper", symbol: str = "
     return 0
 
 
+RUN_MENU_OPTIONS: dict[str, tuple[str, bool]] = {
+    "1": ("paper", False),
+    "2": ("live", False),
+}
+
+RUN_MENU_ALIASES: dict[str, tuple[str, bool]] = {
+    "run paper": ("paper", False),
+    "run paper once": ("paper", True),
+    "run live": ("live", False),
+    "run live once": ("live", True),
+    "auth": ("auth", False),
+    "reauth": ("auth", False),
+    "re-auth": ("auth", False),
+    "token": ("auth", False),
+    "auth paper": ("auth_paper", False),
+    "auth live": ("auth_live", False),
+    "paper": ("paper", False),
+    "live": ("live", False),
+}
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Fully automated options trading bot for ThinkorSwim/Schwab"
+    )
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="Path to YAML config file (default: config.yaml)",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "Acknowledge live-trading confirmation prompt "
+            "(useful for non-interactive live runs)"
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Override log level from config",
+    )
+    parser.add_argument(
+        "--quiet",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Suppress routine console logs (warnings/errors still shown). "
+            "Full logs remain in log file. Enabled by default; use --no-quiet "
+            "to show routine logs."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    run_parser = subparsers.add_parser("run", help="Run trading bot")
+    run_parser.set_defaults(mode="paper", once_token=None)
+    run_subparsers = run_parser.add_subparsers(dest="mode")
+
+    run_paper = run_subparsers.add_parser("paper", help="Run in paper mode")
+    run_paper.add_argument(
+        "once_token",
+        nargs="?",
+        choices=["once"],
+        help="Run one scan cycle and exit",
+    )
+    run_paper.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
+    )
+    run_paper.set_defaults(mode="paper")
+
+    run_live = run_subparsers.add_parser("live", help="Run in live mode")
+    run_live.add_argument(
+        "once_token",
+        nargs="?",
+        choices=["once"],
+        help="Run one scan cycle and exit",
+    )
+    run_live.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
+    )
+    run_live.set_defaults(mode="live")
+
+    subparsers.add_parser("auth", help="Re-authorize Schwab OAuth token")
+    return parser
+
+
+def _resolve_menu_selection() -> tuple[str, bool]:
+    mode, once = prompt_run_menu()
+    while mode == "auth":
+        _run_inline_auth()
+        mode, once = prompt_run_menu()
+    if mode == "auth_paper":
+        _run_inline_auth()
+        return "paper", once
+    if mode == "auth_live":
+        _run_inline_auth()
+        return "live", once
+    return mode, once
+
+
+def _parse_args() -> tuple[argparse.Namespace, bool]:
+    args = _build_parser().parse_args()
+    interactive_menu_requested = not args.command
+
+    if interactive_menu_requested:
+        args.command = "run"
+        if sys.stdin.isatty():
+            mode, once = _resolve_menu_selection()
+            args.mode = mode
+            args.once_token = "once" if once else None
+        else:
+            # Avoid hanging in non-interactive contexts (scripts/services).
+            args.mode = "paper"
+            args.once_token = None
+
+    args.live = str(getattr(args, "mode", "paper") or "paper") == "live"
+    args.once = str(getattr(args, "once_token", "") or "") == "once"
+    args.diagnose = bool(getattr(args, "diagnose", False))
+    return args, interactive_menu_requested
+
+
+def _count_enabled_strategies(config) -> int:
+    return sum(
+        1
+        for strategy in (
+            config.credit_spreads,
+            config.iron_condors,
+            config.covered_calls,
+            config.naked_puts,
+            config.calendar_spreads,
+        )
+        if getattr(strategy, "enabled", False)
+    )
+
+
+def _print_runtime_summary(config) -> None:
+    mode_str = "LIVE" if config.trading_mode == "live" else "PAPER"
+    print(f"  Mode:       {mode_str}")
+    print(f"  Strategies: {_count_enabled_strategies(config)} enabled")
+    if not config.watchlist:
+        print(
+            "  Scanner:    ON — dynamically finds best options stocks from 150+ tickers"
+        )
+    else:
+        prefix = ", ".join(config.watchlist[:5])
+        suffix = "..." if len(config.watchlist) > 5 else ""
+        print(f"  Watchlist:  {prefix}{suffix}")
+    print()
+
+
 def prompt_run_menu() -> tuple[str, bool]:
     """Prompt for run mode."""
-    options = {
-        "1": ("paper", False),
-        "2": ("live", False),
-    }
-    aliases = {
-        "run paper": ("paper", False),
-        "run paper once": ("paper", True),
-        "run live": ("live", False),
-        "run live once": ("live", True),
-        "auth": ("auth", False),
-        "reauth": ("auth", False),
-        "re-auth": ("auth", False),
-        "token": ("auth", False),
-        "auth paper": ("auth_paper", False),
-        "auth live": ("auth_live", False),
-        "paper": ("paper", False),
-        "live": ("live", False),
-    }
-
     print("\nSelect TradingBot mode:")
     print("  1) paper trading")
     print("  2) live trading")
@@ -469,10 +626,10 @@ def prompt_run_menu() -> tuple[str, bool]:
             print("\nNo selection received. Aborted.")
             sys.exit(2)
 
-        if raw in options:
-            return options[raw]
-        if raw in aliases:
-            return aliases[raw]
+        if raw in RUN_MENU_OPTIONS:
+            return RUN_MENU_OPTIONS[raw]
+        if raw in RUN_MENU_ALIASES:
+            return RUN_MENU_ALIASES[raw]
         print("Invalid selection. Enter 1 or 2.")
 
 
@@ -498,7 +655,9 @@ def prompt_after_run_menu() -> bool:
         print("Invalid selection. Enter 1 or 2.")
 
 
-def start_dashboard_command_listener(bot: TradingBot) -> tuple[dict, threading.Event, threading.Thread]:
+def start_dashboard_command_listener(
+    bot: TradingBot,
+) -> tuple[dict, threading.Event, threading.Thread]:
     """Listen for menu commands while the bot is running.
 
     When the TUI is active the keybinding footer already shows the
@@ -556,15 +715,18 @@ def main() -> None:
         description="Fully automated options trading bot for ThinkorSwim/Schwab"
     )
     parser.add_argument(
-        "--config", default="config.yaml",
+        "--config",
+        default="config.yaml",
         help="Path to YAML config file (default: config.yaml)",
     )
     parser.add_argument(
-        "--yes", action="store_true",
+        "--yes",
+        action="store_true",
         help="Acknowledge live-trading confirmation prompt (useful for non-interactive live runs)",
     )
     parser.add_argument(
-        "--log-level", default=None,
+        "--log-level",
+        default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override log level from config",
     )
@@ -664,6 +826,7 @@ def main() -> None:
         return
 
     if args.prepare_live:
+        from bot.live_setup import run_live_setup
         try:
             run_live_setup(
                 config_path=args.config,
@@ -681,6 +844,7 @@ def main() -> None:
         args.live = True
 
     if args.setup_live:
+        from bot.live_setup import run_live_setup
         try:
             run_live_setup(
                 config_path=args.config,
@@ -701,7 +865,9 @@ def main() -> None:
     validation = validate_config(config)
     print(format_validation_report(validation))
     if validation.failed:
-        print("Configuration validation failed. Resolve the failures above before continuing.")
+        print(
+            "Configuration validation failed. Resolve the failures above before continuing."
+        )
         sys.exit(2)
 
     # Apply token checks across all run-mode entry points (menu + CLI).
@@ -720,7 +886,9 @@ def main() -> None:
     if args.diagnose:
         code = run_integrated_diagnostics(
             config=config,
-            mode_hint=str(getattr(args, "mode", config.trading_mode) or config.trading_mode),
+            mode_hint=str(
+                getattr(args, "mode", config.trading_mode) or config.trading_mode
+            ),
             symbol="SPY",
         )
         if code != 0:
@@ -731,12 +899,20 @@ def main() -> None:
         if not args.start or not args.end:
             print("--fetch-data requires --start and --end in YYYY-MM-DD format.")
             sys.exit(2)
+        from bot.data_fetcher import HistoricalDataFetcher
+        from bot.schwab_client import SchwabClient
         try:
             schwab = SchwabClient(config.schwab)
             schwab.connect()
-            symbols = list(dict.fromkeys(config.watchlist + list(config.covered_calls.tickers or [])))
+            symbols = list(
+                dict.fromkeys(
+                    config.watchlist + list(config.covered_calls.tickers or [])
+                )
+            )
             fetcher = HistoricalDataFetcher(schwab)
-            results = fetcher.fetch_range(start=args.start, end=args.end, symbols=symbols)
+            results = fetcher.fetch_range(
+                start=args.start, end=args.end, symbols=symbols
+            )
             created = sum(1 for row in results if not row.skipped)
             skipped = sum(1 for row in results if row.skipped)
             print(f"Fetch complete: {created} snapshots created, {skipped} skipped.")
@@ -746,6 +922,7 @@ def main() -> None:
         return
 
     if args.update_econ_calendar:
+        from bot.econ_calendar import refresh_static_calendar_file
         try:
             output = refresh_static_calendar_file()
             print(f"Economic calendar updated: {output}")
@@ -783,6 +960,7 @@ def main() -> None:
         if not args.start or not args.end:
             print("--backtest requires --start and --end in YYYY-MM-DD format.")
             sys.exit(2)
+        from bot.backtester import Backtester
         try:
             backtester = Backtester(config)
             result = backtester.run(start=args.start, end=args.end)
@@ -793,6 +971,10 @@ def main() -> None:
         return
 
     if args.dashboard:
+        from bot.dashboard import generate_dashboard
+        from bot.live_trade_ledger import LiveTradeLedger
+        from bot.paper_trader import PaperTrader
+        from bot.schwab_client import SchwabClient
         try:
             if config.trading_mode == "paper":
                 paper = PaperTrader()
@@ -802,7 +984,9 @@ def main() -> None:
             else:
                 ledger = LiveTradeLedger()
                 closed = ledger.list_positions(statuses={"closed", "closed_external"})
-                open_positions = ledger.list_positions(statuses={"open", "opening", "closing"})
+                open_positions = ledger.list_positions(
+                    statuses={"open", "opening", "closing"}
+                )
                 try:
                     schwab = SchwabClient(config.schwab)
                     schwab.connect()
@@ -812,14 +996,17 @@ def main() -> None:
 
             monthly: dict[str, float] = {}
             by_strategy: dict[str, dict] = {}
-            winners, losers = [], []
+            winners: list[dict] = []
+            losers: list[dict] = []
             for trade in closed:
                 pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
                 close_date = str(trade.get("close_date", ""))
                 month = close_date[:7] if len(close_date) >= 7 else "unknown"
                 monthly[month] = monthly.get(month, 0.0) + pnl
                 strategy = str(trade.get("strategy", "unknown"))
-                stats = by_strategy.setdefault(strategy, {"wins": 0, "count": 0, "total_pnl": 0.0})
+                stats = by_strategy.setdefault(
+                    strategy, {"wins": 0, "count": 0, "total_pnl": 0.0}
+                )
                 stats["count"] += 1
                 if pnl > 0:
                     stats["wins"] += 1
@@ -840,10 +1027,22 @@ def main() -> None:
                 "equity_curve": [],
                 "monthly_pnl": monthly,
                 "strategy_breakdown": strategy_breakdown,
-                "top_winners": sorted(winners, key=lambda x: x["pnl"], reverse=True)[:5],
+                "top_winners": sorted(winners, key=lambda x: x["pnl"], reverse=True)[
+                    :5
+                ],
                 "top_losers": sorted(losers, key=lambda x: x["pnl"])[:5],
-                "risk_metrics": {"sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0, "current_drawdown": 0.0},
-                "portfolio_greeks": {"delta": 0.0, "theta": 0.0, "gamma": 0.0, "vega": 0.0},
+                "risk_metrics": {
+                    "sharpe": 0.0,
+                    "sortino": 0.0,
+                    "max_drawdown": 0.0,
+                    "current_drawdown": 0.0,
+                },
+                "portfolio_greeks": {
+                    "delta": 0.0,
+                    "theta": 0.0,
+                    "gamma": 0.0,
+                    "vega": 0.0,
+                },
                 "sector_exposure": {},
                 "circuit_breakers": {
                     "regime": "n/a",
@@ -890,10 +1089,14 @@ def main() -> None:
         "  Strategies: "
         f"{sum(1 for s in [config.credit_spreads, config.iron_condors, config.covered_calls, config.naked_puts, config.calendar_spreads] if getattr(s, 'enabled', False))} enabled"
     )
-    if config.scanner.enabled:
-        print(f"  Scanner:    ON — dynamically finds best options stocks from 150+ tickers")
+    if not config.watchlist:
+        print(
+            "  Scanner:    ON — dynamically finds best options stocks from 150+ tickers"
+        )
     else:
-        print(f"  Watchlist:  {', '.join(config.watchlist[:5])}{'...' if len(config.watchlist) > 5 else ''}")
+        print(
+            f"  Watchlist:  {', '.join(config.watchlist[:5])}{'...' if len(config.watchlist) > 5 else ''}"
+        )
     print()
 
     if config.trading_mode == "live":
@@ -901,9 +1104,7 @@ def main() -> None:
         print("  ⚠  Make sure you understand the risks before proceeding.")
         print()
         needs_confirmation = (
-            not args.preflight_only
-            and not args.yes
-            and not args.live_readiness_only
+            not args.preflight_only and not args.yes and not args.live_readiness_only
         )
         if needs_confirmation:
             if not sys.stdin.isatty():

@@ -38,19 +38,41 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         bot._update_market_regime()
 
         self.assertEqual(bot.circuit_state["regime"], "elevated")
-        self.assertEqual(bot.risk_manager.config.max_open_positions, int(round(starting_limit * 0.7)))
-        self.assertAlmostEqual(bot.strategies[0].config.get("min_credit_pct"), round(start_min_credit * 1.2, 4))
+        self.assertEqual(
+            bot.risk_manager.config.max_open_positions, int(round(starting_limit * 0.7))
+        )
+        self.assertAlmostEqual(
+            bot.strategies[0].config.get("min_credit_pct"),
+            round(start_min_credit * 1.2, 4),
+        )
 
     def test_three_consecutive_max_losses_pauses_24h(self) -> None:
         bot = TradingBot(_config())
         now = bot._now_eastern()
         today = now.date().isoformat()
         bot.paper_trader.closed_trades = [
-            {"pnl": -200.0, "max_loss": 2.0, "quantity": 1, "close_date": f"{today}T10:00:00"},
-            {"pnl": -200.0, "max_loss": 2.0, "quantity": 1, "close_date": f"{today}T11:00:00"},
-            {"pnl": -200.0, "max_loss": 2.0, "quantity": 1, "close_date": f"{today}T12:00:00"},
+            {
+                "pnl": -200.0,
+                "max_loss": 2.0,
+                "quantity": 1,
+                "close_date": f"{today}T10:00:00",
+            },
+            {
+                "pnl": -200.0,
+                "max_loss": 2.0,
+                "quantity": 1,
+                "close_date": f"{today}T11:00:00",
+            },
+            {
+                "pnl": -200.0,
+                "max_loss": 2.0,
+                "quantity": 1,
+                "close_date": f"{today}T12:00:00",
+            },
         ]
-        bot.risk_manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        bot.risk_manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
 
         bot._update_loss_breakers()
 
@@ -65,10 +87,22 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         now = bot._now_eastern()
         today = now.date().isoformat()
         bot.paper_trader.closed_trades = [
-            {"pnl": -3000.0, "max_loss": 30.0, "quantity": 1, "close_date": f"{today}T10:00:00"},
-            {"pnl": -2600.0, "max_loss": 26.0, "quantity": 1, "close_date": f"{today}T11:00:00"},
+            {
+                "pnl": -3000.0,
+                "max_loss": 30.0,
+                "quantity": 1,
+                "close_date": f"{today}T10:00:00",
+            },
+            {
+                "pnl": -2600.0,
+                "max_loss": 26.0,
+                "quantity": 1,
+                "close_date": f"{today}T11:00:00",
+            },
         ]
-        bot.risk_manager.update_portfolio(account_balance=100_000, open_positions=[], daily_pnl=0.0)
+        bot.risk_manager.update_portfolio(
+            account_balance=100_000, open_positions=[], daily_pnl=0.0
+        )
 
         bot._update_loss_breakers()
 
@@ -81,10 +115,42 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
     def test_correlated_loss_breaker_closes_two_worst_and_pauses(self) -> None:
         bot = TradingBot(_config())
         positions = [
-            {"position_id": "p1", "status": "open", "symbol": "AAPL", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.8},
-            {"position_id": "p2", "status": "open", "symbol": "MSFT", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.7},
-            {"position_id": "p3", "status": "open", "symbol": "NVDA", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.6},
-            {"position_id": "p4", "status": "open", "symbol": "JPM", "strategy": "bull_put_spread", "quantity": 1, "entry_credit": 1.0, "current_value": 1.1},
+            {
+                "position_id": "p1",
+                "status": "open",
+                "symbol": "AAPL",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.8,
+            },
+            {
+                "position_id": "p2",
+                "status": "open",
+                "symbol": "MSFT",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.7,
+            },
+            {
+                "position_id": "p3",
+                "status": "open",
+                "symbol": "NVDA",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.6,
+            },
+            {
+                "position_id": "p4",
+                "status": "open",
+                "symbol": "JPM",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.1,
+            },
         ]
         bot.alerts = mock.Mock()
 
@@ -145,8 +211,14 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         bot._update_correlation_state()
 
         self.assertEqual(bot.circuit_state.get("correlation_regime"), "crisis")
-        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_size_scalar")), 0.5, places=4)
-        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_stop_widen_scalar")), 1.25, places=4)
+        self.assertAlmostEqual(
+            float(bot.circuit_state.get("correlation_size_scalar")), 0.5, places=4
+        )
+        self.assertAlmostEqual(
+            float(bot.circuit_state.get("correlation_stop_widen_scalar")),
+            1.25,
+            places=4,
+        )
         self.assertFalse(bot._entries_allowed())
 
     def test_correlation_stressed_reduces_entry_size_without_halt(self) -> None:
@@ -164,8 +236,12 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         bot._update_correlation_state()
 
         self.assertEqual(bot.circuit_state.get("correlation_regime"), "stressed")
-        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_size_scalar")), 0.75, places=4)
-        self.assertAlmostEqual(float(bot.circuit_state.get("correlation_stop_widen_scalar")), 1.0, places=4)
+        self.assertAlmostEqual(
+            float(bot.circuit_state.get("correlation_size_scalar")), 0.75, places=4
+        )
+        self.assertAlmostEqual(
+            float(bot.circuit_state.get("correlation_stop_widen_scalar")), 1.0, places=4
+        )
         self.assertTrue(bot._entries_allowed())
 
 

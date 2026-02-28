@@ -30,7 +30,9 @@ def _sample_trade(idx: int, *, win: bool) -> dict:
             "econ_calendar_proximity_days": 5 + (idx % 10),
             "vix_level": 16.0 + (idx % 8),
             "put_call_ratio": 0.95 + ((idx % 5) * 0.05),
-            "vol_surface": {"term_structure_regime": "backwardation" if win else "contango"},
+            "vol_surface": {
+                "term_structure_regime": "backwardation" if win else "contango"
+            },
             "options_flow": {"directional_bias": "bullish" if win else "bearish"},
         },
     }
@@ -45,10 +47,14 @@ class MLScorerTests(unittest.TestCase):
                     "min_training_trades": 30,
                     "closed_trades_file": str(Path(tmp_dir) / "closed_trades.json"),
                     "model_file": str(Path(tmp_dir) / "ml_model.json"),
-                    "feature_importance_file": str(Path(tmp_dir) / "ml_feature_importance.json"),
+                    "feature_importance_file": str(
+                        Path(tmp_dir) / "ml_feature_importance.json"
+                    ),
                 }
             )
-            self.assertEqual(scorer.predict_score({"strategy_type": "bull_put_spread"}), 0.5)
+            self.assertEqual(
+                scorer.predict_score({"strategy_type": "bull_put_spread"}), 0.5
+            )
 
     def test_train_and_predict_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -58,7 +64,9 @@ class MLScorerTests(unittest.TestCase):
                     "min_training_trades": 30,
                     "closed_trades_file": str(Path(tmp_dir) / "closed_trades.json"),
                     "model_file": str(Path(tmp_dir) / "ml_model.json"),
-                    "feature_importance_file": str(Path(tmp_dir) / "ml_feature_importance.json"),
+                    "feature_importance_file": str(
+                        Path(tmp_dir) / "ml_feature_importance.json"
+                    ),
                 }
             )
             trades = [_sample_trade(idx, win=(idx % 3 != 0)) for idx in range(45)]
@@ -117,10 +125,21 @@ class MLScorerTests(unittest.TestCase):
     def test_extract_trade_features_maps_timestamp_to_buckets(self) -> None:
         scorer = MLSignalScorer({"enabled": True})
         features = scorer.extract_trade_features(_sample_trade(1, win=True))
-        self.assertIn(features.get("day_of_week"), {"monday", "tuesday", "wednesday", "thursday", "friday", "unknown"})
+        self.assertIn(
+            features.get("day_of_week"),
+            {"monday", "tuesday", "wednesday", "thursday", "friday", "unknown"},
+        )
         self.assertIn(
             features.get("time_of_day_bucket"),
-            {"premarket", "open_hour", "morning", "midday", "afternoon", "close_hour", "unknown"},
+            {
+                "premarket",
+                "open_hour",
+                "morning",
+                "midday",
+                "afternoon",
+                "close_hour",
+                "unknown",
+            },
         )
 
 

@@ -2,7 +2,12 @@ import unittest
 
 import numpy as np
 
-from bot.correlation_monitor import CRISIS, NORMAL, STRESSED, CrossAssetCorrelationMonitor
+from bot.correlation_monitor import (
+    CRISIS,
+    NORMAL,
+    STRESSED,
+    CrossAssetCorrelationMonitor,
+)
 
 
 def _rows(values: np.ndarray) -> list[dict]:
@@ -23,7 +28,9 @@ class CorrelationMonitorTests(unittest.TestCase):
         base = _prices_from_returns(100.0, spy_returns)
         qqq = _prices_from_returns(120.0, (spy_returns * 0.6) + (0.002 * np.sin(3 * t)))
         iwm = _prices_from_returns(90.0, (spy_returns * 0.4) + (0.004 * np.sin(4 * t)))
-        vix = _prices_from_returns(20.0, (-spy_returns * 0.9) + (0.0002 * np.cos(5 * t)))
+        vix = _prices_from_returns(
+            20.0, (-spy_returns * 0.9) + (0.0002 * np.cos(5 * t))
+        )
         hyg = _prices_from_returns(80.0, (spy_returns * 0.7) + 0.0005)
         tlt = _prices_from_returns(130.0, (-spy_returns * 0.4) + 0.0002)
         gld = _prices_from_returns(170.0, (0.0003 * np.sin(2 * t)))
@@ -54,9 +61,15 @@ class CorrelationMonitorTests(unittest.TestCase):
         t = np.linspace(0.0, 6.0, 39)
         spy_returns = 0.001 + (0.003 * np.sin(t)) + (0.001 * np.cos(2 * t))
         base = _prices_from_returns(100.0, spy_returns)
-        qqq = _prices_from_returns(120.0, (spy_returns * 1.0) + (0.0001 * np.sin(3 * t)))
-        iwm = _prices_from_returns(95.0, (spy_returns * 0.95) + (0.0001 * np.cos(4 * t)))
-        vix = _prices_from_returns(18.0, (spy_returns * 0.85) + (0.0002 * np.sin(5 * t)))
+        qqq = _prices_from_returns(
+            120.0, (spy_returns * 1.0) + (0.0001 * np.sin(3 * t))
+        )
+        iwm = _prices_from_returns(
+            95.0, (spy_returns * 0.95) + (0.0001 * np.cos(4 * t))
+        )
+        vix = _prices_from_returns(
+            18.0, (spy_returns * 0.85) + (0.0002 * np.sin(5 * t))
+        )
         hyg = _prices_from_returns(85.0, (spy_returns * 0.2))
         tlt = _prices_from_returns(125.0, (-spy_returns * 0.2))
         gld = _prices_from_returns(175.0, 0.0002 * np.cos(2 * t))
@@ -86,9 +99,15 @@ class CorrelationMonitorTests(unittest.TestCase):
         t = np.linspace(0.0, 6.0, 39)
         spy_returns = 0.001 + (0.003 * np.sin(t)) + (0.001 * np.cos(2 * t))
         base = _prices_from_returns(100.0, spy_returns)
-        qqq = _prices_from_returns(120.0, (spy_returns * 0.8) + (0.0004 * np.sin(3 * t)))
-        iwm = _prices_from_returns(95.0, (spy_returns * 0.75) + (0.0004 * np.cos(2 * t)))
-        vix = _prices_from_returns(20.0, (-spy_returns * 0.4) + (0.0003 * np.sin(5 * t)))
+        qqq = _prices_from_returns(
+            120.0, (spy_returns * 0.8) + (0.0004 * np.sin(3 * t))
+        )
+        iwm = _prices_from_returns(
+            95.0, (spy_returns * 0.75) + (0.0004 * np.cos(2 * t))
+        )
+        vix = _prices_from_returns(
+            20.0, (-spy_returns * 0.4) + (0.0003 * np.sin(5 * t))
+        )
         hyg = _prices_from_returns(84.0, spy_returns * 0.6)
         tlt = _prices_from_returns(126.0, -spy_returns * 0.3)
         gld = _prices_from_returns(176.0, 0.0002 * np.sin(2 * t))

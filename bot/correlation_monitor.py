@@ -75,9 +75,17 @@ class CrossAssetCorrelationMonitor:
         }
 
         regime = NORMAL
-        if (spy_vix_corr > 0.20) or flags["systemic_equity_corr"] or abs(hyg_spy) < 0.10:
+        if (
+            (spy_vix_corr > 0.20)
+            or flags["systemic_equity_corr"]
+            or abs(hyg_spy) < 0.10
+        ):
             regime = CRISIS
-        elif flags["equity_corr_spike"] or flags["hyg_spy_decoupled"] or spy_vix_corr > -0.10:
+        elif (
+            flags["equity_corr_spike"]
+            or flags["hyg_spy_decoupled"]
+            or spy_vix_corr > -0.10
+        ):
             regime = STRESSED
 
         state = CorrelationState(
@@ -116,6 +124,6 @@ class CrossAssetCorrelationMonitor:
         closes = [value for value in closes if value > 0]
         if len(closes) < (self.lookback_days + 1):
             return np.array([], dtype=float)
-        arr = np.array(closes[-(self.lookback_days + 1):], dtype=float)
+        arr = np.array(closes[-(self.lookback_days + 1) :], dtype=float)
         rets = np.diff(arr) / arr[:-1]
         return rets[np.isfinite(rets)]

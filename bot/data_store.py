@@ -7,7 +7,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from bot.file_security import atomic_write_private, tighten_file_permissions, validate_sensitive_file
+from bot.file_security import (
+    atomic_write_private,
+    tighten_file_permissions,
+    validate_sensitive_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,9 @@ def load_json(path: Path | str, default: Any) -> Any:
         return default
 
     try:
-        validate_sensitive_file(target, label=f"data file {target}", allow_missing=False)
+        validate_sensitive_file(
+            target, label=f"data file {target}", allow_missing=False
+        )
         tighten_file_permissions(target, label=f"data file {target}")
         with open(target, encoding="utf-8") as handle:
             return json.load(handle)
@@ -52,4 +58,6 @@ def dump_json(path: Path | str, payload: Any, *, indent: int = 2) -> None:
             label=f"data file {target}",
         )
     except PermissionError:
-        logger.warning(f"Permission denied writing to {target}, analytics data not saved.")
+        logger.warning(
+            f"Permission denied writing to {target}, analytics data not saved."
+        )

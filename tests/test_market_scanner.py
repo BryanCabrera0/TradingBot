@@ -1,7 +1,7 @@
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-import tempfile
 from unittest import mock
 
 from bot.config import ScannerConfig
@@ -15,13 +15,17 @@ class MarketScannerTests(unittest.TestCase):
             config=ScannerConfig(include_movers=False),
         )
 
-        with mock.patch.object(scanner, "_fetch_movers", side_effect=AssertionError("should not be called")):
+        with mock.patch.object(
+            scanner, "_fetch_movers", side_effect=AssertionError("should not be called")
+        ):
             universe = scanner._build_universe()
 
         self.assertIn("SPY", universe)
 
     def test_cache_expiration_uses_total_elapsed_time(self) -> None:
-        scanner = MarketScanner(schwab_client=None, config=ScannerConfig(cache_seconds=1800))
+        scanner = MarketScanner(
+            schwab_client=None, config=ScannerConfig(cache_seconds=1800)
+        )
         scanner._last_scan_results = [TickerScore(symbol="OLD", score=75.0)]
         scanner._last_scan_time = datetime.now() - timedelta(days=1, minutes=5)
 
@@ -96,10 +100,15 @@ class MarketScannerTests(unittest.TestCase):
             config=ScannerConfig(request_pause_seconds=0.0),
         )
         scanner._build_universe = mock.Mock(return_value=["SPY"])
-        scanner._score_ticker = mock.Mock(return_value=TickerScore(symbol="SPY", score=80.0))
+        scanner._score_ticker = mock.Mock(
+            return_value=TickerScore(symbol="SPY", score=80.0)
+        )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with mock.patch("bot.market_scanner.SCANNER_HISTORY_PATH", Path(tmp_dir) / "scanner_history.json"):
+            with mock.patch(
+                "bot.market_scanner.SCANNER_HISTORY_PATH",
+                Path(tmp_dir) / "scanner_history.json",
+            ):
                 scanner.scan()
                 self.assertTrue((Path(tmp_dir) / "scanner_history.json").exists())
 

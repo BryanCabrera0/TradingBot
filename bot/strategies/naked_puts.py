@@ -48,7 +48,11 @@ class NakedPutStrategy(BaseStrategy):
         if iv_rank <= 50:
             return []
 
-        allowed_tickers = [str(item).upper() for item in self.config.get("tickers", []) if str(item).strip()]
+        allowed_tickers = [
+            str(item).upper()
+            for item in self.config.get("tickers", [])
+            if str(item).strip()
+        ]
         if allowed_tickers and symbol.upper() not in allowed_tickers:
             return []
 
@@ -69,7 +73,9 @@ class NakedPutStrategy(BaseStrategy):
             if strike <= 0 or credit <= 0:
                 continue
 
-            pop = max(0.0, min(1.0, 1.0 - abs(float(short_put.get("delta", 0.0) or 0.0))))
+            pop = max(
+                0.0, min(1.0, 1.0 - abs(float(short_put.get("delta", 0.0) or 0.0)))
+            )
             max_loss = max(0.0, strike - credit)
             rr = (credit / max_loss) if max_loss > 0 else 0.0
 
@@ -104,7 +110,9 @@ class NakedPutStrategy(BaseStrategy):
                     )
                 )
 
-        signals.sort(key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True)
+        signals.sort(
+            key=lambda item: item.analysis.score if item.analysis else 0.0, reverse=True
+        )
         return signals
 
     def check_exits(self, positions: list, market_client) -> list[TradeSignal]:
@@ -123,7 +131,11 @@ class NakedPutStrategy(BaseStrategy):
             dte_remaining = safe_int(position.get("dte_remaining"), 999)
             quantity = max(1, int(position.get("quantity", 1)))
 
-            pnl_pct = ((entry_credit - current_value) / entry_credit) if entry_credit > 0 else 0.0
+            pnl_pct = (
+                ((entry_credit - current_value) / entry_credit)
+                if entry_credit > 0
+                else 0.0
+            )
             should_close = pnl_pct >= profit_target_pct or dte_remaining <= exit_dte
             if not should_close:
                 continue
@@ -179,7 +191,9 @@ class NakedPutStrategy(BaseStrategy):
         liquidity = min(oi / 500.0, 1.0) * 0.6 + min(volume / 100.0, 1.0) * 0.4
         score += liquidity * 20.0
 
-        spread = float(option.get("ask", 0.0) or 0.0) - float(option.get("bid", 0.0) or 0.0)
+        spread = float(option.get("ask", 0.0) or 0.0) - float(
+            option.get("bid", 0.0) or 0.0
+        )
         tightness = max(0.0, 1.0 - spread / 0.25)
         score += tightness * 10.0
         return round(min(score, 100.0), 1)
