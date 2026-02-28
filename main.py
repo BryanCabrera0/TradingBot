@@ -1117,6 +1117,8 @@ def main() -> None:
                 return
 
     # Create and run the bot
+    from bot.orchestrator import TradingBot
+
     bot = TradingBot(config)
     preflight_message = "Preflight checks passed."
     dashboard_action: dict[str, Optional[str]] = {"selection": None}
