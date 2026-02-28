@@ -13,6 +13,7 @@ logs/
 paper_trades.json
 live_trades.json
 deploy/generated/
+.codex-team/
 bot/data/*
 !bot/data/sector_map.json
 !bot/data/econ_events_2025_2026.json

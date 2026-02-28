@@ -5,8 +5,10 @@ from unittest import mock
 
 import pandas as pd
 
+from bot.analysis import SpreadAnalysis
 from bot.backtester import Backtester, _daily_returns, _sharpe_ratio
 from bot.config import BotConfig
+from bot.strategies.base import TradeSignal
 from bot.strategies.credit_spreads import CreditSpreadStrategy
 
 
@@ -242,6 +244,52 @@ class BacktesterTests(unittest.TestCase):
             self.assertEqual(result.report["closed_trades"], 0)
             self.assertEqual(result.report["open_positions"], 0)
             self.assertEqual(result.report["ending_equity"], 100_000.0)
+
+    def test_open_position_persists_greeks_for_later_portfolio_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = BotConfig()
+            cfg.credit_spreads.enabled = True
+            cfg.iron_condors.enabled = False
+            cfg.covered_calls.enabled = False
+            cfg.naked_puts.enabled = False
+            cfg.calendar_spreads.enabled = False
+            bt = Backtester(cfg, data_dir=tmp_dir, initial_balance=100_000.0)
+
+            analysis = SpreadAnalysis(
+                symbol="SPY",
+                strategy="bull_put_spread",
+                expiration="2026-03-20",
+                dte=30,
+                short_strike=95.0,
+                long_strike=90.0,
+                credit=1.2,
+                max_loss=3.8,
+                probability_of_profit=0.65,
+                score=60.0,
+                net_delta=0.08,
+                net_theta=0.02,
+                net_gamma=-0.01,
+                net_vega=-0.03,
+            )
+            signal = TradeSignal(
+                action="open",
+                strategy="bull_put_spread",
+                symbol="SPY",
+                analysis=analysis,
+                quantity=1,
+            )
+            bt._open_position(signal)
+
+            bt.risk_manager.update_portfolio(
+                account_balance=100_000.0,
+                open_positions=bt.positions,
+                daily_pnl=0.0,
+            )
+
+            self.assertEqual(bt.risk_manager.portfolio.net_delta, 8.0)
+            self.assertEqual(bt.risk_manager.portfolio.net_theta, 2.0)
+            self.assertEqual(bt.risk_manager.portfolio.net_gamma, -1.0)
+            self.assertEqual(bt.risk_manager.portfolio.net_vega, -3.0)
 
     def test_backtester_report_includes_regime_breakdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

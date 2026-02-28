@@ -1,4 +1,5 @@
 import unittest
+import signal as signal_module
 from types import SimpleNamespace
 from unittest import mock
 
@@ -403,6 +404,76 @@ class OrchestratorLLMTests(unittest.TestCase):
         self.assertEqual(second.symbol, "AAA")
         self.assertTrue(bot._last_ranked_signals)
         self.assertEqual(bot._last_ranked_signals[0]["symbol"], "BBB")
+
+    def test_scan_drops_non_trade_signal_candidates(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot.config.watchlist = ["SPY"]
+        bot.risk_manager.can_open_more_positions = mock.Mock(return_value=True)
+        bot._get_chain_data = mock.Mock(
+            return_value=(
+                {"calls": {"2026-03-20": [{}]}, "puts": {"2026-03-20": [{}]}},
+                500.0,
+            )
+        )
+        bot._subscribe_option_stream_for_symbol = mock.Mock()
+        bot.technicals.get_context = mock.Mock(return_value=None)
+        bot._build_market_context = mock.Mock(
+            return_value={
+                "regime": "NORMAL",
+                "regime_weights": {"credit_spreads": 1.0},
+                "position_size_scalar": 1.0,
+            }
+        )
+        bot._try_execute_entry = mock.Mock(return_value=False)
+
+        strategy = SimpleNamespace(
+            name="credit_spreads",
+            scan_for_entries=mock.Mock(
+                return_value=[signal_module, make_signal("SPY")]
+            ),
+        )
+        bot.strategies = [strategy]
+
+        bot._scan_for_entries()
+
+        bot._try_execute_entry.assert_called_once()
+        executed_signal = bot._try_execute_entry.call_args.args[0]
+        self.assertEqual(executed_signal.symbol, "SPY")
+
+    def test_roll_replacement_scan_drops_non_trade_signal_candidates(self) -> None:
+        bot = TradingBot(make_config("advisory"))
+        bot._get_chain_data = mock.Mock(
+            return_value=({"calls": {"2026-03-20": []}, "puts": {"2026-03-20": []}}, 500.0)
+        )
+        bot.technicals.get_context = mock.Mock(return_value=None)
+        bot._build_market_context = mock.Mock(return_value={})
+        bot.roll_manager.annotate_roll_metadata = mock.Mock()
+
+        candidate = make_signal("SPY")
+        candidate.strategy = "bull_put_spread"
+        candidate.analysis.dte = 45
+        candidate.analysis.credit = 1.25
+        candidate.analysis.net_delta = 0.1
+        strategy = SimpleNamespace(
+            name="credit_spreads",
+            scan_for_entries=mock.Mock(return_value=[signal_module, candidate]),
+        )
+        bot.strategies = [strategy]
+        source_position = {
+            "position_id": "old-pos",
+            "dte_remaining": 20,
+            "details": {"net_delta": 0.1, "roll_count": 0},
+        }
+
+        replacement = bot._find_roll_replacement_signal(
+            source_position=source_position,
+            strategy_name="bull_put_spread",
+            symbol="SPY",
+            min_credit_required=1.0,
+        )
+
+        self.assertIs(replacement, candidate)
+        bot.roll_manager.annotate_roll_metadata.assert_called_once()
 
     def test_composite_score_includes_ml_score_and_low_confidence_flag(self) -> None:
         bot = TradingBot(make_config("advisory"))

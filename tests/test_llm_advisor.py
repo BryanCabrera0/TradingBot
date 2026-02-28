@@ -312,6 +312,39 @@ class LLMAdvisorTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("missing", message.lower())
 
+    def test_google_health_check_probe_verifies_primary_and_fallback_models(self) -> None:
+        advisor = LLMAdvisor(
+            LLMConfig(
+                enabled=True,
+                provider="google",
+                model="gemini-3.1-pro-thinking-preview",
+                chat_fallback_model="gemini-3.1-flash-thinking-preview",
+            )
+        )
+        advisor._query_google = mock.Mock(return_value='{"status":"ok"}')
+        with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            ok, message = advisor.health_check(
+                probe_google=True,
+                probe_models=[
+                    "gemini-3.1-pro-thinking-preview",
+                    "gemini-3.1-flash-thinking-preview",
+                ],
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("gemini-3.1-pro-thinking-preview", message)
+        self.assertIn("gemini-3.1-flash-thinking-preview", message)
+        self.assertEqual(advisor._query_google.call_count, 2)
+
+    def test_google_health_check_probe_rejects_non_json(self) -> None:
+        advisor = LLMAdvisor(LLMConfig(enabled=True, provider="google"))
+        advisor._query_google = mock.Mock(return_value="not-json")
+        with mock.patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}, clear=True):
+            ok, message = advisor.health_check(probe_google=True)
+
+        self.assertFalse(ok)
+        self.assertIn("non-json", message.lower())
+
     def test_retry_when_initial_response_is_not_json(self) -> None:
         advisor = LLMAdvisor(LLMConfig(enabled=True, provider="ollama"))
         advisor._query_model = mock.Mock(

@@ -150,6 +150,36 @@ class LiveTradeLedgerTests(unittest.TestCase):
             self.assertEqual(updated["quantity"], 2)
             self.assertTrue(updated["partial_closed"])
 
+    def test_reconcile_exit_order_handles_debit_entry_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger = LiveTradeLedger(state_file=str(Path(tmp_dir) / "live_ledger.json"))
+            position_id = ledger.register_entry_order(
+                strategy="hedge",
+                symbol="SPY",
+                quantity=1,
+                max_loss=2.0,
+                entry_credit=-2.0,  # debit paid to open
+                details={"expiration": "2026-03-20", "short_strike": 500},
+                entry_order_id="",
+                entry_order_status="FILLED",
+                opened_at="2026-02-23T09:45:00-05:00",
+            )
+            ledger.register_exit_order(
+                position_id=position_id,
+                exit_order_id="exit-debit",
+                reason="hedge unwind",
+            )
+
+            ledger.reconcile_exit_order(
+                "exit-debit",
+                status="FILLED",
+                filled_at="2026-02-23T11:30:00-05:00",
+                close_value=3.5,  # credit received to close
+            )
+            closed = ledger.get_position(position_id)
+            self.assertEqual(closed["status"], "closed")
+            self.assertEqual(closed["realized_pnl"], 150.0)
+
 
 if __name__ == "__main__":
     unittest.main()

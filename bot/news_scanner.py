@@ -22,6 +22,11 @@ import requests
 from defusedxml import ElementTree as DET
 
 from bot.config import NewsConfig
+from bot.google_model_aliases import (
+    GOOGLE_GEMINI_PRO_MODEL,
+    candidate_google_models,
+    remember_google_model_success,
+)
 from bot.llm_advisor import _thinking_config
 
 logger = logging.getLogger(__name__)
@@ -347,8 +352,8 @@ class NewsScanner:
         if not _is_configured_secret(api_key):
             return self._fallback_sentiment(headlines)
         model_name = (
-            str(model or self.config.llm_model or "gemini-3.1-pro-thinking-preview").strip()
-            or "gemini-3.1-pro-thinking-preview"
+            str(model or self.config.llm_model or GOOGLE_GEMINI_PRO_MODEL).strip()
+            or GOOGLE_GEMINI_PRO_MODEL
         )
 
         prompt = {
@@ -363,39 +368,57 @@ class NewsScanner:
             },
         }
         try:
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                params={"key": api_key},
-                json={
-                    "contents": [
-                        {
-                            "role": "user",
-                            "parts": [
-                                {"text": json.dumps(prompt, separators=(",", ":"))}
-                            ],
-                        }
-                    ],
-                    "system_instruction": {
+            request_payload = {
+                "contents": [
+                    {
+                        "role": "user",
                         "parts": [
-                            {
-                                "text": "You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
-                            }
-                        ]
-                    },
-                    "generationConfig": {
-                        "temperature": 0.0,
-                        "maxOutputTokens": int(self.config.llm_max_output_tokens),
-                        "responseMimeType": "application/json",
-                        **_thinking_config(self.config.llm_reasoning_effort),
-                    },
+                            {"text": json.dumps(prompt, separators=(",", ":"))}
+                        ],
+                    }
+                ],
+                "system_instruction": {
+                    "parts": [
+                        {
+                            "text": "You are a financial news sentiment classifier. Respond ONLY with valid JSON.",
+                        }
+                    ]
                 },
-                timeout=self.config.request_timeout_seconds,
-            )
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"gemini_error_{response.status_code}: {response.text[:240]}"
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "maxOutputTokens": int(self.config.llm_max_output_tokens),
+                    "responseMimeType": "application/json",
+                    **_thinking_config(self.config.llm_reasoning_effort),
+                },
+            }
+            raw = ""
+            last_error = ""
+            for candidate_model in candidate_google_models(model_name):
+                response = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent",
+                    params={"key": api_key},
+                    json=request_payload,
+                    timeout=self.config.request_timeout_seconds,
                 )
-            raw = _extract_gemini_text(response.json())
+                if response.status_code >= 400:
+                    last_error = (
+                        f"gemini_error_{response.status_code} "
+                        f"model={candidate_model}: {response.text[:200]}"
+                    )
+                    if response.status_code == 404:
+                        logger.warning(
+                            "News sentiment model %s unavailable; trying fallback alias.",
+                            candidate_model,
+                        )
+                        continue
+                    raise RuntimeError(last_error)
+                raw = _extract_gemini_text(response.json())
+                if raw:
+                    remember_google_model_success(model_name, candidate_model)
+                    break
+                last_error = f"gemini_response_missing_text model={candidate_model}"
+            if not raw:
+                raise RuntimeError(last_error or "gemini_response_missing_text")
             parsed = _safe_json_object(raw)
             score = float(parsed.get("score", 0.0) or 0.0)
             confidence = float(parsed.get("confidence", 0.5) or 0.5)

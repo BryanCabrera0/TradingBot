@@ -78,6 +78,32 @@ class RiskManagerTests(unittest.TestCase):
 
         self.assertFalse(manager.can_open_more_positions())
 
+    def test_register_open_position_does_not_mutate_source_position_list(self) -> None:
+        manager = RiskManager(RiskConfig(max_open_positions=5))
+        source_positions = [
+            {
+                "symbol": "SPY",
+                "quantity": 1,
+                "max_loss": 2.0,
+                "details": {"net_delta": 0.10},
+            }
+        ]
+        manager.update_portfolio(
+            account_balance=25_000,
+            open_positions=source_positions,
+            daily_pnl=0.0,
+        )
+
+        manager.register_open_position(
+            symbol="QQQ",
+            max_loss_per_contract=1.5,
+            quantity=1,
+            greeks={"net_delta": 0.05},
+        )
+
+        self.assertEqual(len(source_positions), 1)
+        self.assertEqual(len(manager.portfolio.open_positions), 2)
+
     def test_covered_call_uses_notional_risk_proxy_when_max_loss_missing(self) -> None:
         manager = RiskManager(RiskConfig(covered_call_notional_risk_pct=20.0))
         signal = TradeSignal(
@@ -292,6 +318,74 @@ class RiskManagerTests(unittest.TestCase):
 
         self.assertFalse(approved)
         self.assertIn("Correlation guard", reason)
+
+    def test_quality_thresholds_are_configurable(self) -> None:
+        manager = RiskManager(
+            RiskConfig(min_trade_score=65.0, min_trade_pop=0.70)
+        )
+        manager.earnings_calendar = mock.Mock(
+            earnings_within_window=mock.Mock(return_value=(False, None))
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[],
+            daily_pnl=0.0,
+        )
+
+        approved, reason = manager.approve_trade(self._make_signal())
+
+        self.assertFalse(approved)
+        self.assertIn("minimum threshold 65.0", reason)
+
+    def test_calculate_position_size_respects_max_contracts_per_trade(self) -> None:
+        manager = RiskManager(
+            RiskConfig(max_position_risk_pct=20.0, max_contracts_per_trade=4)
+        )
+        manager.set_strategy_allocation_config({"enabled": False})
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[],
+            daily_pnl=0.0,
+        )
+
+        qty = manager.calculate_position_size(
+            self._make_signal(symbol="SPY", max_loss=1.0)
+        )
+
+        self.assertEqual(qty, 4)
+
+    def test_high_conviction_size_boost_increases_contracts(self) -> None:
+        manager = RiskManager(
+            RiskConfig(max_position_risk_pct=1.0, max_contracts_per_trade=10)
+        )
+        manager.set_strategy_allocation_config({"enabled": False})
+        manager.set_sizing_config(
+            {
+                "method": "fixed",
+                "high_conviction_size_boost_enabled": True,
+                "high_conviction_size_boost_multiplier": 1.5,
+                "high_conviction_size_boost_min_score": 70.0,
+                "high_conviction_size_boost_min_pop": 0.60,
+                "high_conviction_size_boost_min_ml_score": 0.65,
+                "high_conviction_size_boost_min_composite": 80.0,
+                "high_conviction_size_boost_max_extra_contracts": 2,
+            }
+        )
+        manager.update_portfolio(
+            account_balance=100_000,
+            open_positions=[],
+            daily_pnl=0.0,
+        )
+        signal = self._make_signal(symbol="NVDA", max_loss=4.0)
+        signal.analysis.score = 75.0
+        signal.analysis.probability_of_profit = 0.65
+        signal.metadata["ml_score"] = 0.75
+        signal.metadata["composite_score"] = 85.0
+
+        qty = manager.calculate_position_size(signal)
+
+        # Baseline is 2 contracts; boost raises it to 3 contracts.
+        self.assertEqual(qty, 3)
 
     def test_equity_curve_scaling_positive_slope_scales_up(self) -> None:
         manager = RiskManager(RiskConfig())

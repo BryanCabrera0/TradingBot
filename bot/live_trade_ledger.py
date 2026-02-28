@@ -97,6 +97,8 @@ class LiveTradeLedger:
             lifecycle_status = "open"
         else:
             lifecycle_status = "working"
+        signed_entry_credit = safe_float(entry_credit, 0.0)
+        mark_seed = abs(signed_entry_credit)
 
         record = {
             "position_id": position_id,
@@ -104,8 +106,9 @@ class LiveTradeLedger:
             "symbol": symbol,
             "quantity": max(1, safe_int(quantity, 1)),
             "max_loss": max(0.0, safe_float(max_loss, 0.0)),
-            "entry_credit": max(0.0, safe_float(entry_credit, 0.0)),
-            "current_value": max(0.0, safe_float(entry_credit, 0.0)),
+            # Preserve signed entry cashflow (+credit, -debit) for correct close P&L.
+            "entry_credit": signed_entry_credit,
+            "current_value": max(0.0, mark_seed),
             "details": details or {},
             "expiration": str((details or {}).get("expiration", "")),
             "status": lifecycle_status,
@@ -327,7 +330,8 @@ class LiveTradeLedger:
                 position["open_date"] = filled_at or datetime.now().isoformat()
                 if entry_credit is not None:
                     position["entry_credit"] = round(
-                        max(0.0, safe_float(entry_credit, 0.0)), 2
+                        safe_float(entry_credit, 0.0),
+                        2,
                     )
                 if filled_quantity is not None:
                     position["quantity"] = max(1, safe_int(filled_quantity, 1))
@@ -379,7 +383,13 @@ class LiveTradeLedger:
                     close_value, safe_float(position.get("current_value", 0.0), 0.0)
                 )
                 position["close_value"] = round(max(0.0, debit), 2)
-                realized = (entry_credit - debit) * close_quantity * 100
+                # Entry credit is signed: credits are positive, debits are negative.
+                # Closing cashflow is passed as an absolute per-contract fill price.
+                # For debit entries (negative entry_credit), close is a SELL credit.
+                if entry_credit >= 0:
+                    realized = (entry_credit - debit) * close_quantity * 100.0
+                else:
+                    realized = (entry_credit + debit) * close_quantity * 100.0
                 position["realized_pnl"] = round(
                     safe_float(position.get("realized_pnl", 0.0), 0.0) + realized,
                     2,
@@ -436,7 +446,8 @@ class LiveTradeLedger:
                     )
             if entry_credit is not None:
                 position["entry_credit"] = round(
-                    max(0.0, safe_float(entry_credit, 0.0)), 2
+                    safe_float(entry_credit, 0.0),
+                    2,
                 )
             position["last_reconciled"] = datetime.now().isoformat()
             changed = True

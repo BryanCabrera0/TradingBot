@@ -91,6 +91,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm_strategist.provider, "google")
         self.assertEqual(cfg.llm_strategist.model, "gemini-3.1-pro-thinking-preview")
 
+    def test_load_config_enforces_google_gemini_model_pair(self) -> None:
+        config_path = self._write_config(
+            """
+            llm:
+              provider: google
+              model: gemini-3.1-flash-thinking-preview
+              chat_fallback_model: gpt-4.1
+            llm_strategist:
+              provider: google
+              model: gemini-3.1-flash-thinking-preview
+            """
+        )
+
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.llm.model, "gemini-3.1-pro-thinking-preview")
+        self.assertEqual(
+            cfg.llm.chat_fallback_model, "gemini-3.1-flash-thinking-preview"
+        )
+        self.assertEqual(cfg.llm_strategist.model, "gemini-3.1-pro-thinking-preview")
+
     def test_env_overrides_clamp_llm_numeric_settings(self) -> None:
         config_path = self._write_config("llm:\n  enabled: true\n")
 
@@ -535,6 +560,33 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.sizing.max_scale_up, 1.0)
         self.assertEqual(cfg.sizing.max_scale_down, 1.0)
 
+    def test_sizing_high_conviction_boost_fields_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            sizing:
+              high_conviction_size_boost_enabled: true
+              high_conviction_size_boost_multiplier: 0.2
+              high_conviction_size_boost_min_score: -10
+              high_conviction_size_boost_min_pop: 2.0
+              high_conviction_size_boost_min_ml_score: -3.0
+              high_conviction_size_boost_min_composite: -1
+              high_conviction_size_boost_max_extra_contracts: -2
+            """
+        )
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            cfg = load_config(config_path)
+
+        self.assertTrue(cfg.sizing.high_conviction_size_boost_enabled)
+        self.assertEqual(cfg.sizing.high_conviction_size_boost_multiplier, 1.0)
+        self.assertEqual(cfg.sizing.high_conviction_size_boost_min_score, 0.0)
+        self.assertEqual(cfg.sizing.high_conviction_size_boost_min_pop, 1.0)
+        self.assertEqual(cfg.sizing.high_conviction_size_boost_min_ml_score, 0.0)
+        self.assertEqual(cfg.sizing.high_conviction_size_boost_min_composite, 0.0)
+        self.assertEqual(cfg.sizing.high_conviction_size_boost_max_extra_contracts, 0)
+
     def test_walkforward_fields_normalize(self) -> None:
         config_path = self._write_config(
             """
@@ -704,6 +756,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.risk.correlated_loss_cooldown_hours, 1)
         self.assertEqual(cfg.risk.gamma_week_tight_stop, 1.0)
         self.assertEqual(cfg.risk.expiration_day_close_pct, 0.25)
+
+    def test_risk_quality_and_contract_caps_normalize(self) -> None:
+        config_path = self._write_config(
+            """
+            risk:
+              min_trade_score: -15
+              min_trade_pop: 2.0
+              max_contracts_per_trade: 0
+            """
+        )
+        with (
+            mock.patch("bot.config.load_dotenv", return_value=False),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            cfg = load_config(config_path)
+
+        self.assertEqual(cfg.risk.min_trade_score, 0.0)
+        self.assertEqual(cfg.risk.min_trade_pop, 1.0)
+        self.assertEqual(cfg.risk.max_contracts_per_trade, 1)
 
     def test_placeholder_live_secrets_are_treated_as_missing(self) -> None:
         config_path = self._write_config(

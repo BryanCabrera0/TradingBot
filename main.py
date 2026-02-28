@@ -17,10 +17,10 @@ automatically trades options strategies including:
 Usage:
     # With no command, an interactive menu appears to pick a run mode
     python3 main.py
-    python3 main.py run simulator
+    python3 main.py run paper
 
-    # Run the offline training simulator
-    python3 main.py run simulator --iterations 100
+    # Run one paper scan cycle and exit
+    python3 main.py run paper once
 
     # Run continuous live mode (non-interactive confirmation bypass shown)
     python3 main.py run live --yes
@@ -29,7 +29,7 @@ Usage:
     python3 main.py run live once --yes
 
     # Integrated diagnostics (auth + SPY chain + entry-gate snapshot)
-    python3 main.py run simulator once --diagnose
+    python3 main.py run paper once --diagnose
 """
 
 import argparse
@@ -46,6 +46,10 @@ from typing import TYPE_CHECKING, Optional
 
 from bot.config import format_validation_report, load_config, validate_config
 from bot.file_security import validate_sensitive_file
+from bot.google_model_aliases import (
+    GOOGLE_GEMINI_FLASH_MODEL,
+    GOOGLE_GEMINI_PRO_MODEL,
+)
 from bot.number_utils import safe_float
 
 if TYPE_CHECKING:
@@ -266,6 +270,44 @@ def _has_price(contract: dict) -> bool:
     )
 
 
+def _run_google_llm_diagnostics(config) -> tuple[bool, str]:
+    """Verify the configured Google LLM pair and run live API probes."""
+    llm_cfg = getattr(config, "llm", None)
+    if llm_cfg is None or not bool(getattr(llm_cfg, "enabled", False)):
+        return True, "skipped (llm disabled)"
+
+    provider = str(getattr(llm_cfg, "provider", "") or "").strip().lower()
+    if provider == "gemini":
+        provider = "google"
+    if provider != "google":
+        return True, f"skipped (provider={provider or 'unset'})"
+
+    primary_model = str(getattr(llm_cfg, "model", "") or "").strip().lower()
+    fallback_model = str(
+        getattr(llm_cfg, "chat_fallback_model", "") or ""
+    ).strip().lower()
+    if primary_model != GOOGLE_GEMINI_PRO_MODEL:
+        return (
+            False,
+            f"unexpected primary model {primary_model!r}; expected "
+            f"{GOOGLE_GEMINI_PRO_MODEL!r}",
+        )
+    if fallback_model != GOOGLE_GEMINI_FLASH_MODEL:
+        return (
+            False,
+            f"unexpected fallback model {fallback_model!r}; expected "
+            f"{GOOGLE_GEMINI_FLASH_MODEL!r}",
+        )
+
+    from bot.llm_advisor import LLMAdvisor
+
+    advisor = LLMAdvisor(llm_cfg)
+    return advisor.health_check(
+        probe_google=True,
+        probe_models=[GOOGLE_GEMINI_PRO_MODEL, GOOGLE_GEMINI_FLASH_MODEL],
+    )
+
+
 def run_integrated_diagnostics(
     config, mode_hint: str = "paper", symbol: str = "SPY"
 ) -> int:
@@ -310,6 +352,18 @@ def run_integrated_diagnostics(
         return 1
 
     try:
+        quote = client.get_quote(symbol)
+        quote_ref = quote.get("quote", quote) if isinstance(quote, dict) else {}
+        quote_px = safe_float(quote_ref.get("lastPrice", quote_ref.get("mark", 0.0)))
+        if quote_px <= 0:
+            raise RuntimeError("non-positive quote")
+        print(f"  quote       {symbol} ${quote_px:.2f}")
+    except Exception as exc:
+        print(f"  quote       failed  {exc}")
+        _cleanup_streaming()
+        return 1
+
+    try:
         raw = client.get_option_chain(symbol)
         parsed = SchwabClient.parse_option_chain(raw)
         calls = _flatten_chain_side(parsed.get("calls", {}))
@@ -325,6 +379,13 @@ def run_integrated_diagnostics(
         )
     except Exception as exc:
         print(f"  chain       failed  {exc}")
+        _cleanup_streaming()
+        return 1
+
+    llm_ok, llm_message = _run_google_llm_diagnostics(config)
+    llm_status = "ok" if llm_ok else "failed"
+    print(f"  google_llm  {llm_status}  {llm_message}")
+    if not llm_ok:
         _cleanup_streaming()
         return 1
 
@@ -452,13 +513,13 @@ def run_integrated_diagnostics(
 
 
 RUN_MENU_OPTIONS: dict[str, tuple[str, bool]] = {
-    "1": ("simulator", False),
+    "1": ("paper", False),
     "2": ("live", False),
 }
 
 RUN_MENU_ALIASES: dict[str, tuple[str, bool]] = {
-    "run simulator": ("simulator", False),
-    "run simulator once": ("simulator", True),
+    "run paper": ("paper", False),
+    "run paper once": ("paper", True),
     "run live": ("live", False),
     "run live once": ("live", True),
     "auth": ("auth", False),
@@ -467,7 +528,7 @@ RUN_MENU_ALIASES: dict[str, tuple[str, bool]] = {
     "token": ("auth", False),
     "auth paper": ("auth_paper", False),
     "auth live": ("auth_live", False),
-    "simulator": ("simulator", False),
+    "paper": ("paper", False),
     "live": ("live", False),
 }
 
@@ -507,28 +568,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
     run_parser = subparsers.add_parser("run", help="Run trading bot")
-    run_parser.set_defaults(mode="simulator", once_token=None)
+    run_parser.set_defaults(mode="paper", once_token=None)
     run_subparsers = run_parser.add_subparsers(dest="mode")
-
-    run_simulator = run_subparsers.add_parser("simulator", help="Run offline training simulator")
-    run_simulator.add_argument(
-        "--iterations",
-        type=int,
-        default=50,
-        help="Number of simulated training iterations (default 50)",
-    )
-    run_simulator.add_argument(
-        "once_token",
-        nargs="?",
-        choices=["once"],
-        help="Run one scan cycle and exit",
-    )
-    run_simulator.add_argument(
-        "--diagnose",
-        action="store_true",
-        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
-    )
-    run_simulator.set_defaults(mode="simulator")
 
     run_live = run_subparsers.add_parser("live", help="Run in live mode")
     run_live.add_argument(
@@ -544,6 +585,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_live.set_defaults(mode="live")
 
+    run_paper = run_subparsers.add_parser("paper", help="Run in paper mode")
+    run_paper.add_argument(
+        "once_token",
+        nargs="?",
+        choices=["once"],
+        help="Run one scan cycle and exit",
+    )
+    run_paper.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Run integrated diagnostics (auth/chain/gate checks) and exit",
+    )
+    run_paper.set_defaults(mode="paper")
+
     subparsers.add_parser("auth", help="Re-authorize Schwab OAuth token")
     return parser
 
@@ -555,7 +610,7 @@ def _resolve_menu_selection() -> tuple[str, bool]:
         mode, once = prompt_run_menu()
     if mode == "auth_paper":
         _run_inline_auth()
-        return "simulator", once
+        return "paper", once
     if mode == "auth_live":
         _run_inline_auth()
         return "live", once
@@ -569,23 +624,19 @@ def _parse_args() -> tuple[argparse.Namespace, bool]:
         args.command = "run"
         if sys.stdin.isatty():
             mode, once = _resolve_menu_selection()
-            if mode == "bootstrap":
-                args.mode = "simulator"
-                args.iterations = 100
-                args.once_token = None
-            else:
-                args.mode = mode
-                args.once_token = "once" if once else None
+            args.mode = mode
+            args.once_token = "once" if once else None
         else:
             # Avoid hanging in non-interactive contexts (scripts/services).
-            args.mode = "simulator"
+            args.mode = "paper"
             args.once_token = None
+    elif args.command == "run" and not getattr(args, "mode", None):
+        args.mode = "paper"
+        args.once_token = None
 
-    args.live = str(getattr(args, "mode", "simulator") or "simulator") == "live"
+    args.live = str(getattr(args, "mode", "paper") or "paper") == "live"
     args.once = str(getattr(args, "once_token", "") or "") == "once"
     args.diagnose = bool(getattr(args, "diagnose", False))
-    args.iterations = getattr(args, "iterations", 50)
-    args.iterations = int(args.iterations) if args.iterations else 50
     return args, interactive_menu_requested
 
 def _count_enabled_strategies(config) -> int:
@@ -603,7 +654,7 @@ def _count_enabled_strategies(config) -> int:
 
 
 def _print_runtime_summary(config) -> None:
-    mode_str = "LIVE" if config.trading_mode == "live" else ("SIMULATOR" if config.trading_mode == "simulator" else "PAPER")
+    mode_str = "LIVE" if config.trading_mode == "live" else "PAPER"
     print(f"  Mode:       {mode_str}")
     print(f"  Strategies: {_count_enabled_strategies(config)} enabled")
     if not config.watchlist:
@@ -617,40 +668,15 @@ def _print_runtime_summary(config) -> None:
     print()
 
 
-def _is_bootstrap_complete() -> bool:
-    try:
-        path = Path("bot/data/learned_rules.json")
-        if not path.exists():
-            return False
-        import json
-        with path.open("r") as f:
-            data = json.load(f)
-        return "meta" in data or "rules" in data
-    except Exception as exc:
-        logger.debug("Bootstrap completion check failed: %s", exc)
-        return False
-
 def prompt_run_menu() -> tuple[str, bool]:
     """Prompt for run mode."""
     print("\n  Mode Selection")
     print("  " + "─" * 14)
-    
-    bootstrap_done = _is_bootstrap_complete()
-    options = {}
-    
-    if not bootstrap_done:
-        print("  1) One-time Bootstrap (~10-15m)")
-        print("  2) Simulator (Offline / Synthetic Data)")
-        print("  3) Paper Trading (Live Market Data)")
-        print("  4) Live Trading (Real Money)\n")
-        options = {"1": ("bootstrap", False), "2": ("simulator", False), "3": ("paper", False), "4": ("live", False)}
-        valid_range = "[1-4]"
-    else:
-        print("  1) Simulator (Offline / Synthetic Data)")
-        print("  2) Paper Trading (Live Market Data)")
-        print("  3) Live Trading (Real Money)\n")
-        options = {"1": ("simulator", False), "2": ("paper", False), "3": ("live", False)}
-        valid_range = "[1-3]"
+
+    print("  1) Paper Trading (Live Market Data)")
+    print("  2) Live Trading (Real Money)\n")
+    options = RUN_MENU_OPTIONS
+    valid_range = "[1-2]"
 
     while True:
         try:
@@ -748,66 +774,15 @@ def start_dashboard_command_listener(
 
 def main() -> None:
     args, interactive_menu_requested = _parse_args()
-    args.report = False
-    # Keep advanced execution paths disabled in the simplified 4-command CLI.
-    args.dashboard = False
-    args.backtest = False
-    args.fetch_data = False
-    args.update_econ_calendar = False
-    args.audit_trail = ""
-    args.start = ""
-    args.end = ""
-    args.synthetic = False
-    args.preflight_only = False
-    args.setup_live = False
-    args.prepare_live = False
-    args.live_readiness_only = False
 
     # Handle `python3 main.py auth` subcommand
     if args.command == "auth":
         _run_inline_auth()
         return
 
-    if args.report:
-        show_report()
-        return
-
-    if args.prepare_live:
-        from bot.live_setup import run_live_setup
-        try:
-            run_live_setup(
-                config_path=args.config,
-                auto_auth=False,
-                auto_select_account=False,
-                prepare_only=True,
-                render_service_files=True,
-            )
-        except Exception as exc:
-            print(f"Live preparation failed: {exc}")
-            sys.exit(1)
-        return
-
-    if args.live_readiness_only:
-        args.live = True
-
-    if args.setup_live:
-        from bot.live_setup import run_live_setup
-        try:
-            run_live_setup(
-                config_path=args.config,
-                auto_auth=True,
-                auto_select_account=True,
-                prepare_only=False,
-                render_service_files=True,
-            )
-        except Exception as exc:
-            print(f"Live setup failed: {exc}")
-            sys.exit(1)
-        return
-
     # Load config
     config = load_config(args.config)
-    
+
     # Apply CLI mode
     if hasattr(args, "mode"):
         config.trading_mode = args.mode
@@ -822,18 +797,9 @@ def main() -> None:
         )
         sys.exit(2)
 
-    # Apply token checks across all run-mode entry points (menu + CLI).
-    needs_token = (
-        args.command == "run"
-        and config.trading_mode != "simulator"
-        and not args.dashboard
-        and not args.backtest
-        and not args.fetch_data
-        and not args.update_econ_calendar
-        and not args.audit_trail
-        and not args.report
-    )
-    if needs_token and not _ensure_token_ready(config, interactive=sys.stdin.isatty()):
+    if args.command == "run" and not _ensure_token_ready(
+        config, interactive=sys.stdin.isatty()
+    ):
         sys.exit(1)
 
     if args.diagnose:
@@ -846,176 +812,6 @@ def main() -> None:
         )
         if code != 0:
             sys.exit(code)
-        return
-
-    if args.fetch_data:
-        if not args.start or not args.end:
-            print("--fetch-data requires --start and --end in YYYY-MM-DD format.")
-            sys.exit(2)
-        from bot.data_fetcher import HistoricalDataFetcher
-        from bot.schwab_client import SchwabClient
-        try:
-            schwab = SchwabClient(config.schwab)
-            schwab.connect()
-            symbols = list(
-                dict.fromkeys(
-                    config.watchlist + list(config.covered_calls.tickers or [])
-                )
-            )
-            fetcher = HistoricalDataFetcher(schwab)
-            results = fetcher.fetch_range(
-                start=args.start, end=args.end, symbols=symbols
-            )
-            created = sum(1 for row in results if not row.skipped)
-            skipped = sum(1 for row in results if row.skipped)
-            print(f"Fetch complete: {created} snapshots created, {skipped} skipped.")
-        except Exception as exc:
-            print(f"Data fetch failed: {exc}")
-            sys.exit(1)
-        return
-
-    if args.update_econ_calendar:
-        from bot.econ_calendar import refresh_static_calendar_file
-        try:
-            output = refresh_static_calendar_file()
-            print(f"Economic calendar updated: {output}")
-        except Exception as exc:
-            print(f"Economic calendar update failed: {exc}")
-            sys.exit(1)
-        return
-
-    if args.audit_trail:
-        symbol = str(args.audit_trail).upper().strip()
-        path = Path("bot/data/audit_log.jsonl")
-        if not path.exists():
-            print("No audit trail file found.")
-            return
-        matched = 0
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                row = json.loads(raw)
-            except Exception:
-                continue
-            details = row.get("details", {}) if isinstance(row, dict) else {}
-            row_symbol = str(details.get("symbol", "")).upper()
-            if row_symbol != symbol:
-                continue
-            matched += 1
-            print(json.dumps(row, indent=2, default=str))
-        if matched == 0:
-            print(f"No audit events found for {symbol}.")
-        return
-
-    if args.backtest:
-        if not args.start or not args.end:
-            print("--backtest requires --start and --end in YYYY-MM-DD format.")
-            sys.exit(2)
-        from bot.backtester import Backtester
-        use_synthetic = getattr(args, "synthetic", False)
-        try:
-            backtester = Backtester(config, use_synthetic=use_synthetic)
-            result = backtester.run(start=args.start, end=args.end)
-            print(f"Backtest complete. Report: {result.report_path}")
-        except Exception as exc:
-            print(f"Backtest failed: {exc}")
-            sys.exit(1)
-        return
-
-    if args.dashboard:
-        from bot.dashboard import generate_dashboard
-        from bot.live_trade_ledger import LiveTradeLedger
-        from bot.paper_trader import PaperTrader
-        from bot.schwab_client import SchwabClient
-        try:
-            if config.trading_mode in {"paper", "simulator"}:
-                paper = PaperTrader()
-                closed = list(paper.closed_trades)
-                open_positions = paper.get_positions()
-                balance = paper.get_account_balance()
-            else:
-                ledger = LiveTradeLedger()
-                closed = ledger.list_positions(statuses={"closed", "closed_external"})
-                open_positions = ledger.list_positions(
-                    statuses={"open", "opening", "closing"}
-                )
-                try:
-                    schwab = SchwabClient(config.schwab)
-                    schwab.connect()
-                    balance = schwab.get_account_balance()
-                except Exception as exc:
-                    logger.warning(
-                        "Dashboard balance fetch failed; using $0.0 fallback: %s",
-                        exc,
-                    )
-                    balance = 0.0
-
-            monthly: dict[str, float] = {}
-            by_strategy: dict[str, dict] = {}
-            winners: list[dict] = []
-            losers: list[dict] = []
-            for trade in closed:
-                pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
-                close_date = str(trade.get("close_date", ""))
-                month = close_date[:7] if len(close_date) >= 7 else "unknown"
-                monthly[month] = monthly.get(month, 0.0) + pnl
-                strategy = str(trade.get("strategy", "unknown"))
-                stats = by_strategy.setdefault(
-                    strategy, {"wins": 0, "count": 0, "total_pnl": 0.0}
-                )
-                stats["count"] += 1
-                if pnl > 0:
-                    stats["wins"] += 1
-                stats["total_pnl"] += pnl
-                row = {"symbol": trade.get("symbol", ""), "pnl": pnl}
-                (winners if pnl >= 0 else losers).append(row)
-
-            strategy_breakdown = {}
-            for name, stats in by_strategy.items():
-                count = max(1, stats["count"])
-                strategy_breakdown[name] = {
-                    "win_rate": (stats["wins"] / count) * 100.0,
-                    "avg_pnl": stats["total_pnl"] / count,
-                    "total_pnl": stats["total_pnl"],
-                }
-
-            payload = {
-                "equity_curve": [],
-                "monthly_pnl": monthly,
-                "strategy_breakdown": strategy_breakdown,
-                "top_winners": sorted(winners, key=lambda x: x["pnl"], reverse=True)[
-                    :5
-                ],
-                "top_losers": sorted(losers, key=lambda x: x["pnl"])[:5],
-                "risk_metrics": {
-                    "sharpe": 0.0,
-                    "sortino": 0.0,
-                    "max_drawdown": 0.0,
-                    "current_drawdown": 0.0,
-                },
-                "portfolio_greeks": {
-                    "delta": 0.0,
-                    "theta": 0.0,
-                    "gamma": 0.0,
-                    "vega": 0.0,
-                },
-                "sector_exposure": {},
-                "circuit_breakers": {
-                    "regime": "n/a",
-                    "halt_entries": False,
-                    "consecutive_loss_pause_until": "-",
-                    "weekly_loss_pause_until": "-",
-                },
-                "balance": balance,
-                "open_positions": len(open_positions),
-            }
-            output = generate_dashboard(payload)
-            print(f"Dashboard generated: {output}")
-        except Exception as exc:
-            print(f"Dashboard generation failed: {exc}")
-            sys.exit(1)
         return
 
     if args.live:
@@ -1043,10 +839,7 @@ def main() -> None:
 
     if config.trading_mode == "live":
         print("  Live trading  ·  real money at risk\n")
-        needs_confirmation = (
-            not args.preflight_only and not args.yes and not args.live_readiness_only
-        )
-        if needs_confirmation:
+        if not args.yes:
             if not sys.stdin.isatty():
                 print("  Confirmation required. Re-run with --yes to proceed.")
                 sys.exit(2)
@@ -1055,40 +848,12 @@ def main() -> None:
                 print("  Aborted.")
                 return
 
-    # Create and run the simulator or bot
-    if config.trading_mode == "simulator":
-        from bot.simulator import TrainingSimulator
-        sim = TrainingSimulator(config)
-        sim.train(iterations=args.iterations)
-        if interactive_menu_requested and sys.stdin.isatty():
-            if prompt_after_run_menu():
-                main()
-        return
-
     from bot.orchestrator import TradingBot
 
     bot = TradingBot(config)
-    preflight_message = "Preflight checks passed."
     dashboard_action: dict[str, Optional[str]] = {"selection": None}
     dashboard_listener_stop: Optional[threading.Event] = None
     dashboard_listener: Optional[threading.Thread] = None
-
-    if args.live_readiness_only:
-        app_logger.info(
-            "Running live configuration readiness checks (no broker connectivity)..."
-        )
-        try:
-            bot.validate_live_configuration(require_token_file=False)
-        except Exception as e:
-            app_logger.error("Live configuration readiness failed: %s", e)
-            bot._alert(
-                level="ERROR",
-                title="Live configuration readiness failed",
-                message=str(e),
-            )
-            sys.exit(1)
-        print("Live configuration readiness checks passed.")
-        return
 
     if config.trading_mode == "live":
         app_logger.info("Running live preflight checks...")
@@ -1102,45 +867,9 @@ def main() -> None:
                 message=str(e),
             )
             sys.exit(1)
-    elif args.preflight_only:
-        app_logger.info("Running paper-mode preflight...")
-        try:
-            bot.connect()
-        except Exception as e:
-            # Allow local/offline paper preflight when Schwab auth has not been set up yet.
-            if "Token file not found" in str(e):
-                app_logger.warning(
-                    "Paper preflight market-data check skipped: %s",
-                    e,
-                )
-                preflight_message = (
-                    "Preflight checks passed (offline paper mode; "
-                    "Schwab market data not connected)."
-                )
-            else:
-                app_logger.error("Paper preflight failed: %s", e)
-                bot._alert(
-                    level="ERROR",
-                    title="Paper preflight failed",
-                    message=str(e),
-                )
-                sys.exit(1)
-        try:
-            bot.validate_llm_readiness()
-        except Exception as e:
-            app_logger.error("Paper preflight failed: %s", e)
-            bot._alert(
-                level="ERROR",
-                title="Paper preflight failed",
-                message=str(e),
-            )
-            sys.exit(1)
-
-    if args.preflight_only:
-        print(preflight_message)
-        return
 
     once_clean_shutdown = False
+    had_error = False
     try:
         if args.once:
             app_logger.info("Running single scan cycle...")
@@ -1148,7 +877,7 @@ def main() -> None:
             bot.connect()
             bot.validate_llm_readiness()
             bot.scan_and_trade()
-            if config.trading_mode in {"paper", "simulator"}:
+            if config.trading_mode == "paper":
                 show_report()
             once_clean_shutdown = True
         else:
@@ -1159,6 +888,19 @@ def main() -> None:
             bot.run()
     except KeyboardInterrupt:
         print("\n  Interrupted.")
+    except Exception as exc:
+        had_error = True
+        app_logger.exception("Trading session failed: %s", exc)
+        try:
+            bot._alert(
+                level="ERROR",
+                title="Trading session failed",
+                message=str(exc),
+            )
+        except Exception:
+            pass
+        if args.once:
+            sys.exit(1)
     finally:
         if args.once:
             try:
@@ -1176,6 +918,9 @@ def main() -> None:
             dashboard_listener_stop.set()
         if dashboard_listener and dashboard_listener.is_alive():
             dashboard_listener.join(timeout=0.2)
+
+    if had_error:
+        sys.exit(1)
 
     if interactive_menu_requested and sys.stdin.isatty():
         if dashboard_action.get("selection") == "menu":

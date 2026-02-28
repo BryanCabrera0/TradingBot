@@ -17,6 +17,11 @@ from dataclasses import dataclass
 import requests
 
 from bot.config import LLMStrategistConfig
+from bot.google_model_aliases import (
+    GOOGLE_GEMINI_PRO_MODEL,
+    candidate_google_models,
+    remember_google_model_success,
+)
 from bot.llm_advisor import _thinking_config
 from bot.openai_compat import request_openai_json
 
@@ -170,7 +175,8 @@ class LLMStrategist:
             if not _is_configured_secret(api_key):
                 raise RuntimeError("GOOGLE_API_KEY missing for llm_strategist")
             model_name = (
-                str(self.config.model or "gemini-3.1-pro-thinking-preview").strip() or "gemini-3.1-pro-thinking-preview"
+                str(self.config.model or GOOGLE_GEMINI_PRO_MODEL).strip()
+                or GOOGLE_GEMINI_PRO_MODEL
             )
             payload = {
                 "contents": [
@@ -193,47 +199,61 @@ class LLMStrategist:
                     **_thinking_config("high"),
                 },
             }
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                params={"key": api_key},
-                json=payload,
-                timeout=self.config.timeout_seconds,
-            )
-            if response.status_code >= 400:
-                detail = ""
-                try:
-                    detail = str(
-                        (response.json().get("error") or {}).get("message", "")
-                    ).strip()
-                except Exception:
-                    detail = ""
-                if not detail:
-                    detail = response.text.strip()[:280]
-                raise RuntimeError(
-                    f"Google Gemini request failed ({response.status_code}): "
-                    f"{detail or 'unknown error'}"
+            last_error = ""
+            for candidate_model in candidate_google_models(model_name):
+                response = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{candidate_model}:generateContent",
+                    params={"key": api_key},
+                    json=payload,
+                    timeout=self.config.timeout_seconds,
                 )
-            data = response.json()
-            candidates = data.get("candidates", []) if isinstance(data, dict) else []
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                content = candidate.get("content", {})
-                if not isinstance(content, dict):
-                    continue
-                parts = content.get("parts", [])
-                if not isinstance(parts, list):
-                    continue
-                texts = []
-                for part in parts:
-                    if not isinstance(part, dict):
+                if response.status_code >= 400:
+                    detail = ""
+                    try:
+                        detail = str(
+                            (response.json().get("error") or {}).get("message", "")
+                        ).strip()
+                    except Exception:
+                        detail = ""
+                    if not detail:
+                        detail = response.text.strip()[:280]
+                    last_error = (
+                        f"Google Gemini request failed for {candidate_model} "
+                        f"({response.status_code}): {detail or 'unknown error'}"
+                    )
+                    if response.status_code == 404:
+                        logger.warning(
+                            "LLM strategist model %s unavailable; trying fallback alias.",
+                            candidate_model,
+                        )
                         continue
-                    text = str(part.get("text", "")).strip()
-                    if text:
-                        texts.append(text)
-                if texts:
-                    return "\n".join(texts).strip()
-            raise RuntimeError("Google Gemini response missing text content")
+                    raise RuntimeError(last_error)
+
+                data = response.json()
+                candidates = data.get("candidates", []) if isinstance(data, dict) else []
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    content = candidate.get("content", {})
+                    if not isinstance(content, dict):
+                        continue
+                    parts = content.get("parts", [])
+                    if not isinstance(parts, list):
+                        continue
+                    texts = []
+                    for part in parts:
+                        if not isinstance(part, dict):
+                            continue
+                        text = str(part.get("text", "")).strip()
+                        if text:
+                            texts.append(text)
+                    if texts:
+                        remember_google_model_success(model_name, candidate_model)
+                        return "\n".join(texts).strip()
+                last_error = (
+                    f"Google Gemini response missing text content for {candidate_model}"
+                )
+            raise RuntimeError(last_error or "Google Gemini request failed")
         if provider == "anthropic":
             api_key = os.getenv("ANTHROPIC_API_KEY") or ""
             if not _is_configured_secret(api_key):

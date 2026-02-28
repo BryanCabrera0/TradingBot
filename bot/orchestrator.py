@@ -13,7 +13,7 @@ import copy
 import json
 import logging
 import re
-import signal
+import signal as signal_module
 import time
 import traceback
 import uuid
@@ -895,16 +895,12 @@ class TradingBot:
         profile_key = str(profile or "").strip().lower()
         preset = named_profiles.get(profile_key)
         if preset:
-            self.risk_manager.config.max_portfolio_risk_pct = float(
-                preset.max_portfolio_risk_pct
-            )
-            self.risk_manager.config.max_position_risk_pct = float(
-                preset.max_position_risk_pct
-            )
-            self.risk_manager.config.max_open_positions = int(preset.max_open_positions)
-            self.risk_manager.config.max_daily_loss_pct = float(
-                preset.max_daily_loss_pct
-            )
+            for field in fields(preset):
+                setattr(
+                    self.risk_manager.config,
+                    field.name,
+                    copy.deepcopy(getattr(preset, field.name)),
+                )
             return
 
         # Backward-compatible fallback for unknown profile names.
@@ -4002,6 +3998,41 @@ class TradingBot:
 
         return self.config.watchlist
 
+    def _sanitize_strategy_signals(
+        self,
+        raw_signals: Any,
+        *,
+        strategy_name: str,
+        symbol: str,
+    ) -> list[TradeSignal]:
+        """Normalize strategy output and drop malformed entries."""
+        if raw_signals is None:
+            return []
+        if isinstance(raw_signals, TradeSignal):
+            return [raw_signals]
+        if not isinstance(raw_signals, (list, tuple)):
+            logger.warning(
+                "Strategy %s returned unsupported signal payload on %s (%s); expected TradeSignal list.",
+                strategy_name,
+                symbol,
+                type(raw_signals).__name__,
+            )
+            return []
+
+        signals: list[TradeSignal] = []
+        for idx, candidate in enumerate(raw_signals):
+            if isinstance(candidate, TradeSignal):
+                signals.append(candidate)
+                continue
+            logger.warning(
+                "Dropping non-TradeSignal candidate from %s on %s (index=%d, type=%s).",
+                strategy_name,
+                symbol,
+                idx,
+                type(candidate).__name__,
+            )
+        return signals
+
     def _active_skip_sectors(self) -> set[str]:
         sectors: set[str] = set()
         for key, enabled in self._service_degradation.items():
@@ -4181,7 +4212,7 @@ class TradingBot:
                         )
                         continue
                     try:
-                        signals = strategy.scan_for_entries(
+                        raw_signals = strategy.scan_for_entries(
                             symbol,
                             chain_data,
                             underlying_price,
@@ -4199,6 +4230,13 @@ class TradingBot:
                             logger.debug(traceback.format_exc())
                             continue
                         raise
+                    signals = self._sanitize_strategy_signals(
+                        raw_signals,
+                        strategy_name=str(strategy.name),
+                        symbol=symbol,
+                    )
+                    if not signals:
+                        continue
                     best_score = max(
                         (
                             safe_float(item.analysis.score, 0.0)
@@ -4291,9 +4329,20 @@ class TradingBot:
                             signal.size_multiplier = max(
                                 0.1, float(signal.size_multiplier) * sandbox_scalar
                             )
-                    all_signals.extend(
-                        self._filter_signals_by_context(signals, market_context)
+                    filtered_signals = self._filter_signals_by_context(
+                        signals, market_context
                     )
+                    for idx, candidate in enumerate(filtered_signals):
+                        if isinstance(candidate, TradeSignal):
+                            all_signals.append(candidate)
+                            continue
+                        logger.warning(
+                            "Dropping non-TradeSignal post-context candidate on %s (strategy=%s, index=%d, type=%s).",
+                            symbol,
+                            strategy.name,
+                            idx,
+                            type(candidate).__name__,
+                        )
 
                 if not all_signals:
                     logger.info("No opportunities found on %s.", symbol)
@@ -4318,31 +4367,46 @@ class TradingBot:
                         )
                         continue
 
-                    filtered = []
-                    for signal in all_signals:
-                        if signal.strategy == "bull_put_spread" and not policy.get(
+                    filtered: list[TradeSignal] = []
+                    for idx, candidate in enumerate(all_signals):
+                        if not isinstance(candidate, TradeSignal):
+                            logger.warning(
+                                "Dropping non-TradeSignal candidate before news filter on %s (index=%d, type=%s).",
+                                symbol,
+                                idx,
+                                type(candidate).__name__,
+                            )
+                            continue
+                        if candidate.strategy == "bull_put_spread" and not policy.get(
                             "allow_bull_put", True
                         ):
                             continue
-                        if signal.strategy == "bear_call_spread" and not policy.get(
+                        if candidate.strategy == "bear_call_spread" and not policy.get(
                             "allow_bear_call", True
                         ):
                             continue
-                        filtered.append(signal)
+                        filtered.append(candidate)
                     all_signals = filtered
 
                 if not all_signals:
                     logger.info("No news-compliant opportunities found on %s.", symbol)
                     continue
 
-                for signal in all_signals:
-                    composite = self._composite_signal_score(signal)
-                    signal.metadata["composite_score"] = composite
-                    ranked_candidates.append(signal)
+                for idx, candidate in enumerate(all_signals):
+                    if not isinstance(candidate, TradeSignal):
+                        logger.warning(
+                            "Dropping non-TradeSignal candidate before ranking on %s (index=%d, type=%s).",
+                            symbol,
+                            idx,
+                            type(candidate).__name__,
+                        )
+                        continue
+                    composite = self._composite_signal_score(candidate)
+                    candidate.metadata["composite_score"] = composite
+                    ranked_candidates.append(candidate)
 
             except Exception as e:
-                logger.error("Error scanning %s: %s", symbol, e)
-                logger.debug(traceback.format_exc())
+                logger.error("Error scanning %s: %s", symbol, e, exc_info=True)
 
         if not ranked_candidates:
             self._last_ranked_signals = []
@@ -6770,12 +6834,17 @@ class TradingBot:
         candidates: list[TradeSignal] = []
 
         for strategy in self.strategies:
-            strategy_signals = strategy.scan_for_entries(
+            raw_strategy_signals = strategy.scan_for_entries(
                 symbol,
                 chain_data,
                 underlying_price,
                 technical_context=technical_context,
                 market_context=market_context,
+            )
+            strategy_signals = self._sanitize_strategy_signals(
+                raw_strategy_signals,
+                strategy_name=str(strategy.name),
+                symbol=symbol,
             )
             for candidate in strategy_signals:
                 if candidate.strategy != strategy_name or not candidate.analysis:
@@ -9177,9 +9246,9 @@ class TradingBot:
         """Register SIGTERM/SIGINT handlers for graceful stop."""
         if self._signal_handlers_ready:
             return
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in (signal_module.SIGTERM, signal_module.SIGINT):
             try:
-                signal.signal(sig, self._handle_shutdown)
+                signal_module.signal(sig, self._handle_shutdown)
             except Exception as exc:
                 logger.debug("Could not register signal handler for %s: %s", sig, exc)
         self._signal_handlers_ready = True
@@ -9718,7 +9787,7 @@ class TradingBot:
                 time.sleep(0.5)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
-            self._handle_shutdown(signal.SIGINT, None)
+            self._handle_shutdown(signal_module.SIGINT, None)
 
         # Final report
         self._daily_report()

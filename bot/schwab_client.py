@@ -1007,7 +1007,9 @@ class SchwabClient:
             raise ValueError("Bull put spread requires a positive net credit.")
         short_sym = _make_option_symbol(symbol, expiration, "P", short_strike)
         long_sym = _make_option_symbol(symbol, expiration, "P", long_strike)
-        order = bull_put_vertical_open(long_sym, short_sym, quantity, price)
+        order = bull_put_vertical_open(
+            long_sym, short_sym, quantity, _format_order_price(price)
+        )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1026,7 +1028,9 @@ class SchwabClient:
             raise ValueError("Bear call spread requires a positive net credit.")
         short_sym = _make_option_symbol(symbol, expiration, "C", short_strike)
         long_sym = _make_option_symbol(symbol, expiration, "C", long_strike)
-        order = bear_call_vertical_open(short_sym, long_sym, quantity, price)
+        order = bear_call_vertical_open(
+            short_sym, long_sym, quantity, _format_order_price(price)
+        )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1045,7 +1049,9 @@ class SchwabClient:
             raise ValueError("Bull put spread close requires a positive net debit.")
         short_sym = _make_option_symbol(symbol, expiration, "P", short_strike)
         long_sym = _make_option_symbol(symbol, expiration, "P", long_strike)
-        order = bull_put_vertical_close(long_sym, short_sym, quantity, price)
+        order = bull_put_vertical_close(
+            long_sym, short_sym, quantity, _format_order_price(price)
+        )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1064,7 +1070,9 @@ class SchwabClient:
             raise ValueError("Bear call spread close requires a positive net debit.")
         short_sym = _make_option_symbol(symbol, expiration, "C", short_strike)
         long_sym = _make_option_symbol(symbol, expiration, "C", long_strike)
-        order = bear_call_vertical_close(short_sym, long_sym, quantity, price)
+        order = bear_call_vertical_close(
+            short_sym, long_sym, quantity, _format_order_price(price)
+        )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1082,7 +1090,9 @@ class SchwabClient:
         if price is None or price <= 0:
             order = option_sell_to_open_market(option_sym, quantity)
         else:
-            order = option_sell_to_open_limit(option_sym, quantity, price)
+            order = option_sell_to_open_limit(
+                option_sym, quantity, _format_order_price(price)
+            )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1100,7 +1110,9 @@ class SchwabClient:
         if price is None or price <= 0:
             order = option_buy_to_close_market(option_sym, quantity)
         else:
-            order = option_buy_to_close_limit(option_sym, quantity, price)
+            order = option_buy_to_close_limit(
+                option_sym, quantity, _format_order_price(price)
+            )
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1131,7 +1143,7 @@ class SchwabClient:
             )
         )
         if price is not None and price > 0:
-            order.set_price(price)
+            order.set_price(_format_order_price(price))
         order.set_duration(Duration.DAY)
         order.set_session(Session.NORMAL)
         return order
@@ -1163,7 +1175,7 @@ class SchwabClient:
             .set_order_strategy_type(OrderStrategyType.SINGLE)
             .set_complex_order_strategy_type(ComplexOrderStrategyType.VERTICAL)
             .set_quantity(max(1, int(quantity)))
-            .set_price(price)
+            .set_price(_format_order_price(price))
             .add_option_leg(
                 OptionInstruction.BUY_TO_OPEN, long_sym, max(1, int(quantity))
             )
@@ -1201,7 +1213,7 @@ class SchwabClient:
             .set_complex_order_strategy_type(ComplexOrderStrategyType.IRON_CONDOR)
             .set_order_strategy_type(OrderStrategyType.SINGLE)
             .set_quantity(quantity)
-            .set_price(price)
+            .set_price(_format_order_price(price))
             .add_option_leg(OptionInstruction.BUY_TO_OPEN, put_long_sym, quantity)
             .add_option_leg(OptionInstruction.SELL_TO_OPEN, put_short_sym, quantity)
             .add_option_leg(OptionInstruction.SELL_TO_OPEN, call_short_sym, quantity)
@@ -1237,7 +1249,7 @@ class SchwabClient:
             .set_complex_order_strategy_type(ComplexOrderStrategyType.IRON_CONDOR)
             .set_order_strategy_type(OrderStrategyType.SINGLE)
             .set_quantity(quantity)
-            .set_price(price)
+            .set_price(_format_order_price(price))
             .add_option_leg(OptionInstruction.SELL_TO_CLOSE, put_long_sym, quantity)
             .add_option_leg(OptionInstruction.BUY_TO_CLOSE, put_short_sym, quantity)
             .add_option_leg(OptionInstruction.BUY_TO_CLOSE, call_short_sym, quantity)
@@ -1249,6 +1261,13 @@ class SchwabClient:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _format_order_price(price: Optional[float]) -> str:
+    """Format limit/debit/credit values as strings for schwab-py builders."""
+    value = max(0.0, safe_float(price, 0.0))
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _normalize_contract(contract: dict, strike: float, expiration_date: str) -> dict:

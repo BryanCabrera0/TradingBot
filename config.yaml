@@ -171,6 +171,11 @@ risk:
   correlated_loss_threshold: 6
   correlated_loss_pct: 0.80
   correlated_loss_cooldown_hours: 0
+  # Execution quality gates (lowered for aggressive, action-oriented posture)
+  min_trade_score: 20.0
+  min_trade_pop: 0.35
+  # Hard cap on contracts per order (risk checks still apply first)
+  max_contracts_per_trade: 20
   gamma_week_tight_stop: 3.0
   expiration_day_close_pct: 0.01
 
@@ -190,6 +195,9 @@ risk_profiles:
     max_position_risk_pct: 15.0
     max_open_positions: 30
     max_daily_loss_pct: 15.0
+    min_trade_score: 20.0
+    min_trade_pop: 0.35
+    max_contracts_per_trade: 20
 
 sizing:
   method: fixed   # fixed | kelly
@@ -200,6 +208,14 @@ sizing:
   equity_curve_lookback: 20
   max_scale_up: 1.25
   max_scale_down: 0.50
+  # Optional size-up for only the strongest setups
+  high_conviction_size_boost_enabled: true
+  high_conviction_size_boost_multiplier: 1.40
+  high_conviction_size_boost_min_score: 70.0
+  high_conviction_size_boost_min_pop: 0.60
+  high_conviction_size_boost_min_ml_score: 0.65
+  high_conviction_size_boost_min_composite: 80.0
+  high_conviction_size_boost_max_extra_contracts: 3
 
 strategy_allocation:
   enabled: false
@@ -464,13 +480,13 @@ llm:
   base_url: http://127.0.0.1:11434
   mode: advisory   # advisory | blocking
   risk_style: aggressive   # conservative | moderate | aggressive
-  timeout_seconds: 20
+  timeout_seconds: 60
   temperature: 0.3
   min_confidence: 0.30
   track_record_file: bot/data/llm_track_record.json
-  reasoning_effort: xhigh
+  reasoning_effort: medium
   text_verbosity: low
-  max_output_tokens: 500
+  max_output_tokens: 400
   chat_fallback_model: gemini-3.1-flash-thinking-preview
   ensemble_enabled: false
   ensemble_models:
@@ -501,7 +517,7 @@ news:
   llm_sentiment_enabled: true
   llm_sentiment_cache_seconds: 1800
   llm_model: gemini-3.1-pro-thinking-preview
-  llm_reasoning_effort: xhigh
+  llm_reasoning_effort: high
   llm_text_verbosity: low
   llm_max_output_tokens: 400
   llm_chat_fallback_model: gemini-3.1-flash-thinking-preview

@@ -164,7 +164,9 @@ class RiskManager:
     ) -> None:
         """Update the portfolio state with latest data."""
         self.portfolio.account_balance = float(account_balance)
-        self.portfolio.open_positions = open_positions
+        # Keep an internal list copy: mutating risk-tracked positions must not mutate
+        # the caller's canonical ledger/backtest list (which caused double-counting).
+        self.portfolio.open_positions = list(open_positions or [])
 
         today = date.today()
         if self.portfolio.daily_pnl_date != today:
@@ -255,7 +257,7 @@ class RiskManager:
             },
         }
         self.portfolio.open_positions.append(position)
-        self.portfolio.total_risk_deployed += max_loss * qty * 100
+        self.portfolio.total_risk_deployed += max_loss * qty * 100.0
         self.portfolio.net_delta += net_delta * qty * 100.0
         self.portfolio.net_theta += net_theta * qty * 100.0
         self.portfolio.net_gamma += net_gamma * qty * 100.0
@@ -349,12 +351,20 @@ class RiskManager:
             )
 
         # ── Check 7: Minimum quality score ────────────────────────
-        if not is_hedge and analysis.score < 40:
-            return False, f"Trade score {analysis.score} below minimum threshold 40"
+        min_score = max(0.0, float(self.config.min_trade_score))
+        if not is_hedge and float(analysis.score) < min_score:
+            return (
+                False,
+                f"Trade score {analysis.score:.1f} below minimum threshold {min_score:.1f}",
+            )
 
         # ── Check 8: Probability of profit ────────────────────────
-        if not is_hedge and analysis.probability_of_profit < 0.50:
-            return False, f"POP {analysis.probability_of_profit:.1%} below minimum 50%"
+        min_pop = max(0.0, min(1.0, float(self.config.min_trade_pop)))
+        if not is_hedge and float(analysis.probability_of_profit) < min_pop:
+            return (
+                False,
+                f"POP {analysis.probability_of_profit:.1%} below minimum {min_pop:.0%}",
+            )
 
         # ── Check 9: Earnings in trade window ─────────────────────
         if not is_hedge:
@@ -589,7 +599,68 @@ class RiskManager:
             contracts = int((max_risk_per_trade * fraction) / risk_per_contract)
         else:
             contracts = int(max_risk_per_trade / risk_per_contract)
-        return max(1, min(contracts, 10))
+        contracts = max(1, contracts)
+
+        if self._is_high_conviction_signal(signal):
+            boost = max(
+                1.0,
+                float(
+                    self.sizing_config.get(
+                        "high_conviction_size_boost_multiplier",
+                        1.25,
+                    )
+                ),
+            )
+            boosted = max(contracts, int(round(contracts * boost)))
+            max_extra = max(
+                0,
+                int(
+                    self.sizing_config.get(
+                        "high_conviction_size_boost_max_extra_contracts",
+                        2,
+                    )
+                ),
+            )
+            contracts = min(boosted, contracts + max_extra)
+
+        max_contracts = max(1, int(getattr(self.config, "max_contracts_per_trade", 10)))
+        return max(1, min(contracts, max_contracts))
+
+    def _is_high_conviction_signal(self, signal: TradeSignal) -> bool:
+        """Return whether a signal qualifies for optional confidence-based size boost."""
+        if not bool(self.sizing_config.get("high_conviction_size_boost_enabled", False)):
+            return False
+        if signal.analysis is None:
+            return False
+
+        analysis = signal.analysis
+        score = safe_float(getattr(analysis, "score", 0.0), 0.0)
+        pop = safe_float(getattr(analysis, "probability_of_profit", 0.0), 0.0)
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        ml_score = safe_float(metadata.get("ml_score"), 0.5)
+        composite = safe_float(metadata.get("composite_score"), score)
+
+        min_score = safe_float(
+            self.sizing_config.get("high_conviction_size_boost_min_score", 70.0), 70.0
+        )
+        min_pop = safe_float(
+            self.sizing_config.get("high_conviction_size_boost_min_pop", 0.60), 0.60
+        )
+        min_ml = safe_float(
+            self.sizing_config.get("high_conviction_size_boost_min_ml_score", 0.65),
+            0.65,
+        )
+        min_composite = safe_float(
+            self.sizing_config.get("high_conviction_size_boost_min_composite", 80.0),
+            80.0,
+        )
+
+        return (
+            score >= min_score
+            and pop >= min_pop
+            and ml_score >= min_ml
+            and composite >= min_composite
+        )
 
     def strategy_allocation_scalar(self, strategy_name: str) -> float:
         """Return strategy-level size scalar from rolling Sharpe/cold-start heuristics."""

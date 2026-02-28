@@ -9,6 +9,11 @@ from typing import Optional
 import yaml
 from dotenv import load_dotenv
 
+from bot.google_model_aliases import (
+    GOOGLE_GEMINI_FLASH_MODEL,
+    GOOGLE_GEMINI_PRO_MODEL,
+)
+
 logger = logging.getLogger(__name__)
 SECRET_PLACEHOLDER_MARKERS = ("your_", "_here", "changeme")
 
@@ -143,6 +148,9 @@ class RiskConfig:
     correlated_loss_threshold: int = 3
     correlated_loss_pct: float = 0.50
     correlated_loss_cooldown_hours: int = 2
+    min_trade_score: float = 40.0
+    min_trade_pop: float = 0.50
+    max_contracts_per_trade: int = 10
     gamma_week_tight_stop: float = 1.5
     expiration_day_close_pct: float = 0.03
 
@@ -464,6 +472,13 @@ class SizingConfig:
     equity_curve_lookback: int = 20
     max_scale_up: float = 1.25
     max_scale_down: float = 0.50
+    high_conviction_size_boost_enabled: bool = False
+    high_conviction_size_boost_multiplier: float = 1.25
+    high_conviction_size_boost_min_score: float = 70.0
+    high_conviction_size_boost_min_pop: float = 0.60
+    high_conviction_size_boost_min_ml_score: float = 0.65
+    high_conviction_size_boost_min_composite: float = 80.0
+    high_conviction_size_boost_max_extra_contracts: int = 2
 
 
 @dataclass
@@ -613,10 +628,13 @@ def _default_risk_profiles() -> dict[str, RiskConfig]:
             max_daily_loss_pct=3.0,
         ),
         "aggressive": RiskConfig(
-            max_portfolio_risk_pct=8.0,
-            max_position_risk_pct=3.0,
-            max_open_positions=15,
-            max_daily_loss_pct=5.0,
+            max_portfolio_risk_pct=10.0,
+            max_position_risk_pct=4.0,
+            max_open_positions=25,
+            max_daily_loss_pct=8.0,
+            min_trade_score=25.0,
+            min_trade_pop=0.35,
+            max_contracts_per_trade=20,
         ),
     }
 
@@ -1130,6 +1148,29 @@ def validate_config(cfg: BotConfig) -> ConfigValidationReport:
         )
     else:
         report.passed.append("ensemble model format")
+
+    if str(cfg.llm.provider).strip().lower() == "google":
+        primary = str(cfg.llm.model or "").strip().lower()
+        fallback = str(cfg.llm.chat_fallback_model or "").strip().lower()
+        if primary != GOOGLE_GEMINI_PRO_MODEL:
+            report.failed.append(
+                "llm.model must be gemini-3.1-pro-thinking-preview when llm.provider=google."
+            )
+        elif fallback != GOOGLE_GEMINI_FLASH_MODEL:
+            report.failed.append(
+                "llm.chat_fallback_model must be gemini-3.1-flash-thinking-preview when llm.provider=google."
+            )
+        else:
+            report.passed.append("google llm model pair")
+
+    if str(cfg.llm_strategist.provider).strip().lower() == "google":
+        strategist_model = str(cfg.llm_strategist.model or "").strip().lower()
+        if strategist_model != GOOGLE_GEMINI_PRO_MODEL:
+            report.failed.append(
+                "llm_strategist.model must be gemini-3.1-pro-thinking-preview when llm_strategist.provider=google."
+            )
+        else:
+            report.passed.append("google llm strategist model")
 
     if bool(cfg.hedging.enabled):
         hedge_budget = float(cfg.hedging.max_hedge_cost_pct)
@@ -1658,7 +1699,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     if llm_chat_fallback:
         cfg.llm.chat_fallback_model = llm_chat_fallback
     elif cfg.llm.provider == "google":
-        cfg.llm.chat_fallback_model = "gemini-3.1-flash-thinking-preview"
+        cfg.llm.chat_fallback_model = GOOGLE_GEMINI_FLASH_MODEL
     elif cfg.llm.provider == "openai":
         cfg.llm.chat_fallback_model = "gpt-4.1"
     else:
@@ -1670,7 +1711,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.llm.ensemble_models = _normalize_string_list(
         cfg.llm.ensemble_models,
-        default=["google:gemini-3.1-pro-thinking-preview"],
+        default=[f"google:{GOOGLE_GEMINI_PRO_MODEL}"],
     )
     cfg.llm.multi_turn_enabled = bool(cfg.llm.multi_turn_enabled)
     cfg.llm.multi_turn_confidence_threshold = max(
@@ -1706,12 +1747,20 @@ def _normalize_config(cfg: BotConfig) -> None:
             cfg.llm.model = "gpt-4.1"
     elif cfg.llm.provider == "google":
         model_key = str(cfg.llm.model).strip().lower()
-        if (
-            not model_key
-            or model_key.startswith("gpt-")
-            or model_key.startswith("claude-")
-        ):
-            cfg.llm.model = "gemini-3.1-pro-thinking-preview"
+        if model_key != GOOGLE_GEMINI_PRO_MODEL:
+            logger.warning(
+                "llm.model=%r overridden to %r for stable Google Gemini pairing.",
+                cfg.llm.model,
+                GOOGLE_GEMINI_PRO_MODEL,
+            )
+            cfg.llm.model = GOOGLE_GEMINI_PRO_MODEL
+        if cfg.llm.chat_fallback_model != GOOGLE_GEMINI_FLASH_MODEL:
+            logger.warning(
+                "llm.chat_fallback_model=%r overridden to %r for stable Google Gemini pairing.",
+                cfg.llm.chat_fallback_model,
+                GOOGLE_GEMINI_FLASH_MODEL,
+            )
+            cfg.llm.chat_fallback_model = GOOGLE_GEMINI_FLASH_MODEL
 
     cfg.news.provider = _normalize_choice(
         cfg.news.provider,
@@ -1732,7 +1781,7 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.news.llm_sentiment_cache_seconds = max(
         0, int(cfg.news.llm_sentiment_cache_seconds)
     )
-    cfg.news.llm_model = str(cfg.news.llm_model or "gemini-3.1-pro-thinking-preview").strip()
+    cfg.news.llm_model = str(cfg.news.llm_model or GOOGLE_GEMINI_PRO_MODEL).strip()
     cfg.news.llm_reasoning_effort = _normalize_choice(
         cfg.news.llm_reasoning_effort,
         allowed={"none", "low", "medium", "high", "xhigh"},
@@ -1747,7 +1796,9 @@ def _normalize_config(cfg: BotConfig) -> None:
     )
     cfg.news.llm_max_output_tokens = max(64, int(cfg.news.llm_max_output_tokens))
     news_chat_fallback = str(cfg.news.llm_chat_fallback_model or "").strip()
-    cfg.news.llm_chat_fallback_model = news_chat_fallback or "gemini-3.1-flash-thinking-preview"
+    cfg.news.llm_chat_fallback_model = (
+        news_chat_fallback or GOOGLE_GEMINI_FLASH_MODEL
+    )
     cfg.news.market_queries = _normalize_string_list(
         cfg.news.market_queries,
         default=[
@@ -2036,6 +2087,27 @@ def _normalize_config(cfg: BotConfig) -> None:
     cfg.sizing.equity_curve_lookback = max(5, int(cfg.sizing.equity_curve_lookback))
     cfg.sizing.max_scale_up = max(1.0, float(cfg.sizing.max_scale_up))
     cfg.sizing.max_scale_down = max(0.1, min(1.0, float(cfg.sizing.max_scale_down)))
+    cfg.sizing.high_conviction_size_boost_enabled = bool(
+        cfg.sizing.high_conviction_size_boost_enabled
+    )
+    cfg.sizing.high_conviction_size_boost_multiplier = max(
+        1.0, float(cfg.sizing.high_conviction_size_boost_multiplier)
+    )
+    cfg.sizing.high_conviction_size_boost_min_score = max(
+        0.0, float(cfg.sizing.high_conviction_size_boost_min_score)
+    )
+    cfg.sizing.high_conviction_size_boost_min_pop = max(
+        0.0, min(1.0, float(cfg.sizing.high_conviction_size_boost_min_pop))
+    )
+    cfg.sizing.high_conviction_size_boost_min_ml_score = max(
+        0.0, min(1.0, float(cfg.sizing.high_conviction_size_boost_min_ml_score))
+    )
+    cfg.sizing.high_conviction_size_boost_min_composite = max(
+        0.0, float(cfg.sizing.high_conviction_size_boost_min_composite)
+    )
+    cfg.sizing.high_conviction_size_boost_max_extra_contracts = max(
+        0, int(cfg.sizing.high_conviction_size_boost_max_extra_contracts)
+    )
     cfg.strategy_allocation.enabled = bool(cfg.strategy_allocation.enabled)
     cfg.strategy_allocation.lookback_trades = max(
         5, int(cfg.strategy_allocation.lookback_trades)
@@ -2129,12 +2201,13 @@ def _normalize_config(cfg: BotConfig) -> None:
             cfg.llm_strategist.model = "gpt-4o"
     elif cfg.llm_strategist.provider == "google":
         model_key = str(cfg.llm_strategist.model).strip().lower()
-        if (
-            not model_key
-            or model_key.startswith("gpt-")
-            or model_key.startswith("claude-")
-        ):
-            cfg.llm_strategist.model = "gemini-3.1-pro-thinking-preview"
+        if model_key != GOOGLE_GEMINI_PRO_MODEL:
+            logger.warning(
+                "llm_strategist.model=%r overridden to %r for stable Google Gemini pairing.",
+                cfg.llm_strategist.model,
+                GOOGLE_GEMINI_PRO_MODEL,
+            )
+            cfg.llm_strategist.model = GOOGLE_GEMINI_PRO_MODEL
     cfg.llm_strategist.timeout_seconds = max(1, int(cfg.llm_strategist.timeout_seconds))
     cfg.llm_strategist.max_directives = max(1, int(cfg.llm_strategist.max_directives))
     cfg.circuit_breakers.strategy_loss_streak_limit = max(
@@ -2462,6 +2535,9 @@ def _normalize_risk_config(risk_cfg: RiskConfig) -> RiskConfig:
     risk_cfg.correlated_loss_cooldown_hours = max(
         1, int(risk_cfg.correlated_loss_cooldown_hours)
     )
+    risk_cfg.min_trade_score = max(0.0, float(risk_cfg.min_trade_score))
+    risk_cfg.min_trade_pop = max(0.0, min(1.0, float(risk_cfg.min_trade_pop)))
+    risk_cfg.max_contracts_per_trade = max(1, int(risk_cfg.max_contracts_per_trade))
     risk_cfg.gamma_week_tight_stop = max(1.0, float(risk_cfg.gamma_week_tight_stop))
     risk_cfg.expiration_day_close_pct = max(
         0.0, min(0.25, float(risk_cfg.expiration_day_close_pct))

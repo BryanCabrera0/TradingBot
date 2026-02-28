@@ -75,7 +75,7 @@ class MultiAgentCIO:
         focus="Growth, capital deployment, and executing trades aggressively.",
         system_prompt=(
             "You must arbitrate analyst disagreements and decide final go/no-go and size. "
-            "While maintaining a smart and generally conservative profile, be slightly more tolerant of risk to approve more viable setups and avoid missing opportunities. "
+            "Be decisive and action-oriented: bias toward approving viable setups and deploying capital when edge exists, while respecting explicit hard risk constraints. "
             "Respond ONLY with strict JSON."
         ),
     )

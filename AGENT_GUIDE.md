@@ -17,7 +17,7 @@ The system relies on LLMs for qualitative market analysis, acting as a filter fo
 *   **`bot/llm_strategist.py`**: The "CIO". Reviews the overall market regime, technicals, and news to determine macro posture.
 *   **`bot/llm_advisor.py`**: A per-trade reviewer. Evaluates individual `TradeSignal` analyses against the current market structure. Uses `structured_outputs` (JSON).
 *   **`bot/multi_agent_cio.py`**: An advanced debate architecture where multiple agent personas (Macro Economist, Volatility Quant, Risk Manager) debate a trade before the CIO issues a final verdict.
-*   **`bot/rl_prompt_optimizer.py`**: A continuous-learning engine. During `TrainingSimulator` runs (or live post-trade analysis), it reviews P&L outcomes and updates `bot/data/learned_rules.json` with new prompt-injection rules.
+*   **`bot/rl_prompt_optimizer.py`**: A continuous-learning engine. During paper/live post-trade analysis, it reviews P&L outcomes and updates `bot/data/learned_rules.json` with new prompt-injection rules.
 
 ### 1.3 Strategies (`bot/strategies/base.py`)
 All strategies inherit from `BaseStrategy`. They must implement two primary methods:
@@ -45,5 +45,4 @@ These automatically utilize the secure `file_security` methods underneath.
 *   **Testing**: Run tests using `./.venv/bin/pytest`. The test suite is extensive and highly sensitive to logical changes in risk calculations and config normalization. Run them frequently.
 *   **Aggressive AI Tuning**: The AI layers (`LLMAdvisor` and `MultiAgentCIO`) have been deliberately tuned to default to `approve` over `reject`. The system prompts mandate an aggressive stance to prioritize execution volume and raw P&L capture rather than conservative risk aversion.
 *   **JSON Fallback Behaviors**: When LLM APIs produce invalid JSON or hit network errors, the `MultiAgentCIO` and `LLMAdvisor` fallbacks are hardcoded to `{"verdict": "approve", "confidence": 100.0}`. This prevents rate limits or malformed responses from throttling trading opportunities.
-*   **Simulator P&L Calculations**: When generating synthetic option paths in `simulator.py`, the value of a credit spread must be calculated correctly to prevent artificial massive losses. The true current value of a credit spread is always `(short_leg_value - long_leg_value)`. Profit is then strictly `initial_value - current_value`.
 *   **Risk Allowances**: The risk parameters in `bot/config.py` are explicitly set high (e.g., `max_open_positions=25`, `max_daily_loss_pct=15.0`) and the strategy quality thresholds mapped in `bot/strategies/base.py` are deliberately lowered (`min_pop=0.10`, `min_score=5.0`) to force higher signal throughput into the AI review layers.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -15,10 +16,17 @@ import yaml
 from bot.backtester import Backtester
 from bot.config import StrategySandboxConfig
 from bot.data_store import dump_json, ensure_data_dir, load_json
+from bot.google_model_aliases import (
+    GOOGLE_GEMINI_FLASH_MODEL,
+    GOOGLE_GEMINI_PRO_MODEL,
+    candidate_google_models,
+    remember_google_model_success,
+)
 from bot.number_utils import safe_float
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_BASE_STRATEGY_PATH = Path("bot/strategies/base.py")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -220,41 +228,64 @@ class StrategySandboxManager:
             },
         }
 
-        try:
-            response = requests.post(
-                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
-                params={"key": self.google_api_key},
-                json={
-                    "contents": [
-                        {
-                            "role": "user",
-                            "parts": [
-                                {"text": json.dumps(payload, separators=(",", ":"))}
-                            ],
-                        }
+        request_payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": json.dumps(payload, separators=(",", ":"))}
                     ],
-                    "system_instruction": {
-                        "parts": [
-                            {
-                                "text": (
-                                    "You are the CIO for an options desk. "
-                                    "Return ONLY valid JSON and no markdown."
-                                )
-                            }
-                        ]
-                    },
-                    "generationConfig": {
-                        "temperature": 0.0,
-                        "maxOutputTokens": 450,
-                        "responseMimeType": "application/json",
-                    },
-                },
-                timeout=20,
-            )
-            if response.status_code >= 400:
-                return None
-            raw = _extract_gemini_text(response.json())
-        except Exception:
+                }
+            ],
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "You are the CIO for an options desk. "
+                            "Return ONLY valid JSON and no markdown."
+                        )
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 450,
+                "responseMimeType": "application/json",
+            },
+        }
+
+        raw = ""
+        last_error = ""
+        for requested_model in (GOOGLE_GEMINI_PRO_MODEL, GOOGLE_GEMINI_FLASH_MODEL):
+            for model_name in candidate_google_models(requested_model):
+                try:
+                    response = requests.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                        params={"key": self.google_api_key},
+                        json=request_payload,
+                        timeout=20,
+                    )
+                    if response.status_code >= 400:
+                        last_error = (
+                            f"model={model_name} status={response.status_code} "
+                            f"body={response.text[:200]}"
+                        )
+                        if response.status_code == 404:
+                            continue
+                        break
+                    raw = _extract_gemini_text(response.json())
+                    if raw:
+                        remember_google_model_success(requested_model, model_name)
+                        break
+                    last_error = f"model={model_name} response missing text payload"
+                except Exception as exc:
+                    last_error = f"model={model_name} error={exc}"
+                    continue
+            if raw:
+                break
+        if not raw:
+            if last_error:
+                logger.warning("Strategy sandbox proposal failed: %s", last_error)
             return None
 
         try:

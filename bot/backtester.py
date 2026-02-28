@@ -522,6 +522,13 @@ class Backtester:
                     ),
                     quantity=signal.quantity,
                     strategy=signal.strategy,
+                    greeks={
+                        # Preserve Greeks immediately for intra-day budget checks.
+                        "net_delta": float(signal.analysis.net_delta),
+                        "net_theta": float(signal.analysis.net_theta),
+                        "net_gamma": float(signal.analysis.net_gamma),
+                        "net_vega": float(signal.analysis.net_vega),
+                    },
                 )
 
     def _process_exits(self, trading_day: date) -> None:
@@ -577,6 +584,12 @@ class Backtester:
                 "call_long_strike": analysis.call_long_strike,
                 "score": analysis.score,
                 "probability_of_profit": analysis.probability_of_profit,
+                # Persist Greeks on the position so later update_portfolio() recomputes
+                # portfolio exposures correctly instead of collapsing to zeros.
+                "net_delta": analysis.net_delta,
+                "net_theta": analysis.net_theta,
+                "net_gamma": analysis.net_gamma,
+                "net_vega": analysis.net_vega,
             },
             "status": "open",
         }

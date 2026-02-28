@@ -107,10 +107,10 @@ cp .env.example .env
 ```bash
 python3 main.py
 ```
-5. Optional one-shot + dashboard:
+5. Optional one-shot + diagnostics:
 ```bash
-python3 main.py --once
-python3 main.py --dashboard
+python3 main.py run paper once
+python3 main.py run paper --diagnose
 ```
 
 ## CLI Reference
@@ -118,25 +118,51 @@ python3 main.py --dashboard
 ```bash
 # Core runtime
 python3 main.py
-python3 main.py --once
-python3 main.py --live --yes
-python3 main.py --preflight-only
-python3 main.py --live-readiness-only
+python3 main.py run paper
+python3 main.py run paper once
+python3 main.py run paper --diagnose
+python3 main.py run live --yes
+python3 main.py run live once --yes
+python3 main.py run live --diagnose
 
-# Setup + preparation
-python3 main.py --prepare-live
-python3 main.py --setup-live
-
-# Reporting + diagnostics
-python3 main.py --report
-python3 main.py --dashboard
-python3 main.py --audit-trail SPY
-
-# Historical workflows
-python3 main.py --fetch-data --start 2024-01-01 --end 2025-12-31
-python3 main.py --backtest --start 2024-01-01 --end 2025-12-31
-python3 main.py --update-econ-calendar
+# Auth
+python3 main.py auth
 ```
+
+## Codex Agent Team Workflow
+
+If you want a Claude-style "agent team" setup with Codex, use the local team runner:
+
+```bash
+python3 scripts/codex_team.py --task "Add a new risk guard for earnings week and update tests"
+```
+
+What it does:
+- Launches specialist Codex agents in parallel (`architect`, `reviewer`, `tester`) in `read-only` mode.
+- Saves each specialist prompt/report under `.codex-team/runs/<timestamp>/`.
+- Runs a lead Codex agent in `workspace-write` mode to execute the task using those reports.
+
+Useful flags:
+
+```bash
+# Specialists only (no code changes)
+python3 scripts/codex_team.py --task "..." --skip-lead
+
+# Choose roles and model
+python3 scripts/codex_team.py --task "..." --roles architect,tester --model gpt-5
+
+# Print underlying codex commands without running them
+python3 scripts/codex_team.py --task "..." --dry-run
+
+# Spawn a separate Terminal window for each specialist/lead agent
+python3 scripts/codex_team.py --task "..." --spawn-terminal-windows
+
+# Fail fast if nested codex runs hang
+python3 scripts/codex_team.py --task "..." --specialist-timeout-seconds 120 --lead-timeout-seconds 600
+```
+
+Prompt shortcut:
+- In Codex chat for this repo, include `agent team` in your prompt (for example, `agent team add trailing stop diagnostics`) and the assistant will run `scripts/codex_team.py` automatically (with terminal windows).
 
 ## Configuration Reference
 
@@ -145,9 +171,9 @@ All keys are backward-compatible and default to non-breaking values.
 | Section | Purpose | Key examples |
 |---|---|---|
 | `strategies.*` | Strategy enablement + parameters | `credit_spreads.min_dte`, `strangles.min_iv_rank`, `earnings_vol_crush.wing_width` |
-| `risk` | Core risk constraints | `max_portfolio_risk_pct`, `max_portfolio_delta_abs`, `max_sector_risk_pct`, `correlated_loss_threshold` |
+| `risk` | Core risk constraints | `max_portfolio_risk_pct`, `min_trade_score`, `min_trade_pop`, `max_contracts_per_trade` |
 | `risk_profiles` | Named multi-account presets | `conservative`, `moderate`, `aggressive` |
-| `sizing` | Position sizing engine | `method`, `kelly_fraction`, `equity_curve_scaling` |
+| `sizing` | Position sizing engine | `method`, `kelly_fraction`, `equity_curve_scaling`, `high_conviction_size_boost_*` |
 | `regime` | Regime detector controls | `enabled`, `cache_seconds`, `history_file` |
 | `vol_surface` | Vol-based trade gating | `require_positive_vol_risk_premium`, `max_vol_of_vol_for_condors` |
 | `econ_calendar` | Macro event policy | `high_severity_policy`, `medium_severity_policy` |
@@ -244,7 +270,7 @@ python3 -m bot.auth
 ### Live readiness fails on configuration validation
 - Run:
 ```bash
-python3 main.py --live-readiness-only
+python3 main.py run live --diagnose
 ```
 - Fix reported `Configuration validation report` failures before live mode.
 
@@ -259,9 +285,9 @@ python3 main.py --live-readiness-only
 
 ### Dashboard missing data
 - Ensure write access to `logs/` and `bot/data/`.
-- Run manual regeneration:
+- Run a one-shot cycle to refresh generated dashboard artifacts:
 ```bash
-python3 main.py --dashboard
+python3 main.py run paper once
 ```
 
 ## Testing
