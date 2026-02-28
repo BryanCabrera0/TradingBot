@@ -578,7 +578,8 @@ class TradingBot:
             return "N/A"
         try:
             context = self.econ_calendar.context(days=14)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Econ calendar context fetch failed: %s", exc)
             return "N/A"
         events = context.get("upcoming_macro_events", []) if isinstance(context, dict) else []
         if not isinstance(events, list) or not events:
@@ -1396,7 +1397,8 @@ class TradingBot:
                 path=self.rl_prompt_optimizer.rules_path,
                 limit=limit,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to load RL prompt rules: %s", exc)
             return []
 
     def _record_rl_closed_trade_learning(
@@ -1609,7 +1611,8 @@ class TradingBot:
             try:
                 quote = self.schwab.get_quote(symbol)
                 self._record_api_health(True)
-            except Exception:
+            except Exception as exc:
+                logger.debug("VIX quote fetch failed for %s: %s", symbol, exc)
                 self._record_api_health(False)
                 continue
             ref = quote.get("quote", quote) if isinstance(quote, dict) else {}
@@ -5577,7 +5580,8 @@ class TradingBot:
         """Best-effort last price lookup for underlying symbols."""
         try:
             quote = self.schwab.get_quote(symbol)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Quote fetch failed for %s: %s", symbol, exc)
             return 0.0
         if not isinstance(quote, dict):
             return 0.0
@@ -6015,7 +6019,8 @@ class TradingBot:
         technical_context = None
         try:
             technical_context = self.technicals.get_context(symbol, self.schwab)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Technical context failed for %s: %s", symbol, exc)
             technical_context = None
 
         market_context = self._build_market_context(symbol, chain_data)
@@ -6688,7 +6693,8 @@ class TradingBot:
         """Approximate one-month return from daily closes."""
         try:
             bars = self.schwab.get_price_history(symbol, days=40)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Price history fetch failed for %s: %s", symbol, exc)
             return 0.0
         if not isinstance(bars, list):
             return 0.0
@@ -6982,7 +6988,8 @@ class TradingBot:
             return {}
         try:
             bars = self.schwab.get_price_history(symbol, days=260)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Weekly candle fetch failed for %s: %s", symbol, exc)
             return {}
         if not isinstance(bars, list) or not bars:
             return {}
@@ -7545,7 +7552,8 @@ class TradingBot:
                     contract_type=contract_type,
                     strike=float(strike),
                 )
-            except Exception:
+            except Exception as exc:
+                logger.debug("Delta fetch failed for %s: %s", symbol, exc)
                 return None
 
         if strategy == "bull_put_spread":
@@ -7704,7 +7712,8 @@ class TradingBot:
 
         try:
             orders = self.schwab.get_orders(days_back=60)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Order history fetch failed: %s", exc)
             return metadata
         if not isinstance(orders, list):
             return metadata
@@ -8112,7 +8121,8 @@ class TradingBot:
                 ]
                 if len(closes) >= 2:
                     price_changes[symbol] = closes[-1] - closes[-2]
-            except Exception:
+            except Exception as exc:
+                logger.debug("Price change fetch failed for %s: %s", symbol, exc)
                 price_changes[symbol] = 0.0
         for position in positions:
             if not isinstance(position, dict):

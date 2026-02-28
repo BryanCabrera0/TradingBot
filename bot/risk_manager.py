@@ -581,7 +581,8 @@ class RiskManager:
         curve = np.cumsum(np.array(pnls, dtype=float) / account)
         try:
             slope = float(np.polyfit(np.arange(len(curve), dtype=float), curve, 1)[0])
-        except Exception:
+        except Exception as exc:
+            logger.debug("Equity curve polyfit failed: %s", exc)
             return 0.0
         return slope
 
@@ -661,7 +662,8 @@ class RiskManager:
                 symbol_key,
                 int(self.config.correlation_lookback_days) + 5,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("Correlation price history failed for %s: %s", symbol_key, exc)
             return None
         if not isinstance(bars, list):
             return None

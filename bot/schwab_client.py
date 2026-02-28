@@ -889,8 +889,8 @@ class SchwabClient:
             try:
                 self.cancel_order(order_id)
                 last_result.update({"status": "CANCELED", "order_id": order_id})
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to cancel stale order %s: %s", order_id, exc)
 
         return last_result
 
@@ -903,7 +903,8 @@ class SchwabClient:
         while (time.time() - start) < timeout_seconds:
             try:
                 latest = self.get_order(order_id)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Order poll failed for %s: %s", order_id, exc)
                 latest["poll_error"] = True
                 return latest
 
