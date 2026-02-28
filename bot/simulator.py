@@ -1,11 +1,12 @@
 """Offline synthetic training simulator for LLM options agents."""
 
+import copy
 import json
 import logging
 import random
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from bot.analysis import SpreadAnalysis
@@ -96,44 +97,79 @@ class TrainingSimulator:
     """Generates synthetic options chains to train the RL Prompt Optimizer."""
 
     def __init__(self, config: BotConfig):
-        self.config = config
+        self.config = copy.deepcopy(config)
         self.optimizer = RLPromptOptimizer(
-            config.rl_prompt_optimizer,
-            explanations_path=config.llm.explanations_file,
-            track_record_path=config.llm.track_record_file,
+            self.config.rl_prompt_optimizer,
+            explanations_path=self.config.llm.explanations_file,
+            track_record_path=self.config.llm.track_record_file,
         )
-        self.strategist = LLMStrategist(config.llm_strategist)
-        self.advisor = LLMAdvisor(config.llm)
+        self.strategist = LLMStrategist(self.config.llm_strategist)
+        self.advisor = LLMAdvisor(self.config.llm)
         self.cio = MultiAgentCIO(
             query_model=request_openai_json,
             parse_decision=self.advisor._parse_decision,
             learned_rules=self._load_learned_rules(),
         )
-        config.terminal_ui.enabled = False
-        config.llm.max_output_tokens = 2048
-        self.bot = TradingBot(config)
+        # We instantiate a dummy bot just to fulfill the Advisor signature if needed,
+        # but realistically we will mock the pipeline.
+        self.config.terminal_ui.enabled = False
+        self.config.llm.max_output_tokens = 2048
+        self.bot = TradingBot(self.config)
+        # Hijack the bot's clients so it absolutely never hits the network
         self.bot.schwab = None  # type: ignore
-        self._track_record_path = config.llm.track_record_file
+        self._track_record_path = self.config.llm.track_record_file
 
     def _load_learned_rules(self) -> list[str]:
         """Fetch current rules from the RL optimizer."""
         try:
             data = load_json(self.optimizer.rules_path, {"rules": []})
-            return [str(r.get("rule", "")) for r in data.get("rules", [])]
-        except Exception:
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Learned-rules payload has invalid type at %s; expected object, got %s",
+                    self.optimizer.rules_path,
+                    type(data).__name__,
+                )
+                return []
+            raw_rules = data.get("rules", [])
+            if not isinstance(raw_rules, list):
+                logger.warning(
+                    "Learned-rules payload has non-list 'rules' at %s",
+                    self.optimizer.rules_path,
+                )
+                return []
+            return [
+                str(row.get("rule", ""))
+                for row in raw_rules
+                if isinstance(row, dict) and str(row.get("rule", "")).strip()
+            ]
+        except Exception as exc:
+            logger.warning(
+                "Failed to load learned rules from %s: %s",
+                self.optimizer.rules_path,
+                exc,
+            )
             return []
 
     def _generate_synthetic_chain(
         self, underlying_price: float, dte: int = 45, iv_mean: float = 0.20
     ) -> dict[str, Any]:
         """Generate a mathematically sound SPY option chain using Black-Scholes."""
+        if underlying_price <= 0:
+            logger.warning(
+                "Received non-positive underlying price %.4f in simulator; clamping to 1.0",
+                underlying_price,
+            )
+            underlying_price = 1.0
+        effective_dte = max(1, int(dte))
+        iv_mean = max(0.01, float(iv_mean))
+
         calls, puts = [], []
 
         # 101 strikes from -50 to +50 around the underlying
         center_strike = int(round(underlying_price))
         strikes = list(range(center_strike - 50, center_strike + 51, 1))
 
-        T = dte / 365.0
+        T = effective_dte / 365.0
         r = 0.05
 
         for strike in strikes:
@@ -185,7 +221,8 @@ class TrainingSimulator:
                 }
             )
 
-        exp_date_str = f"2026-04-{dte:02d}"
+        exp_date_str = (datetime.utcnow().date() + timedelta(days=effective_dte)).isoformat()
+
         return {
             "underlying_price": underlying_price,
             "calls": {exp_date_str: calls},

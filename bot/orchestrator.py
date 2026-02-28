@@ -1665,6 +1665,25 @@ class TradingBot:
         for strategy in self.strategies:
             strategy.config.update(overrides)
 
+    def _parse_circuit_pause_until(self, field: str) -> Optional[datetime]:
+        """Parse an ISO pause timestamp from circuit state and self-heal malformed values."""
+        raw_value = self.circuit_state.get(field)
+        if not raw_value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(raw_value))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring malformed circuit pause timestamp for %s: %r",
+                field,
+                raw_value,
+            )
+            self.circuit_state.pop(field, None)
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=EASTERN_TZ)
+        return parsed
+
     def _entries_allowed(self) -> bool:
         """Return True when no circuit breaker currently blocks new entries."""
         now = self._now_eastern()
@@ -1673,49 +1692,15 @@ class TradingBot:
         if self._portfolio_halt_until and now < self._portfolio_halt_until:
             return False
 
-        cons_until = self.circuit_state.get("consecutive_loss_pause_until")
-        if cons_until:
-            try:
-                cons_dt = datetime.fromisoformat(str(cons_until))
-                if cons_dt.tzinfo is None:
-                    cons_dt = cons_dt.replace(tzinfo=EASTERN_TZ)
-                if now < cons_dt:
-                    return False
-            except ValueError:
-                pass
-
-        weekly_until = self.circuit_state.get("weekly_loss_pause_until")
-        if weekly_until:
-            try:
-                weekly_dt = datetime.fromisoformat(str(weekly_until))
-                if weekly_dt.tzinfo is None:
-                    weekly_dt = weekly_dt.replace(tzinfo=EASTERN_TZ)
-                if now < weekly_dt:
-                    return False
-            except ValueError:
-                pass
-
-        correlated_until = self.circuit_state.get("correlated_loss_pause_until")
-        if correlated_until:
-            try:
-                corr_dt = datetime.fromisoformat(str(correlated_until))
-                if corr_dt.tzinfo is None:
-                    corr_dt = corr_dt.replace(tzinfo=EASTERN_TZ)
-                if now < corr_dt:
-                    return False
-            except ValueError:
-                pass
-
-        correlation_until = self.circuit_state.get("correlation_pause_until")
-        if correlation_until:
-            try:
-                corr_dt = datetime.fromisoformat(str(correlation_until))
-                if corr_dt.tzinfo is None:
-                    corr_dt = corr_dt.replace(tzinfo=EASTERN_TZ)
-                if now < corr_dt:
-                    return False
-            except ValueError:
-                pass
+        for field in (
+            "consecutive_loss_pause_until",
+            "weekly_loss_pause_until",
+            "correlated_loss_pause_until",
+            "correlation_pause_until",
+        ):
+            pause_until = self._parse_circuit_pause_until(field)
+            if pause_until and now < pause_until:
+                return False
 
         return True
 
@@ -1840,16 +1825,9 @@ class TradingBot:
             self.circuit_state["correlation_size_scalar"] = 0.5
             self.circuit_state["correlation_stop_widen_scalar"] = 1.25
             pause_until = now + timedelta(hours=1)
-            existing = self.circuit_state.get("correlation_pause_until")
-            if existing:
-                try:
-                    existing_dt = datetime.fromisoformat(str(existing))
-                    if existing_dt.tzinfo is None:
-                        existing_dt = existing_dt.replace(tzinfo=EASTERN_TZ)
-                    if existing_dt > pause_until:
-                        pause_until = existing_dt
-                except ValueError:
-                    pass
+            existing_dt = self._parse_circuit_pause_until("correlation_pause_until")
+            if existing_dt and existing_dt > pause_until:
+                pause_until = existing_dt
             self.circuit_state["correlation_pause_until"] = pause_until.isoformat()
         elif regime == CORRELATION_STRESSED:
             self.circuit_state["correlation_size_scalar"] = 0.75
@@ -4846,16 +4824,9 @@ class TradingBot:
     ) -> list[TradeSignal]:
         """Emergency protection when multiple positions are losing together."""
         now = self._now_eastern()
-        existing = self.circuit_state.get("correlated_loss_pause_until")
-        if existing:
-            try:
-                until = datetime.fromisoformat(str(existing))
-                if until.tzinfo is None:
-                    until = until.replace(tzinfo=EASTERN_TZ)
-                if now < until:
-                    return []
-            except ValueError:
-                pass
+        until = self._parse_circuit_pause_until("correlated_loss_pause_until")
+        if until and now < until:
+            return []
 
         threshold = max(1, int(self.config.risk.correlated_loss_threshold))
         adverse_pct = max(0.0, float(self.config.risk.correlated_loss_pct))
@@ -8651,7 +8622,11 @@ class TradingBot:
                     dte_remaining = (exp_date - self._now_eastern().date()).days
                     position["dte_remaining"] = dte_remaining
                 except ValueError:
-                    pass
+                    logger.debug(
+                        "Skipping DTE refresh for live position %s: invalid expiration %r",
+                        position_id,
+                        expiration,
+                    )
 
             if mark is not None:
                 position["current_value"] = mark

@@ -51,6 +51,8 @@ from bot.number_utils import safe_float
 if TYPE_CHECKING:
     from bot.orchestrator import TradingBot
 
+logger = logging.getLogger(__name__)
+
 
 def setup_logging(
     level: str = "INFO",
@@ -154,7 +156,8 @@ def _token_age_days(token_path: Path) -> Optional[float]:
         created = datetime.fromtimestamp(float(created_ts), tz=timezone.utc)
         now = datetime.now(timezone.utc)
         return max(0.0, (now - created).total_seconds() / 86400.0)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Unable to parse token age from %s: %s", token_path, exc)
         return None
 
 
@@ -185,8 +188,14 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
         validate_sensitive_file(
             token_path, label="Schwab token file", allow_missing=False
         )
-    except PermissionError:
-        pass  # File exists but is locked; assume it is valid for now.
+    except PermissionError as exc:
+        # File exists but may be locked by the OS; continue with a visible note.
+        print("  Token found (permission validation skipped; file appears locked).")
+        logger.warning(
+            "Permission validation skipped for Schwab token file %s: %s",
+            token_path,
+            exc,
+        )
     except FileNotFoundError:
         print(f"  Token missing at {token_path}")
         if _auth_prompt():
@@ -195,8 +204,15 @@ def _ensure_token_ready(config, *, interactive: bool) -> bool:
                 validate_sensitive_file(
                     token_path, label="Schwab token file", allow_missing=False
                 )
-            except PermissionError:
-                pass
+            except PermissionError as exc:
+                print(
+                    "  Token created (permission validation skipped; file appears locked)."
+                )
+                logger.warning(
+                    "Post-auth permission validation skipped for token file %s: %s",
+                    token_path,
+                    exc,
+                )
             except Exception:
                 print("  Token check failed after auth. Please re-run.")
                 return False
@@ -268,8 +284,8 @@ def run_integrated_diagnostics(
             try:
                 if candidate is not None:
                     candidate.stop_streaming()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Diagnostics cleanup failed while stopping stream: %s", exc)
 
     token_path = Path(config.schwab.token_path).expanduser()
     if not token_path.is_absolute():
@@ -354,8 +370,10 @@ def run_integrated_diagnostics(
         technical_context = None
         try:
             technical_context = bot.technicals.get_context(symbol, bot.schwab)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Diagnostics technical context fetch failed for %s: %s", symbol, exc)
             technical_context = None
+            print("  technicals  unavailable (continuing without technical context)")
         market_context = bot._build_market_context(symbol, chain_data)
 
         strategy_signal_counts: dict[str, int] = {}
@@ -608,7 +626,8 @@ def _is_bootstrap_complete() -> bool:
         with path.open("r") as f:
             data = json.load(f)
         return "meta" in data or "rules" in data
-    except Exception:
+    except Exception as exc:
+        logger.debug("Bootstrap completion check failed: %s", exc)
         return False
 
 def prompt_run_menu() -> tuple[str, bool]:
@@ -926,7 +945,11 @@ def main() -> None:
                     schwab = SchwabClient(config.schwab)
                     schwab.connect()
                     balance = schwab.get_account_balance()
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "Dashboard balance fetch failed; using $0.0 fallback: %s",
+                        exc,
+                    )
                     balance = 0.0
 
             monthly: dict[str, float] = {}
@@ -1013,7 +1036,7 @@ def main() -> None:
         backup_count=config.log_backup_count,
     )
 
-    logger = logging.getLogger(__name__)
+    app_logger = logging.getLogger(__name__)
 
     print_banner()
     _print_runtime_summary(config)
@@ -1051,13 +1074,13 @@ def main() -> None:
     dashboard_listener: Optional[threading.Thread] = None
 
     if args.live_readiness_only:
-        logger.info(
+        app_logger.info(
             "Running live configuration readiness checks (no broker connectivity)..."
         )
         try:
             bot.validate_live_configuration(require_token_file=False)
         except Exception as e:
-            logger.error("Live configuration readiness failed: %s", e)
+            app_logger.error("Live configuration readiness failed: %s", e)
             bot._alert(
                 level="ERROR",
                 title="Live configuration readiness failed",
@@ -1068,11 +1091,11 @@ def main() -> None:
         return
 
     if config.trading_mode == "live":
-        logger.info("Running live preflight checks...")
+        app_logger.info("Running live preflight checks...")
         try:
             bot.validate_live_readiness()
         except Exception as e:
-            logger.error("Live preflight failed: %s", e)
+            app_logger.error("Live preflight failed: %s", e)
             bot._alert(
                 level="ERROR",
                 title="Live preflight failed",
@@ -1080,13 +1103,13 @@ def main() -> None:
             )
             sys.exit(1)
     elif args.preflight_only:
-        logger.info("Running paper-mode preflight...")
+        app_logger.info("Running paper-mode preflight...")
         try:
             bot.connect()
         except Exception as e:
             # Allow local/offline paper preflight when Schwab auth has not been set up yet.
             if "Token file not found" in str(e):
-                logger.warning(
+                app_logger.warning(
                     "Paper preflight market-data check skipped: %s",
                     e,
                 )
@@ -1095,7 +1118,7 @@ def main() -> None:
                     "Schwab market data not connected)."
                 )
             else:
-                logger.error("Paper preflight failed: %s", e)
+                app_logger.error("Paper preflight failed: %s", e)
                 bot._alert(
                     level="ERROR",
                     title="Paper preflight failed",
@@ -1105,7 +1128,7 @@ def main() -> None:
         try:
             bot.validate_llm_readiness()
         except Exception as e:
-            logger.error("Paper preflight failed: %s", e)
+            app_logger.error("Paper preflight failed: %s", e)
             bot._alert(
                 level="ERROR",
                 title="Paper preflight failed",
@@ -1120,7 +1143,7 @@ def main() -> None:
     once_clean_shutdown = False
     try:
         if args.once:
-            logger.info("Running single scan cycle...")
+            app_logger.info("Running single scan cycle...")
             bot._write_runtime_state(clean_shutdown=False, note="once_starting")
             bot.connect()
             bot.validate_llm_readiness()
@@ -1143,12 +1166,12 @@ def main() -> None:
                     clean_shutdown=once_clean_shutdown,
                     note="once_complete" if once_clean_shutdown else "once_failed",
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                app_logger.warning("Failed to persist once-run shutdown marker: %s", exc)
             try:
                 bot.schwab.stop_streaming()
-            except Exception:
-                pass
+            except Exception as exc:
+                app_logger.debug("Failed to stop streaming after once-run: %s", exc)
         if dashboard_listener_stop:
             dashboard_listener_stop.set()
         if dashboard_listener and dashboard_listener.is_alive():

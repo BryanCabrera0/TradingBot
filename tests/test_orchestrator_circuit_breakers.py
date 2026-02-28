@@ -85,6 +85,15 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
         self.assertGreaterEqual(pause_dt, now + timedelta(hours=23))
         self.assertLessEqual(pause_dt, now + timedelta(hours=25))
 
+    def test_entries_allowed_clears_malformed_pause_timestamp(self) -> None:
+        bot = TradingBot(_config())
+        bot.circuit_state["consecutive_loss_pause_until"] = "not-a-date"
+
+        allowed = bot._entries_allowed()
+
+        self.assertTrue(allowed)
+        self.assertNotIn("consecutive_loss_pause_until", bot.circuit_state)
+
     def test_weekly_loss_exceeds_5pct_pauses_to_monday(self) -> None:
         bot = TradingBot(_config())
         now = bot._now_eastern()
@@ -223,6 +232,29 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
             places=4,
         )
         self.assertFalse(bot._entries_allowed())
+        self.assertIsInstance(
+            datetime.fromisoformat(str(bot.circuit_state["correlation_pause_until"])),
+            datetime,
+        )
+
+    def test_correlation_crisis_recovers_from_malformed_existing_pause(self) -> None:
+        bot = TradingBot(_config())
+        bot.circuit_state["correlation_pause_until"] = "bad-pause"
+        bot.correlation_monitor = mock.Mock(
+            get_correlation_state=mock.Mock(
+                return_value={
+                    "correlation_regime": "crisis",
+                    "correlations": {"SPY_QQQ": 0.99},
+                    "flags": {"spy_vix_positive": True},
+                }
+            )
+        )
+
+        bot._update_correlation_state()
+
+        pause_value = bot.circuit_state.get("correlation_pause_until")
+        self.assertIsNotNone(pause_value)
+        self.assertIsInstance(datetime.fromisoformat(str(pause_value)), datetime)
 
     def test_correlation_stressed_reduces_entry_size_without_halt(self) -> None:
         bot = TradingBot(_config())
@@ -246,6 +278,46 @@ class OrchestratorCircuitBreakerTests(unittest.TestCase):
             float(bot.circuit_state.get("correlation_stop_widen_scalar")), 1.0, places=4
         )
         self.assertTrue(bot._entries_allowed())
+
+    def test_correlated_loss_protection_recovers_from_malformed_pause(self) -> None:
+        bot = TradingBot(_config())
+        bot.circuit_state["correlated_loss_pause_until"] = "bad-pause"
+        positions = [
+            {
+                "position_id": "p1",
+                "status": "open",
+                "symbol": "AAPL",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.8,
+            },
+            {
+                "position_id": "p2",
+                "status": "open",
+                "symbol": "MSFT",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.7,
+            },
+            {
+                "position_id": "p3",
+                "status": "open",
+                "symbol": "NVDA",
+                "strategy": "bull_put_spread",
+                "quantity": 1,
+                "entry_credit": 1.0,
+                "current_value": 1.6,
+            },
+        ]
+
+        signals = bot._apply_correlated_loss_protection(positions)
+
+        self.assertEqual(len(signals), 2)
+        pause_value = bot.circuit_state.get("correlated_loss_pause_until")
+        self.assertIsNotNone(pause_value)
+        self.assertIsInstance(datetime.fromisoformat(str(pause_value)), datetime)
 
 
 if __name__ == "__main__":
