@@ -174,6 +174,8 @@ class ExecutionAlgoEngine:
                 total_timeout_seconds=total_timeout_seconds,
             )
 
+        if not isinstance(result, dict):
+            result = {"status": "REJECTED"}
         expected = safe_float(result.get("expected_fill_price"), midpoint_price)
         realized = safe_float(result.get("fill_price", result.get("requested_price")), expected)
         self._record_slippage(

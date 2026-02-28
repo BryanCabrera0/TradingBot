@@ -728,8 +728,12 @@ class TradingBot:
 
     def _warn_if_unclean_previous_shutdown(self) -> None:
         """Log a startup warning when prior runtime did not mark clean shutdown."""
-        if not self._runtime_state_path.exists():
-            return
+        try:
+            if not self._runtime_state_path.exists():
+                return
+        except PermissionError:
+            return  # Locked by system
+
         state = load_json(self._runtime_state_path, None)
         if not isinstance(state, dict):
             logger.warning(
@@ -982,7 +986,8 @@ class TradingBot:
         for strategy in self.strategies:
             try:
                 signals.extend(strategy.check_exits(positions, self.schwab))
-            except Exception:
+            except Exception as exc:
+                logger.error("Exit check failed for strategy %s: %s", strategy.name, exc, exc_info=True)
                 continue
 
         for signal in signals:
@@ -8252,7 +8257,8 @@ class TradingBot:
             for order_id in list(outstanding):
                 try:
                     order = self.schwab.get_order(order_id)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Failed to poll order %s: %s", order_id, exc)
                     continue
                 status = str((order or {}).get("status", "")).upper()
                 if status in ENTRY_ORDER_TERMINAL or status in EXIT_ORDER_TERMINAL:
@@ -8604,12 +8610,15 @@ class TradingBot:
 
         try:
             while self._running:
-                schedule.run_pending()
-                self._maybe_eager_rescan()
-                self._maybe_log_heartbeat()
-                self._maintain_streaming()
-                self._auto_generate_dashboard_if_due()
-                self._ui_update_system_status()
+                try:
+                    schedule.run_pending()
+                    self._maybe_eager_rescan()
+                    self._maybe_log_heartbeat()
+                    self._maintain_streaming()
+                    self._auto_generate_dashboard_if_due()
+                    self._ui_update_system_status()
+                except Exception as exc:
+                    logger.error("Error in main loop iteration: %s", exc, exc_info=True)
 
                 time.sleep(0.5)
         except KeyboardInterrupt:

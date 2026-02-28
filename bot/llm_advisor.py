@@ -453,7 +453,7 @@ class LLMAdvisor:
         buckets: dict[str, dict[str, float]] = {}
         for row in closed:
             conf = _clamp_float(row.get("raw_confidence", row.get("confidence")), 0.0, 100.0)
-            if conf <= 1.0:
+            if conf < 1.0:
                 conf *= 100.0
             bucket = _confidence_bucket(conf)
             entry = buckets.setdefault(bucket, {"trades": 0.0, "hits": 0.0})
@@ -1333,7 +1333,7 @@ class LLMAdvisor:
 
         confidence_raw = data.get("confidence", 0.0)
         confidence = _clamp_float(confidence_raw, 0.0, 100.0)
-        if confidence <= 1.0:
+        if confidence < 1.0:
             confidence *= 100.0
 
         suggested_adjustment = data.get("suggested_adjustment")
@@ -1603,6 +1603,8 @@ def _is_configured_secret(value: object) -> bool:
 
 def _confidence_bucket(confidence_pct: float) -> str:
     value = max(0.0, min(100.0, float(confidence_pct)))
+    if value < 50.0:
+        return "0-50"
     if value < 60.0:
         return "50-60"
     if value < 70.0:
